@@ -145,6 +145,7 @@ Burst frames are logged to JSONL with `burstFrame: true`.
 7. Monitor `data/cron-stderr.log` for errors after deploy
 
 ### Known limitations
+- **Bassinet only** — camera doesn't see sleep in stroller, arms, car seat, etc. Total sleep from camera data is a lower bound.
 - Vision model frequently misclassifies Side vs Stomach position — treat position data as approximate
 - `state: "Unknown"` is common; apply heuristic: if baby is present and position matches previous frame, infer "Asleep"
 - Alert rules (stomach position, objects, hazards) are disabled due to false positives
@@ -156,9 +157,8 @@ Burst frames are logged to JSONL with `burstFrame: true`.
 ## Baby Profile
 
 See `references/baby-profile.md` for feeding schedule and habits. Key points:
-- Fed every 3 hours: 11 PM, 2 AM, 5 AM, 8 AM, 11 AM, 2 PM, 5 PM, 8 PM
+- Fed on demand, every 0.5–4 hours (whenever hungry)
 - Removed from bassinet for feeds (~30-60 min)
-- Usually needs to be woken up to feed
 
 ## Querying Logs
 
@@ -167,9 +167,9 @@ To answer questions about the baby:
 2. Parse JSONL — each line is a flat JSON object, no nesting
 3. Filter directly on fields (e.g. `babyPresent == true`, `state == "Asleep"`)
 4. Apply sleep heuristic: if `state == "Unknown"` and `babyPresent == true` and `sleepPosition` matches previous entry (and isn't "Unknown"), infer "Asleep"
-5. Label out-of-bassinet gaps: if `babyPresent == false` and the gap overlaps a feeding time (±45 min), label it "Feeding"
+5. Out-of-bassinet gaps (`babyPresent == false`): baby may be feeding, being changed, held, or sleeping elsewhere (stroller, arms, etc.) — camera only sees the bassinet
 
-Feeding times (daily, every 3h): 23:00, 02:00, 05:00, 08:00, 11:00, 14:00, 17:00, 20:00
+**Important limitation:** The camera only monitors the bassinet. Sleep that happens outside the bassinet (stroller, being held, car seat, etc.) is not captured. Total sleep numbers from camera data are therefore a lower bound.
 
 Common queries:
 - **Current status**: Last entry in JSONL

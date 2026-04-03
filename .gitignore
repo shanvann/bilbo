@@ -1,0 +1,40 @@
+# Auth & secrets
+.env*
+*.key
+*.pem
+
+# Data files (logs, frames, CSVs)
+*.jsonl
+*.csv
+*.log
+skills/baby-monitor/data/frames/
+skills/baby-monitor/data/references/
+skills/baby-monitor/data/alert-state.json
+skills/baby-monitor/data/alert-feedback.jsonl
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# OpenClaw internal
+.openclaw/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp files from media/screenshots
+*.jpg
+*.png
+*.gif
+
+# Skill packages
+*.skill
+
+# Dashboard venv
+skills/baby-monitor/dashboard/.venv/
+
+# Claude Code
+.claude/

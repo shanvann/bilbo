@@ -7,11 +7,14 @@ An AI-powered baby monitor agent that watches over your newborn via an IP camera
 Bilbo captures a frame from your bassinet camera every 4 minutes, analyzes it with AI vision, and builds a detailed picture of your baby's sleep and behavior:
 
 - **Tracks sleep state** — Asleep, Awake, Unknown — with position (Back, Side, Stomach) and location in bassinet
-- **Detects wake-ups** — burst-confirms with 3 frames over 2 minutes to filter vision model noise, then sends a Telegram alert
+- **Detects wake-ups** — burst-confirms with 3 frames over 2 minutes to filter vision model noise, then sends a Telegram alert with feedback buttons (✅/❌) to track accuracy
 - **Safety alerts** — immediate notification if baby is pressed against the bassinet side
 - **Saves API costs** — pixel-diff detection skips vision API calls when the bassinet is empty (~31% savings)
 - **Never goes down** — model fallback chain (gpt-4o-mini → gpt-4o → Claude Sonnet) handles API outages automatically
 - **Generates reports** — daily/weekly activity reports combining camera data with manual tracking (feeds, pumps, diapers, weight)
+- **Human-in-the-loop** — dashboard lets you correct vision model mistakes (edit state/position per frame)
+
+> **Note:** The camera only monitors the bassinet. Sleep that happens elsewhere (stroller, being held, car seat) is not captured — sleep totals from camera data are a lower bound.
 
 ## Hardware Setup
 

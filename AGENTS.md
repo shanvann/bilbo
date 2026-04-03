@@ -45,6 +45,16 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 - When you make a mistake → document it so future-you doesn't repeat it
 - **Text > Brain** 📝
 
+## Git Workflow
+
+This workspace is checked into GitHub (`git@github.com:shanvann/bilbo.git`).
+
+**After making changes:**
+1. Ask the user: "Ready to push to GitHub?"
+2. If yes: update `README.md` to reflect the latest state, then commit and push
+3. Commit messages should be concise and describe what changed
+4. Never commit secrets, data files, or frames — `.gitignore` handles this
+
 ## Red Lines
 
 - Don't exfiltrate private data. Ever.

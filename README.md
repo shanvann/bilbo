@@ -1,71 +1,76 @@
-# Baby Monitor
+# Bilbo — OpenClaw Workspace
 
-Automated baby bassinet monitoring using an IP camera and Claude's vision AI.
+Personal AI assistant workspace running on [OpenClaw](https://github.com/openclaw/openclaw). Bilbo is a no-nonsense assistant that manages baby monitoring, activity reporting, and household tasks via Telegram.
 
-## How It Works
+## Skills
 
-A cron job runs every 5 minutes and performs the following:
+### Baby Monitor (`skills/baby-monitor/`)
 
-1. **Captures a frame** from an RTSP IP camera using ffmpeg (`scripts/capture.sh`)
-2. **Analyzes the frame** with Claude's vision API using a structured prompt (`references/prompt.md`)
-3. **Logs the results** as a JSON line to `data/baby-monitor-log.jsonl`
-4. **Sends a Telegram alert** if any safety concerns are detected (e.g., stomach sleeping, loose items near baby)
+Automated bassinet monitoring using an IP camera + AI vision.
 
+**Architecture:**
 ```
-Cron (every 5 min) → capture frame (ffmpeg) → Claude vision analysis → log + alerts
+macOS launchd (every 4 min) → monitor.py → pixel-diff gate → vision API → JSONL log
 ```
 
-## What It Monitors
+**Features:**
+- Frame capture from RTSP camera via ffmpeg
+- **Pixel-diff empty detection** — skips API calls when bassinet is empty (~31% savings)
+- **Vision analysis** via model fallback chain: gpt-4o-mini → gpt-4o → claude-sonnet-4-6
+- **Wake alerts** — burst confirmation (3 frames over 2 min) with Telegram notification + feedback buttons
+- **Edge safety alerts** — immediate alert if baby is pressed against bassinet side
+- **Backtest mode** — replay historical frames to test detection changes before deploying
+- Sleep state tracking: Asleep, Awake, Unknown with position and posture
+- All data logged to `data/sleep-log.jsonl`
 
-| Category | Attributes |
+**Dashboard** (`skills/baby-monitor/dashboard/`):
+- Flask + Chart.js web dashboard at `http://localhost:5555`
+- Live status bar with latest camera frame
+- 24h timeline with date navigation (colored blocks for sleep/awake/absent)
+- Click-to-drill-down block detail with editable state/position (human-in-the-loop)
+- Sleep trends chart (total sleep + longest stretch + longest in-bassinet)
+- Recent events table
+- Dark theme, mobile-responsive, auto-refresh
+
+### Baby Report (`skills/baby-report/`)
+
+Generates activity reports from two data sources:
+- **Sleep**: camera monitor JSONL (ground truth), CSV fallback for pre-camera days
+- **Feeds, pumps, diapers, weight**: activity CSV from parent tracking app
+
+```bash
+python3 scripts/report.py --range 7d          # weekly report
+python3 scripts/report.py --range 24h         # last 24 hours
+python3 scripts/report.py --from 2026-03-25 --to 2026-03-31
+python3 scripts/report.py --section sleep     # single section
+python3 scripts/report.py --format json       # structured output
+```
+
+### Classifieds Poster (`skills/classifieds-poster/`)
+
+Generates and posts classified ad listings on Park Slope Parents.
+
+## Workspace Files
+
+| File | Purpose |
 |---|---|
-| **Sleep Safety** | Baby present, sleep position (back/side/stomach), objects in bassinet, swaddle presence |
-| **Comfort** | Head covering, lighting level |
-| **Baby State** | Awake vs asleep, body posture, pacifier engaged |
-| **Environment** | Bassinet condition, external hazards |
+| `AGENTS.md` | Agent behavior rules and conventions |
+| `SOUL.md` | Personality and tone |
+| `USER.md` | User profile and preferences |
+| `IDENTITY.md` | Name, emoji, avatar |
+| `HEARTBEAT.md` | Periodic check-in tasks |
+| `TOOLS.md` | Local environment notes |
+| `memory/` | Daily memory files for continuity |
 
-Each analysis returns a structured JSON object following a strict schema (v1.1). The vision model only reports high-confidence observations — anything uncertain is marked as `"Unknown"`.
+## Other Agents
 
-## Project Structure
+- **Neelix** — Separate Telegram bot for household food inventory tracking (workspace at `~/.openclaw/workspace-neelix/`)
 
-```
-skills/baby-monitor/
-├── SKILL.md              # Skill metadata and description
-├── references/
-│   └── prompt.md         # Vision analysis prompt and JSON schema
-├── scripts/
-│   ├── capture.sh        # Captures a single JPEG frame from the RTSP stream
-│   ├── analyze.py        # Utility wrapper for manual frame capture
-│   └── test.sh           # Quick test script
-└── data/
-    ├── frames/           # Captured JPEG frames (auto-cleaned at 1GB)
-    └── baby-monitor-log.jsonl  # Append-only analysis log
-```
+## Data (not in repo)
 
-## Configuration
-
-Set the following in `.env.baby-monitor` at the workspace root:
-
-- `RTSP_STREAM_URL` — Full RTSP connection string to your IP camera
-
-## Querying the Log
-
-The log file (`data/baby-monitor-log.jsonl`) contains one JSON object per line:
-
-```json
-{"timestamp": "2026-03-28T22:15:00Z", "frame": "/path/to/frame.jpg", "analysis": { ... }}
-```
-
-Common queries:
-
-- **Current status** — Read the last log entry
-- **Sleep history** — Filter entries where `isBabyPresent = "Yes"` and check `Awake vs asleep`
-- **Safety events** — Filter for `Sleep Position = "Stomach"` or hazardous objects detected
-
-## Safety Alerts
-
-Telegram alerts are triggered when the analysis detects:
-
-- Baby sleeping on stomach
-- Loose items or cords in the bassinet
-- Other hazardous conditions
+All data files are gitignored:
+- `.env*` — API keys and credentials
+- `*.jsonl`, `*.csv` — monitor logs, activity data
+- `data/frames/` — captured camera frames (~700MB+)
+- `*.log` — system and cron logs
+- `.venv/` — Python virtual environments

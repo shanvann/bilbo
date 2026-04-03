@@ -3,14 +3,13 @@
 *.key
 *.pem
 
-# Data files (logs, frames, CSVs)
-*.jsonl
-*.csv
-*.log
-skills/baby-monitor/data/frames/
-skills/baby-monitor/data/references/
-skills/baby-monitor/data/alert-state.json
-skills/baby-monitor/data/alert-feedback.jsonl
+# Personal/private directories
+context/
+memory/
+skills/classifieds-poster/
+
+# Baby monitor data (frames, logs, CSVs)
+skills/baby-monitor/data/
 
 # Python
 __pycache__/

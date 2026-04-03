@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Baby Monitor Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <!-- Top Bar: Live Status -->
+  <header id="status-bar">
+    <div class="status-left">
+      <div id="status-icon" class="status-icon"></div>
+      <div class="status-text">
+        <div id="status-display" class="status-main">Loading...</div>
+        <div id="status-duration" class="status-sub"></div>
+      </div>
+    </div>
+    <div class="status-center">
+      <div id="status-alerts" class="status-alerts"></div>
+    </div>
+    <div class="status-right">
+      <div id="frame-container" class="frame-thumb-container">
+        <img id="frame-thumb" class="frame-thumb" alt="Latest frame" style="display:none">
+      </div>
+      <div class="status-meta">
+        <div id="status-time" class="meta-line"></div>
+        <div id="status-health" class="meta-line"></div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Full-size frame modal -->
+  <div id="frame-modal" class="modal" style="display:none">
+    <div class="modal-backdrop"></div>
+    <img id="frame-full" class="modal-img" alt="Full frame">
+  </div>
+
+  <!-- Main Content -->
+  <main>
+    <!-- Timeline -->
+    <section class="card">
+      <h2>Timeline
+        <button id="tl-prev" class="tl-nav-btn">◀</button>
+        <input type="date" id="tl-date" class="tl-date-picker">
+        <button id="tl-next" class="tl-nav-btn">▶</button>
+        <button id="tl-today" class="tl-nav-btn tl-today-btn">Today</button>
+      </h2>
+      <div class="timeline-legend">
+        <span class="legend-item"><span class="legend-dot asleep"></span> In bassinet</span>
+        <span class="legend-item"><span class="legend-dot awake"></span> Awake</span>
+        <span class="legend-item"><span class="legend-dot absent"></span> Out of bassinet</span>
+      </div>
+      <div id="timeline-container" class="timeline-container">
+        <div id="timeline-labels" class="timeline-labels"></div>
+        <div id="timeline-bar" class="timeline-bar"></div>
+
+      </div>
+    </section>
+
+    <!-- Stats Cards -->
+    <section class="stats-row">
+      <div class="stat-card">
+        <div class="stat-value" id="stat-sleep-total">--</div>
+        <div class="stat-label">Total Sleep Today</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="stat-longest">--</div>
+        <div class="stat-label">Longest Stretch</div>
+      </div>
+
+    </section>
+
+    <!-- Block Detail Panel -->
+    <section id="block-detail" class="card" style="display:none">
+      <h2>Block Detail <button id="block-detail-close" class="tl-nav-btn" style="float:right">✕ Close</button></h2>
+      <div id="block-detail-summary" class="block-summary"></div>
+      <div class="table-wrap">
+        <table id="block-detail-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>State</th>
+              <th>Position</th>
+              <th>Frame</th>
+            </tr>
+          </thead>
+          <tbody id="block-detail-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Sleep Trends Chart -->
+    <section class="card">
+      <h2>Sleep Trends <span class="subtitle">(all available data)</span></h2>
+      <p class="section-desc">Total daily sleep (bars) with longest uninterrupted stretches overlaid. Sleep stretch = in bassinet, Asleep/Unknown, no Awake readings. Bassinet stretch = in bassinet regardless of state.</p>
+      <div class="chart-container">
+        <canvas id="sleep-chart"></canvas>
+      </div>
+    </section>
+
+    <!-- Recent Events Table -->
+    <section class="card">
+      <h2>Recent Events</h2>
+      <div class="table-wrap">
+        <table id="events-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Event</th>
+              <th>Duration</th>
+            </tr>
+          </thead>
+          <tbody id="events-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>Baby Monitor Dashboard</span>
+    <span id="footer-refresh"></span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

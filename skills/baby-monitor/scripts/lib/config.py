@@ -29,11 +29,12 @@ OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 # ---------------------------------------------------------------------------
-# Model fallback chain: primary -> fallback1 -> fallback2
+# Cloud API model chain (backup to birdeye — only called on ~2% of frames)
+# Use the best model first since volume is low and accuracy matters.
 # ---------------------------------------------------------------------------
 MODEL_CHAIN = [
-    {"provider": "openai", "model": "gpt-4o-mini", "timeout": 20},
-    {"provider": "openai", "model": "gpt-4o", "timeout": 30}]
+    {"provider": "openai", "model": "gpt-4o", "timeout": 30},
+]
 
 API_RETRIES = 2  # retries per model (before falling through to next)
 CAPTURE_TIMEOUT = 30

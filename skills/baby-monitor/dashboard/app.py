@@ -162,8 +162,7 @@ def api_timeline():
                 "timestamp": e["timestamp"],
                 "babyPresent": e.get("babyPresent"),
                 "state": e.get("state"),
-                "position": e.get("sleepPosition"),
-                "posture": e.get("bodyPosture"),
+                "eyeState": e.get("eyeState"),
                 "frame": e.get("frame"),
                 "alerts": e.get("alerts", []),
             })
@@ -396,6 +395,7 @@ def api_update_entry():
     ts = data.get("timestamp")
     new_state = data.get("state")
     new_position = data.get("position")
+    new_eye_state = data.get("eyeState")
 
     if not ts:
         return jsonify({"error": "timestamp required"}), 400
@@ -414,6 +414,9 @@ def api_update_entry():
             if new_position:
                 entry["sleepPosition"] = new_position
                 entry["positionEdited"] = True
+            if new_eye_state:
+                entry["eyeState"] = new_eye_state
+                entry["eyeStateEdited"] = True
             updated = True
         new_lines.append(json.dumps(entry))
 
@@ -430,6 +433,8 @@ def api_update_entry():
             "frame": original_entry.get("frame"),
             "originalState": original_entry.get("state"),
             "correctedState": new_state,
+            "originalEyeState": original_entry.get("eyeState"),
+            "correctedEyeState": new_eye_state,
             "originalPosition": original_entry.get("sleepPosition"),
             "correctedPosition": new_position,
             "detectionMethod": original_entry.get("detectionMethod"),

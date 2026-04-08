@@ -634,6 +634,98 @@ def api_retrain_abort():
     return jsonify({"ok": True, "status": "aborted"})
 
 
+@app.route("/api/monitor-stats")
+def api_monitor_stats():
+    """Model performance stats for the dashboard, computed from sleep-log.jsonl.
+
+    Query params:
+        hours: lookback window (default 24)
+    """
+    from collections import Counter
+
+    hours = int(request.args.get("hours", 24))
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    entries = []
+    for e in load_jsonl():
+        ts = parse_ts(e.get("timestamp"))
+        if ts and ts >= cutoff:
+            e["_ts"] = ts
+            entries.append(e)
+
+    if not entries:
+        return jsonify({"total": 0})
+
+    total = len(entries)
+    methods = Counter(e.get("detectionMethod", "unknown") for e in entries)
+
+    birdeye = [e for e in entries if e.get("detectionMethod") == "birdeye"]
+    cloud = [e for e in entries if e.get("detectionMethod") in ("vision-api", "openai-vision")]
+    pixel_diff = [e for e in entries if e.get("detectionMethod") == "pixel-diff"]
+
+    # Birdeye confidence + timing stats
+    presence_confs = [e["presenceConfidence"] for e in birdeye if e.get("presenceConfidence") is not None]
+    eye_confs = [e["eyeConfidence"] for e in birdeye if e.get("eyeConfidence") is not None]
+    timings = [e["birdeyeTimings"]["total"] for e in birdeye
+               if isinstance(e.get("birdeyeTimings"), dict) and "total" in e["birdeyeTimings"]]
+
+    def stats(vals):
+        if not vals:
+            return None
+        s = sorted(vals)
+        return {
+            "avg": round(sum(s) / len(s), 3),
+            "min": round(s[0], 3),
+            "max": round(s[-1], 3),
+            "p50": round(s[len(s) // 2], 3),
+        }
+
+    # Birdeye state distribution
+    birdeye_states = Counter()
+    for e in birdeye:
+        if not e.get("babyPresent", False):
+            birdeye_states["not_present"] += 1
+        else:
+            birdeye_states[e.get("state", "Unknown")] += 1
+
+    # Cloud models
+    cloud_models = Counter(e.get("modelUsed", "unknown") for e in cloud)
+
+    # Cost
+    api_saved = len(birdeye) + len(pixel_diff)
+
+    # Gaps > 10 min
+    gap_count = 0
+    for i in range(1, len(entries)):
+        if (entries[i]["_ts"] - entries[i - 1]["_ts"]).total_seconds() > 600:
+            gap_count += 1
+
+    return jsonify({
+        "hours": hours,
+        "total": total,
+        "methods": {
+            "birdeye": len(birdeye),
+            "cloud_api": len(cloud),
+            "pixel_diff": len(pixel_diff),
+        },
+        "birdeyeRate": round(len(birdeye) / total, 3) if total else 0,
+        "birdeyeStates": dict(birdeye_states),
+        "confidence": {
+            "presence": stats(presence_confs),
+            "eye": stats(eye_confs),
+        },
+        "timing": stats(timings),
+        "cloudModels": dict(cloud_models),
+        "cost": {
+            "apiCalls": len(cloud),
+            "apiAvoided": api_saved,
+            "estCost": round(len(cloud) * 0.01, 2),
+            "estSaved": round(api_saved * 0.01, 2),
+        },
+        "gaps": gap_count,
+    })
+
+
 @app.route("/api/frame")
 def api_frame():
     frame_path = request.args.get("path", "")

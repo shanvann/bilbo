@@ -32,7 +32,7 @@ def main():
     parser.add_argument('--range', help='Time range: e.g. 24h, 7d, 2w')
     parser.add_argument('--from', dest='start', help='Start date (YYYY-MM-DD)')
     parser.add_argument('--to', dest='end', help='End date (YYYY-MM-DD)')
-    parser.add_argument('--section', help='Only show specific section: sleep, feeding, pumping, diapers, weight')
+    parser.add_argument('--section', help='Only show specific section: sleep, feeding, pumping, diapers, weight, monitor')
     parser.add_argument('--format', default='text', choices=['text', 'json'], help='Output format')
     parser.add_argument('--csv', help='Path to activity CSV (overrides default)')
     args = parser.parse_args()

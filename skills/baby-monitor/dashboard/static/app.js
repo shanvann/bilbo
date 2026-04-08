@@ -61,12 +61,14 @@ async function loadStatus() {
       alertsEl.appendChild(badge);
     });
 
-    // Frame thumbnail
+    // Live frame (hero image)
+    const thumb = document.getElementById('frame-thumb');
+    const placeholder = document.getElementById('live-frame-placeholder');
     if (data.frame) {
-      const thumb = document.getElementById('frame-thumb');
       thumb.src = frameUrl(data.frame);
       thumb.style.display = 'block';
       thumb.onclick = () => showFrameModal(data.frame);
+      if (placeholder) placeholder.style.display = 'none';
     }
 
     // Meta

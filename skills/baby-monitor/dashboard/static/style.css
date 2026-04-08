@@ -90,16 +90,28 @@ body {
   gap: 12px;
 }
 
-.frame-thumb-container {
+/* Live frame hero */
+.live-frame-card {
+  padding: 0 !important;
+  overflow: hidden;
+}
+.live-frame-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #0d1117;
+  min-height: 200px;
+}
+.live-frame-img {
+  width: 100%;
+  max-height: 480px;
+  object-fit: contain;
   cursor: pointer;
 }
-
-.frame-thumb {
-  width: 80px;
-  height: 60px;
-  object-fit: cover;
-  border-radius: 6px;
-  border: 1px solid var(--border);
+.live-frame-placeholder {
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  padding: 40px;
 }
 
 .meta-line {

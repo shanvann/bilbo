@@ -71,6 +71,12 @@ async function loadStatus() {
       if (placeholder) placeholder.style.display = 'none';
     }
 
+    // Store capture time for countdown timer
+    if (data.secondsSinceCapture != null) {
+      lastCaptureAgoSec = data.secondsSinceCapture;
+      lastCaptureCheckedAt = Date.now();
+    }
+
     // Meta
     if (data.timestamp) {
       document.getElementById('status-time').textContent =
@@ -650,6 +656,34 @@ document.getElementById('footer-abort').addEventListener('click', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// Next frame countdown timer (ticks every second)
+// ---------------------------------------------------------------------------
+let lastCaptureAgoSec = null;  // seconds since last capture (from API)
+let lastCaptureCheckedAt = null; // Date.now() when we got that value
+const CAPTURE_INTERVAL_SEC = 60;
+const REFRESH_INTERVAL_SEC = 60;
+
+function updateCountdown() {
+  const el = document.getElementById('live-frame-countdown');
+  if (!el || lastCaptureAgoSec == null) return;
+
+  // How many seconds ago was the last capture, right now?
+  const elapsed = lastCaptureAgoSec + Math.floor((Date.now() - lastCaptureCheckedAt) / 1000);
+  // Next capture expected at CAPTURE_INTERVAL_SEC after last capture
+  const untilCapture = Math.max(0, CAPTURE_INTERVAL_SEC - elapsed);
+  // Next page refresh
+  const untilRefresh = untilCapture + 3; // ~3s for capture + processing
+
+  if (untilCapture <= 0) {
+    el.textContent = 'New frame any moment...';
+  } else {
+    el.textContent = 'Next frame in ~' + untilRefresh + 's';
+  }
+}
+
+setInterval(updateCountdown, 1000);
+
+// ---------------------------------------------------------------------------
 // Init & auto-refresh
 // ---------------------------------------------------------------------------
 async function loadAll() {
@@ -667,4 +701,4 @@ async function loadAll() {
 
 initTimelineNav();
 loadAll();
-setInterval(loadAll, 60000);
+setInterval(loadAll, REFRESH_INTERVAL_SEC * 1000);

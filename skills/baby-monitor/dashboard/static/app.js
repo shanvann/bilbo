@@ -308,8 +308,10 @@ function renderViewer() {
   document.getElementById('viewer-counter').textContent =
     (viewerIndex + 1) + ' / ' + viewerEntries.length;
 
-  // Time
-  document.getElementById('viewer-time').textContent = formatTimeET(e.timestamp);
+  // Time + detection method
+  const methodMap = { birdeye: 'birdeye', 'vision-api': 'cloud', 'openai-vision': 'cloud', 'pixel-diff': 'pixel-diff' };
+  const method = methodMap[e.detectionMethod] || e.detectionMethod || '?';
+  document.getElementById('viewer-time').textContent = formatTimeET(e.timestamp) + '  ·  ' + method;
 
   // Model prediction label
   const eyeState = e.eyeState || (e.state === 'Awake' ? 'eyes_open' : e.state === 'Asleep' ? 'eyes_closed' : 'face_not_visible');

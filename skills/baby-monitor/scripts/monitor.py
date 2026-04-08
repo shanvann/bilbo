@@ -52,7 +52,10 @@ from lib.alerts import (
     should_burst,
 )
 from lib.storage import append_entry, get_last_entry
-from lib.cli import cmd_audit, cmd_backtest, cmd_backtest_birdeye, cmd_last, cmd_retrain, cmd_status, parse_args
+from lib.cli import (
+    cmd_audit, cmd_backtest, cmd_backtest_birdeye, cmd_last, cmd_list_models,
+    cmd_retrain, cmd_rollback, cmd_status, parse_args,
+)
 
 
 def _output(status: str, **kwargs):
@@ -122,6 +125,12 @@ def main():
 
     if args.retrain:
         return cmd_retrain()
+
+    if args.list_models:
+        return cmd_list_models()
+
+    if args.rollback:
+        return cmd_rollback(args.rollback)
 
     # --- Load config ---
 

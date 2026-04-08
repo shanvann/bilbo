@@ -621,7 +621,67 @@ def main():
             class_weights=[2.0, 1.0, 1.0],  # penalize missing eyes_open
         )
 
-    log.info("Training complete. Models saved to %s/", output_dir)
+    # --- Version the models ---
+    version_id = datetime.now().strftime("v_%Y%m%d_%H%M%S")
+    version_dir = output_dir / version_id
+    version_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy trained models into versioned directory
+    import shutil
+    for pt_file in output_dir.glob("*.pt"):
+        shutil.copy2(pt_file, version_dir / pt_file.name)
+
+    # Update "latest" symlink
+    latest_link = output_dir / "latest"
+    if latest_link.is_symlink() or latest_link.exists():
+        latest_link.unlink()
+    latest_link.symlink_to(version_id)
+    log.info("Model version: %s (symlinked as latest)", version_id)
+
+    # Prune old versions (keep last 20)
+    MAX_VERSIONS = 20
+    version_dirs = sorted(
+        [d for d in output_dir.iterdir() if d.is_dir() and d.name.startswith("v_")],
+        key=lambda d: d.name,
+    )
+    if len(version_dirs) > MAX_VERSIONS:
+        for old in version_dirs[:-MAX_VERSIONS]:
+            shutil.rmtree(old)
+            log.info("Pruned old model version: %s", old.name)
+
+    # Count label sources
+    source_counts = Counter(e.get("_label_source", "cloud-api") for e in entries)
+
+    # Log training run to training-log.jsonl
+    training_log = output_dir / "training-log.jsonl"
+    log_entry = {
+        "version": version_id,
+        "timestamp": datetime.now().isoformat(),
+        "entries_total": len(entries),
+        "label_sources": dict(source_counts),
+        "split": {
+            "train": len(train_entries),
+            "val": len(val_entries),
+            "test": len(test_entries),
+        },
+        "models_trained": args.model,
+        "config": {
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "lr": args.lr,
+            "patience": args.patience,
+            "face_crops": args.face_crops is not None,
+            "corrections": args.corrections is not None,
+            "audit": args.audit is not None,
+        },
+    }
+    with open(training_log, "a") as f:
+        f.write(json.dumps(log_entry) + "\n")
+
+    log.info("Training complete. Version %s saved to %s/", version_id, output_dir)
+    print(f"\nModel version: {version_id}")
+    print(f"Training log:  {training_log}")
+    print(f"Versions kept: {len([d for d in output_dir.iterdir() if d.is_dir() and d.name.startswith('v_')])}/{MAX_VERSIONS}")
 
 
 if __name__ == "__main__":

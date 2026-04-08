@@ -81,9 +81,11 @@ BASSINET_CROP = {"x": 0.15, "y": 0.10, "w": 0.70, "h": 0.80}
 HEAD_CROP_SIZE = 0.30
 # Default head position (center-upper area of bassinet) when no state file exists
 DEFAULT_HEAD_POS = {"x": 0.50, "y": 0.35}
-# Classifier model paths
-PRESENCE_MODEL = MODELS_DIR / "presence_classifier.pt"
-EYE_STATE_MODEL = MODELS_DIR / "eye_state_classifier.pt"
+# Classifier model paths — load from "latest" symlink if it exists, else top-level
+_MODELS_LATEST = MODELS_DIR / "latest"
+_MODEL_BASE = _MODELS_LATEST if _MODELS_LATEST.exists() else MODELS_DIR
+PRESENCE_MODEL = _MODEL_BASE / "presence_classifier.pt"
+EYE_STATE_MODEL = _MODEL_BASE / "eye_state_classifier.pt"
 
 # ---------------------------------------------------------------------------
 # Legacy alert rules (currently disabled)

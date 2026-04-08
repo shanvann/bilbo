@@ -726,15 +726,86 @@ def cmd_retrain():
 
     result = subprocess.run(cmd, cwd=str(SKILL_DIR))
 
-    if result.returncode == 0:
-        print()
-        print("Retrain complete. Reload launchd to use new models:")
-        print("  launchctl unload ~/Library/LaunchAgents/com.openclaw.baby-monitor.plist")
-        print("  launchctl load ~/Library/LaunchAgents/com.openclaw.baby-monitor.plist")
-    else:
+    if result.returncode != 0:
         print(f"Retrain failed (exit code {result.returncode})", file=sys.stderr)
+        return result.returncode
 
-    return result.returncode
+    # --- Post-retrain: re-infer corrected frames with new model ---
+    print()
+    print("Re-inferring corrected frames with new model...")
+
+    # Get the new model version
+    training_log = MODELS_DIR / "training-log.jsonl"
+    model_version = None
+    if training_log.exists():
+        lines = training_log.read_text().strip().splitlines()
+        if lines:
+            model_version = json.loads(lines[-1]).get("version")
+
+    # Force reload of classifiers (clear cached singleton)
+    from .local_pipeline import try_local_analysis
+    import lib.local_pipeline as _lp
+    _lp._presence_clf = None
+    _lp._eye_state_clf = None
+    _lp._available = None
+
+    # Find corrected frames that need re-inference
+    EYE_TO_STATE = {"eyes_open": "Awake", "eyes_closed": "Asleep",
+                    "face_not_visible": "Unknown", "not_in_bassinet": "not_present"}
+
+    all_lines = JSONL_FILE.read_text().strip().splitlines()
+    entries = [json.loads(l) for l in all_lines]
+    updated = 0
+    agreed_after = 0
+    total_reinfer = 0
+
+    for entry in entries:
+        if not entry.get("eyeStateEdited"):
+            continue
+        frame = entry.get("frame", "")
+        if not frame or not Path(frame).exists():
+            continue
+
+        total_reinfer += 1
+        birdeye_result = try_local_analysis(Path(frame))
+
+        if birdeye_result is not None:
+            birdeye_state = birdeye_result.get("state", "Unknown")
+            if not birdeye_result.get("babyPresent", False):
+                birdeye_state = "not_present"
+
+            # Ground truth from correction
+            gt_eye = entry.get("eyeState", "")
+            gt_state = EYE_TO_STATE.get(gt_eye, "Unknown").lower()
+
+            agreed = birdeye_state.lower() == gt_state
+            if agreed:
+                agreed_after += 1
+
+            # Update entry with new shadow result + model version
+            entry["shadow"] = {
+                "birdeyeState": birdeye_state,
+                "prodState": gt_state,
+                "agreed": agreed,
+                "presenceConfidence": birdeye_result.get("presenceConfidence"),
+                "eyeConfidence": birdeye_result.get("eyeConfidence"),
+                "eyeState": birdeye_result.get("eyeState"),
+                "birdeyeTimings": birdeye_result.get("birdeyeTimings"),
+            }
+            entry["shadowModelVersion"] = model_version
+            updated += 1
+
+    # Write back
+    if updated > 0:
+        JSONL_FILE.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+
+    agreement_pct = agreed_after * 100 // total_reinfer if total_reinfer > 0 else 0
+    print(f"Re-inferred {updated}/{total_reinfer} corrected frames")
+    print(f"Agreement with ground truth: {agreed_after}/{total_reinfer} ({agreement_pct}%)")
+    print()
+    print(f"Retrain complete (model {model_version}).")
+
+    return 0
 
 
 def cmd_status():

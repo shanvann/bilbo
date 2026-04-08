@@ -455,6 +455,14 @@ footer {
   font-size: 0.85rem;
   color: var(--text-dim);
 }
+.block-pending-badge {
+  font-size: 0.8rem;
+  color: var(--accent-orange);
+  background: rgba(255, 152, 0, 0.15);
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-left: 8px;
+}
 .block-summary {
   margin-bottom: 12px;
   font-size: 0.95rem;

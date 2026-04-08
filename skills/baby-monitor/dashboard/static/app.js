@@ -270,11 +270,22 @@ function showBlockDetail(seg, durStr) {
   const panel = document.getElementById('block-detail');
   const summary = document.getElementById('block-detail-summary');
 
+  // Count pending retrains in this block
+  const lastTrained = trainingData && trainingData.lastTrained ? new Date(trainingData.lastTrained) : null;
+  const pendingInBlock = seg.entries.filter(e => {
+    const cat = e.eyeStateCorrectedAt || e._correctedAt;
+    if (!cat) return false;
+    return !lastTrained || new Date(cat) > lastTrained;
+  }).length;
+  const pendingBadge = pendingInBlock > 0
+    ? ' <span class="block-pending-badge">' + pendingInBlock + ' pending retrain</span>'
+    : '';
+
   summary.innerHTML =
     '<strong>' + seg.label + '</strong> &mdash; ' +
     formatTimeET(seg.start.toISOString()) + ' → ' +
     formatTimeET(seg.end.toISOString()) +
-    ' (' + durStr + ', ' + seg.entries.length + ' frames)';
+    ' (' + durStr + ', ' + seg.entries.length + ' frames)' + pendingBadge;
 
   // Block nav buttons
   document.getElementById('block-prev').disabled = currentBlockIndex <= 0;
@@ -308,10 +319,14 @@ function renderViewer() {
   document.getElementById('viewer-counter').textContent =
     (viewerIndex + 1) + ' / ' + viewerEntries.length;
 
-  // Time + detection method
+  // Time + detection method + model version
   const methodMap = { birdeye: 'birdeye', 'vision-api': 'cloud', 'openai-vision': 'cloud', 'pixel-diff': 'pixel-diff' };
   const method = methodMap[e.detectionMethod] || e.detectionMethod || '?';
-  document.getElementById('viewer-time').textContent = formatTimeET(e.timestamp) + '  ·  ' + method;
+  let timeText = formatTimeET(e.timestamp) + '  ·  ' + method;
+  if (e.shadowModelVersion) {
+    timeText += '  ·  ' + e.shadowModelVersion;
+  }
+  document.getElementById('viewer-time').textContent = timeText;
 
   // Model prediction label
   const eyeState = e.eyeState || (!e.babyPresent ? 'not_in_bassinet' : e.state === 'Awake' ? 'eyes_open' : e.state === 'Asleep' ? 'eyes_closed' : 'face_not_visible');

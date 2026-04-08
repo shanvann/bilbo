@@ -394,9 +394,10 @@ def api_events():
         if ts1 and ts2:
             events[i]["duration"] = humanize_duration(ts2 - ts1)
 
-    # Return last 20, most recent first
+    # Return N most recent, most recent first
+    count = int(request.args.get("count", 20))
     events.reverse()
-    return jsonify({"events": events[:20]})
+    return jsonify({"events": events[:count]})
 
 
 @app.route("/api/update-entry", methods=["POST"])

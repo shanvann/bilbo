@@ -4,6 +4,8 @@
 import csv
 import json
 import os
+import subprocess
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -449,46 +451,160 @@ def api_update_entry():
     return jsonify({"ok": True})
 
 
+# ---------------------------------------------------------------------------
+# Training manager — tracks running process, supports start/abort/status
+# ---------------------------------------------------------------------------
+MODELS_DIR = DATA_DIR.parent / "pipeline" / "models"
+TRAINING_LOG = MODELS_DIR / "training-log.jsonl"
+TRAINING_STATE_FILE = DATA_DIR / "training-state.json"
+
+_train_process = None  # subprocess.Popen when running
+_train_lock = threading.Lock()
+
+
+def _read_training_state() -> dict:
+    if TRAINING_STATE_FILE.exists():
+        try:
+            return json.loads(TRAINING_STATE_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _write_training_state(state: dict):
+    TRAINING_STATE_FILE.write_text(json.dumps(state, indent=2))
+
+
+def _get_last_training_log() -> dict | None:
+    if not TRAINING_LOG.exists():
+        return None
+    lines = TRAINING_LOG.read_text().strip().splitlines()
+    if not lines:
+        return None
+    return json.loads(lines[-1])
+
+
 @app.route("/api/training-status")
 def api_training_status():
-    """Return latest model version and training timestamp."""
-    models_dir = DATA_DIR.parent / "pipeline" / "models"
-    training_log = models_dir / "training-log.jsonl"
+    """Return current training run status + last completed training details."""
+    global _train_process
 
-    if not training_log.exists():
-        return jsonify({"lastTrained": None, "version": None})
+    state = _read_training_state()
+    last_log = _get_last_training_log()
 
-    # Read last line
-    lines = training_log.read_text().strip().splitlines()
-    if not lines:
-        return jsonify({"lastTrained": None, "version": None})
+    # Check if a tracked process is still running
+    running = False
+    with _train_lock:
+        if _train_process is not None:
+            if _train_process.poll() is None:
+                running = True
+            else:
+                # Process finished — update state
+                exit_code = _train_process.returncode
+                state["status"] = "completed" if exit_code == 0 else "failed"
+                state["finishedAt"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                state["exitCode"] = exit_code
+                _write_training_state(state)
+                _train_process = None
 
-    last = json.loads(lines[-1])
-    return jsonify({
-        "lastTrained": last.get("timestamp"),
-        "version": last.get("version"),
-    })
+    result = {
+        # Current run
+        "running": running,
+        "runStatus": state.get("status", "idle"),
+        "trigger": state.get("trigger"),
+        "startedAt": state.get("startedAt"),
+        "finishedAt": state.get("finishedAt"),
+        "exitCode": state.get("exitCode"),
+        # Last completed training
+        "lastTrained": last_log.get("timestamp") if last_log else None,
+        "version": last_log.get("version") if last_log else None,
+        "lastMetrics": last_log.get("metrics") if last_log else None,
+        "lastLabelSources": last_log.get("label_sources") if last_log else None,
+        "lastEntriesTotal": last_log.get("entries_total") if last_log else None,
+    }
+    return jsonify(result)
 
 
 @app.route("/api/retrain", methods=["POST"])
 def api_retrain():
-    """Trigger model retraining in the background."""
-    import subprocess
-    import threading
+    """Start model retraining in the background.
+
+    Body (optional): {"trigger": "dashboard" | "manual" | "scheduled"}
+    """
+    global _train_process
+
+    with _train_lock:
+        if _train_process is not None and _train_process.poll() is None:
+            return jsonify({"ok": False, "error": "Training already in progress"}), 409
+
+    data = request.get_json(silent=True) or {}
+    trigger = data.get("trigger", "dashboard")
 
     monitor_py = str(DATA_DIR.parent / "scripts" / "monitor.py")
     python = str(DATA_DIR.parent / "venv" / "bin" / "python3")
 
+    # Record start state
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    state = {
+        "status": "running",
+        "trigger": trigger,
+        "startedAt": now,
+        "finishedAt": None,
+        "exitCode": None,
+    }
+    _write_training_state(state)
+
     def run_retrain():
-        subprocess.run(
+        global _train_process
+        proc = subprocess.Popen(
             [python, monitor_py, "--retrain"],
             cwd=str(DATA_DIR.parent),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
+        with _train_lock:
+            _train_process = proc
+        proc.wait()
+        # Update state on completion
+        finished = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        s = _read_training_state()
+        s["status"] = "completed" if proc.returncode == 0 else "failed"
+        s["finishedAt"] = finished
+        s["exitCode"] = proc.returncode
+        _write_training_state(s)
+        with _train_lock:
+            _train_process = None
 
     thread = threading.Thread(target=run_retrain, daemon=True)
     thread.start()
 
-    return jsonify({"ok": True, "message": "Retrain started in background"})
+    return jsonify({"ok": True, "startedAt": now, "trigger": trigger})
+
+
+@app.route("/api/retrain/abort", methods=["POST"])
+def api_retrain_abort():
+    """Abort a running training process."""
+    global _train_process
+    import signal  # not worth a top-level import for this one use
+
+    with _train_lock:
+        if _train_process is None or _train_process.poll() is not None:
+            return jsonify({"ok": False, "error": "No training in progress"}), 404
+
+        _train_process.send_signal(signal.SIGTERM)
+        try:
+            _train_process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            _train_process.kill()
+
+        state = _read_training_state()
+        state["status"] = "aborted"
+        state["finishedAt"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        state["exitCode"] = _train_process.returncode
+        _write_training_state(state)
+        _train_process = None
+
+    return jsonify({"ok": True, "status": "aborted"})
 
 
 @app.route("/api/frame")

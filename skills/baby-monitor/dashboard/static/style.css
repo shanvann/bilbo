@@ -331,6 +331,22 @@ footer {
   opacity: 0.5;
   cursor: default;
 }
+.footer-abort-btn {
+  background: var(--bg-card);
+  color: var(--accent-red);
+  border: 1px solid var(--accent-red);
+  border-radius: 6px;
+  padding: 5px 14px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.footer-abort-btn:hover:not(:disabled) {
+  background: rgba(239, 83, 80, 0.15);
+}
+.footer-abort-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 
 /* Responsive */
 @media (max-width: 600px) {

@@ -82,13 +82,17 @@ The core monitoring pipeline.
 **Architecture:**
 ```
 launchd (every 4 min) → capture frame (ffmpeg)
-  → pixel-diff: empty? → skip API, log as absent
-  → not empty? → BIRDEYE (local classifiers)
+  → Stage 1: BIRDEYE (local classifiers, ~40ms)
     → Classifier 1: bassinet crop → baby present?
     → Classifier 2: head-region crop → eyes_open / eyes_closed / face_not_visible
-      → confident? → log locally, skip cloud API
-      → uncertain? → cloud API fallback (gpt-4o-mini → gpt-4o)
-        → also returns head position → saved for next tick
+    → confident? → log, done (handles ~98% of frames)
+    → uncertain/failed? ↓
+  → Stage 2: pixel-diff gate (cheap safety net, ~10ms)
+    → empty bassinet? → log as absent, done
+    → changed? ↓
+  → Stage 3: cloud vision API (last resort, ~2-5s, $0.01/call)
+    → full analysis (gpt-4o-mini → gpt-4o)
+    → also returns head position → saved for next tick
   → log to JSONL
   → wake detection: Awake after sleep?
     → burst: 2 more frames at 60s intervals
@@ -97,7 +101,7 @@ launchd (every 4 min) → capture frame (ffmpeg)
     → immediate Telegram alert
 ```
 
-**BIRDEYE** (Baby IR-aware Recognition & Detection of EYE-state) uses two MobileNetV3-Small classifiers trained on the cloud API's own historical labels. When the baby turns face-down or the model is uncertain, it falls back to the cloud API, which also returns the head's approximate position for the next local inference tick.
+**BIRDEYE** (Baby IR-aware Recognition & Detection of EYE-state) uses two MobileNetV3-Small classifiers trained on the cloud API's own historical labels. When the baby turns face-down or the model is uncertain, pixel-diff checks if the bassinet is simply empty before falling back to the cloud API. This keeps the cloud API as a true last resort — only called when both local inference and pixel-diff can't resolve the frame. The cloud API also returns the head's approximate position, which BIRDEYE uses to center its head crop on the next tick.
 
 | Metric | Value |
 |---|---|

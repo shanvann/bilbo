@@ -513,17 +513,65 @@ def train_classifier(
         torch.save(best_state, output_path)
         log.info("Best model saved to %s", output_path)
 
-    # Final val confusion matrix
+    # --- Compute final metrics on best model ---
+    metrics = {
+        "best_epoch": epoch - patience_counter,
+        "total_epochs": epoch,
+        "best_val_loss": round(best_val_loss, 4),
+        "val_accuracy": round(val_correct / max(val_total, 1), 4),
+        "val_total": val_total,
+        "train_total": len(train_ds),
+    }
+
+    # Confusion matrix
     if val_preds:
-        log.info("Validation confusion matrix:")
+        confusion = {}
         for true_cls in range(num_classes):
-            row = []
+            row = {}
             for pred_cls in range(num_classes):
                 count = sum(1 for t, p in zip(val_labels, val_preds) if t == true_cls and p == pred_cls)
-                row.append(count)
+                if count > 0:
+                    row[class_names[pred_cls]] = count
+            confusion[class_names[true_cls]] = row
+        metrics["confusion_matrix"] = confusion
+
+        log.info("Validation confusion matrix:")
+        for true_cls in range(num_classes):
+            row = [sum(1 for t, p in zip(val_labels, val_preds) if t == true_cls and p == pred_cls)
+                   for pred_cls in range(num_classes)]
             log.info("  %15s: %s", class_names[true_cls], row)
 
-    return best_val_loss
+        # Per-class precision, recall, f1
+        per_class = {}
+        for cls_idx, cls_name in enumerate(class_names):
+            tp = sum(1 for t, p in zip(val_labels, val_preds) if t == cls_idx and p == cls_idx)
+            fp = sum(1 for t, p in zip(val_labels, val_preds) if t != cls_idx and p == cls_idx)
+            fn = sum(1 for t, p in zip(val_labels, val_preds) if t == cls_idx and p != cls_idx)
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+            per_class[cls_name] = {
+                "precision": round(precision, 3),
+                "recall": round(recall, 3),
+                "f1": round(f1, 3),
+                "support": tp + fn,
+            }
+        metrics["per_class"] = per_class
+
+        # Critical metric for eye state classifier: awake→asleep miss rate
+        if "eyes_open" in class_names and "eyes_closed" in class_names:
+            open_idx = class_names.index("eyes_open")
+            closed_idx = class_names.index("eyes_closed")
+            open_as_closed = sum(1 for t, p in zip(val_labels, val_preds)
+                                 if t == open_idx and p == closed_idx)
+            total_open = sum(1 for t in val_labels if t == open_idx)
+            miss_rate = open_as_closed / total_open if total_open > 0 else 0
+            metrics["awake_asleep_miss_rate"] = round(miss_rate, 3)
+            metrics["awake_asleep_misses"] = f"{open_as_closed}/{total_open}"
+            log.info("Critical: awake→asleep misses: %d/%d (%.1f%%)",
+                     open_as_closed, total_open, miss_rate * 100)
+
+    return metrics
 
 
 # ---------------------------------------------------------------------------
@@ -572,7 +620,7 @@ def main():
         val_ds = PresenceDataset(val_entries, frames_dir, get_val_transform())
         log.info("Presence: train=%d, val=%d", len(train_ds), len(val_ds))
 
-        train_classifier(
+        presence_metrics = train_classifier(
             train_ds, val_ds,
             num_classes=2,
             class_names=PresenceDataset.CLASS_NAMES,
@@ -582,6 +630,8 @@ def main():
             lr=args.lr,
             patience=args.patience,
         )
+    else:
+        presence_metrics = None
 
     # --- Eye state classifier ---
     if args.model in ("all", "eye-state"):
@@ -609,7 +659,7 @@ def main():
         log.info("Eye state: train=%d, val=%d", len(train_ds), len(val_ds))
 
         # Weight eyes_open higher to penalize awake→asleep errors
-        train_classifier(
+        eye_metrics = train_classifier(
             train_ds, val_ds,
             num_classes=3,
             class_names=EyeStateDataset.CLASS_NAMES,
@@ -620,6 +670,8 @@ def main():
             patience=args.patience,
             class_weights=[2.0, 1.0, 1.0],  # penalize missing eyes_open
         )
+    else:
+        eye_metrics = None
 
     # --- Version the models ---
     version_id = datetime.now().strftime("v_%Y%m%d_%H%M%S")
@@ -673,6 +725,10 @@ def main():
             "face_crops": args.face_crops is not None,
             "corrections": args.corrections is not None,
             "audit": args.audit is not None,
+        },
+        "metrics": {
+            "presence": presence_metrics,
+            "eye_state": eye_metrics,
         },
     }
     with open(training_log, "a") as f:

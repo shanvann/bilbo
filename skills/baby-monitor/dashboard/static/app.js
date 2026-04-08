@@ -544,20 +544,35 @@ function renderTrainingStats() {
   document.getElementById('train-version').textContent =
     '(' + (trainingData.version || '?') + ')';
 
-  // Data column
+  // Data column — training data stats + live alignment
   const dataEl = document.getElementById('train-data');
   const srcRows = Object.entries(sources).map(([k,v]) =>
     '<div class="train-row"><span>' + k + '</span><span class="train-val">' + v + '</span></div>'
   ).join('');
+
+  // Live alignment from the perf-agreement element (already computed)
+  const liveAlignment = document.getElementById('perf-agreement').textContent;
+  const alignColor = document.getElementById('perf-agreement').style.color || 'var(--text)';
+
   dataEl.innerHTML =
+    '<div class="train-row"><span>Live alignment</span><span class="train-val" style="color:' + alignColor + '">' + liveAlignment + '</span></div>' +
+    '<div style="margin:6px 0 2px;font-size:0.7rem;color:#445">Training data:</div>' +
     '<div class="train-row"><span>Total entries</span><span class="train-val">' + total + '</span></div>' +
     srcRows;
 
   // Helper to render per-class metrics
-  function renderClassifier(el, metrics) {
+  function renderClassifier(el, metrics, label) {
     if (!metrics) { el.innerHTML = 'No data'; return; }
     let html = '';
-    html += '<div class="train-row"><span>Val accuracy</span><span class="train-val">' + (metrics.val_accuracy * 100).toFixed(1) + '%</span></div>';
+
+    // Live alignment (from shadow data) — the real quality metric
+    if (trainingData && trainingData.lastMetrics) {
+      // We only have one alignment rate for both classifiers combined.
+      // Show it on the eye state classifier (more important).
+      // The presence classifier's quality is reflected in not_present alignment.
+    }
+
+    html += '<div class="train-row"><span>Train accuracy</span><span class="train-val">' + (metrics.val_accuracy * 100).toFixed(1) + '%</span></div>';
     html += '<div class="train-row"><span>Best val loss</span><span class="train-val">' + metrics.best_val_loss + '</span></div>';
     html += '<div class="train-row"><span>Epochs</span><span class="train-val">' + metrics.best_epoch + ' / ' + metrics.total_epochs + '</span></div>';
 
@@ -740,7 +755,7 @@ async function loadMonitorStats() {
     const rangeLabel = {'0.167':'10m','0.5':'30m','1':'1h','12':'12h','24':'24h','168':'1w'}[hours] || hours+'h';
     document.getElementById('perf-period').textContent = '(' + rangeLabel + ', ' + d.total + ' frames)';
 
-    // Agreement (the key metric)
+    // Alignment (the key metric — birdeye vs ground truth)
     const agEl = document.getElementById('perf-agreement');
     if (d.shadow && d.shadow.total > 0) {
       const pct = Math.round(d.shadow.agreementRate * 100);
@@ -793,15 +808,15 @@ async function loadMonitorStats() {
         (shadowTotal > 0 ?
           '<div style="margin:8px 0 6px;font-size:0.75rem;color:var(--text-dim)">Shadow birdeye (' + shadowTotal + ' frames compared)</div>' +
           '<div class="perf-bar">' +
-            '<div class="perf-bar-seg birdeye" style="width:' + agPct + '%" title="Agreed ' + agPct + '%">' + (agPct > 5 ? agPct + '% agree' : '') + '</div>' +
-            '<div class="perf-bar-seg spot-check" style="width:' + dgPct + '%" title="Disagreed ' + dgPct + '%">' + (dgPct > 3 ? dgPct + '%' : '') + '</div>' +
+            '<div class="perf-bar-seg birdeye" style="width:' + agPct + '%" title="Aligned ' + agPct + '%">' + (agPct > 5 ? agPct + '% aligned' : '') + '</div>' +
+            '<div class="perf-bar-seg spot-check" style="width:' + dgPct + '%" title="Misaligned ' + dgPct + '%">' + (dgPct > 3 ? dgPct + '%' : '') + '</div>' +
           '</div>'
           : '') +
         '<div class="perf-bar-legend">' +
           '<span><span class="legend-dot" style="background:var(--accent-blue)"></span> Pixel-diff</span>' +
           '<span><span class="legend-dot" style="background:var(--accent-orange)"></span> Cloud API</span>' +
-          (shadowTotal > 0 ? '<span><span class="legend-dot" style="background:var(--accent-green)"></span> Agreed</span>' : '') +
-          (shadowTotal > 0 ? '<span><span class="legend-dot" style="background:var(--accent-red)"></span> Disagreed</span>' : '') +
+          (shadowTotal > 0 ? '<span><span class="legend-dot" style="background:var(--accent-green)"></span> Aligned</span>' : '') +
+          (shadowTotal > 0 ? '<span><span class="legend-dot" style="background:var(--accent-red)"></span> Misaligned</span>' : '') +
         '</div>';
     }
   } catch (e) {

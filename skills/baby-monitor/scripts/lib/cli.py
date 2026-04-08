@@ -9,7 +9,6 @@ from pathlib import Path
 
 from .config import (
     BURST_AWAKE_THRESHOLD,
-    BURST_CONFIRM_COUNT,
     FRAMES_DIR,
     JSONL_FILE,
     LOG_FILE,
@@ -166,7 +165,7 @@ def cmd_backtest(last_n: int = None, from_date: str = None, quick: bool = False,
     if alerts:
         print()
         print(f"{'='*60}")
-        print(f"ACTIVE WAKE ALERT BACKTEST (burst confirmation, {BURST_AWAKE_THRESHOLD}/{BURST_CONFIRM_COUNT+1} Awake required)")
+        print(f"ACTIVE WAKE ALERT BACKTEST (look-back confirmation, {BURST_AWAKE_THRESHOLD}/3 Awake required)")
         print(f"{'='*60}")
 
         alert_events = []

@@ -541,57 +541,92 @@ function renderTrainingStats() {
   const sources = trainingData.lastLabelSources || {};
   const total = trainingData.lastEntriesTotal || 0;
 
+  // Version + trained time
+  const trainedAt = trainingData.lastTrained
+    ? new Date(trainingData.lastTrained).toLocaleString('en-US', {
+        timeZone: 'America/New_York', month: 'short', day: 'numeric',
+        hour: 'numeric', minute: '2-digit', hour12: true })
+    : '?';
   document.getElementById('train-version').textContent =
-    '(' + (trainingData.version || '?') + ')';
+    trainingData.version + ' — ' + trainedAt;
 
-  // Data column — training data stats + live alignment
+  // Data column
   const dataEl = document.getElementById('train-data');
   const srcRows = Object.entries(sources).map(([k,v]) =>
     '<div class="train-row"><span>' + k + '</span><span class="train-val">' + v + '</span></div>'
   ).join('');
 
-  // Live alignment from the perf-agreement element (already computed)
+  // Live alignment from the perf-agreement element
   const liveAlignment = document.getElementById('perf-agreement').textContent;
   const alignColor = document.getElementById('perf-agreement').style.color || 'var(--text)';
 
+  let prevInfo = '';
+  if (trainingData.prevVersion) {
+    prevInfo = '<div class="train-row"><span title="Previous model for delta comparison">Previous model</span><span class="train-val">' + trainingData.prevVersion + '</span></div>';
+  }
+
   dataEl.innerHTML =
-    '<div class="train-row"><span>Live alignment</span><span class="train-val" style="color:' + alignColor + '">' + liveAlignment + '</span></div>' +
-    '<div style="margin:6px 0 2px;font-size:0.7rem;color:#445">Training data:</div>' +
-    '<div class="train-row"><span>Total entries</span><span class="train-val">' + total + '</span></div>' +
+    '<div class="train-row"><span title="How often birdeye matches ground truth on live production frames">Live alignment</span><span class="train-val" style="color:' + alignColor + '">' + liveAlignment + '</span></div>' +
+    prevInfo +
+    '<div style="margin:8px 0 2px;font-size:0.7rem;color:#445" title="Data used in the last training run">Training data:</div>' +
+    '<div class="train-row"><span title="Total labeled frames fed to the trainer">Total entries</span><span class="train-val">' + total + '</span></div>' +
     srcRows;
 
-  // Helper to render per-class metrics
-  function renderClassifier(el, metrics, label) {
+  // Delta helper: show change from previous training
+  function delta(curr, prev, suffix, higherIsBetter) {
+    if (prev == null || curr == null) return '';
+    const diff = curr - prev;
+    if (Math.abs(diff) < 0.001) return '';
+    const sign = diff > 0 ? '+' : '';
+    const good = higherIsBetter ? diff > 0 : diff < 0;
+    const color = good ? 'var(--accent-green)' : 'var(--accent-red)';
+    return ' <span style="font-size:0.7rem;color:' + color + '">' + sign + (diff * 100).toFixed(1) + suffix + '</span>';
+  }
+
+  const prev = trainingData.prevMetrics || {};
+
+  // Helper to render per-class metrics with definitions and deltas
+  function renderClassifier(el, metrics, prevMetrics) {
     if (!metrics) { el.innerHTML = 'No data'; return; }
+    const pm = prevMetrics || {};
     let html = '';
 
-    // Live alignment (from shadow data) — the real quality metric
-    if (trainingData && trainingData.lastMetrics) {
-      // We only have one alignment rate for both classifiers combined.
-      // Show it on the eye state classifier (more important).
-      // The presence classifier's quality is reflected in not_present alignment.
-    }
+    html += '<div class="train-row"><span title="% of validation samples correctly classified during training">Train accuracy</span><span class="train-val">'
+      + (metrics.val_accuracy * 100).toFixed(1) + '%'
+      + delta(metrics.val_accuracy, pm.val_accuracy, '%', true)
+      + '</span></div>';
 
-    html += '<div class="train-row"><span>Train accuracy</span><span class="train-val">' + (metrics.val_accuracy * 100).toFixed(1) + '%</span></div>';
-    html += '<div class="train-row"><span>Best val loss</span><span class="train-val">' + metrics.best_val_loss + '</span></div>';
-    html += '<div class="train-row"><span>Epochs</span><span class="train-val">' + metrics.best_epoch + ' / ' + metrics.total_epochs + '</span></div>';
+    html += '<div class="train-row"><span title="Cross-entropy loss on validation set. Lower = more confident correct predictions">Val loss</span><span class="train-val">'
+      + metrics.best_val_loss
+      + delta(metrics.best_val_loss, pm.best_val_loss, '', false)
+      + '</span></div>';
+
+    html += '<div class="train-row"><span title="Epoch with best val loss / total epochs before early stopping">Epochs</span><span class="train-val">'
+      + metrics.best_epoch + ' / ' + metrics.total_epochs + '</span></div>';
 
     if (metrics.awake_asleep_miss_rate != null) {
       const missClass = metrics.awake_asleep_miss_rate > 0.05 ? 'train-crit' : 'train-val';
-      html += '<div class="train-row"><span>Awake→Asleep misses</span><span class="' + missClass + '">' + metrics.awake_asleep_misses + ' (' + (metrics.awake_asleep_miss_rate * 100).toFixed(0) + '%)</span></div>';
+      html += '<div class="train-row"><span title="CRITICAL: % of truly-awake frames the model predicted as asleep. Must be &lt;5% for safety.">Awake→Asleep misses</span><span class="' + missClass + '">'
+        + metrics.awake_asleep_misses + ' (' + (metrics.awake_asleep_miss_rate * 100).toFixed(0) + '%)'
+        + delta(metrics.awake_asleep_miss_rate, pm.awake_asleep_miss_rate, '%', false)
+        + '</span></div>';
     }
 
     if (metrics.per_class) {
-      html += '<div style="margin-top:6px;font-size:0.75rem;color:var(--text-dim)">Per-class F1:</div>';
+      html += '<div style="margin-top:6px;font-size:0.75rem;color:var(--text-dim)" title="P=precision (of predicted X, how many were truly X), R=recall (of truly X, how many were found), F1=harmonic mean">Per-class P / R / F1:</div>';
       for (const [cls, s] of Object.entries(metrics.per_class)) {
-        html += '<div class="train-row"><span>' + cls + '</span><span class="train-val">P=' + s.precision + ' R=' + s.recall + ' F1=' + s.f1 + '</span></div>';
+        const ps = pm.per_class && pm.per_class[cls];
+        html += '<div class="train-row"><span>' + cls + ' <span style="color:#556">(' + s.support + ')</span></span><span class="train-val">'
+          + s.precision + ' / ' + s.recall + ' / ' + s.f1
+          + (ps ? delta(s.f1, ps.f1, '', true) : '')
+          + '</span></div>';
       }
     }
     el.innerHTML = html;
   }
 
-  renderClassifier(document.getElementById('train-presence'), m.presence);
-  renderClassifier(document.getElementById('train-eye'), m.eye_state);
+  renderClassifier(document.getElementById('train-presence'), m.presence, prev.presence);
+  renderClassifier(document.getElementById('train-eye'), m.eye_state, prev.eye_state);
 }
 
 // ---------------------------------------------------------------------------

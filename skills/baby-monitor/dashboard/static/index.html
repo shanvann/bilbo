@@ -182,7 +182,12 @@
 
     <!-- Training Stats -->
     <section id="training-stats" class="card" style="display:none">
-      <h2>Training Stats <span class="subtitle" id="train-version"></span></h2>
+      <h2>Training Stats <span class="subtitle" id="train-version"></span>
+        <span style="float:right">
+          <button id="footer-retrain" class="footer-retrain-btn">Retrain Model</button>
+          <button id="footer-abort" class="footer-abort-btn" style="display:none">Abort</button>
+        </span>
+      </h2>
       <div class="train-grid">
         <div class="train-col">
           <h3>Quality & Data</h3>
@@ -231,8 +236,6 @@
     </div>
     <div class="footer-right">
       <span id="footer-model" class="footer-dim"></span>
-      <button id="footer-retrain" class="footer-retrain-btn">Retrain Model</button>
-      <button id="footer-abort" class="footer-abort-btn" style="display:none">Abort</button>
     </div>
   </footer>
 

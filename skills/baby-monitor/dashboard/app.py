@@ -507,6 +507,21 @@ def api_training_status():
                 _write_training_state(state)
                 _train_process = None
 
+    # Count pending corrections (made after last training)
+    last_trained_ts = last_log.get("timestamp") if last_log else None
+    pending_corrections = 0
+    total_corrections = 0
+    if CORRECTIONS_LOG.exists():
+        for line in CORRECTIONS_LOG.read_text().strip().splitlines():
+            if not line:
+                continue
+            total_corrections += 1
+            c = json.loads(line)
+            if last_trained_ts and c.get("correctedAt", "") > last_trained_ts:
+                pending_corrections += 1
+            elif not last_trained_ts:
+                pending_corrections += 1
+
     result = {
         # Current run
         "running": running,
@@ -521,6 +536,9 @@ def api_training_status():
         "lastMetrics": last_log.get("metrics") if last_log else None,
         "lastLabelSources": last_log.get("label_sources") if last_log else None,
         "lastEntriesTotal": last_log.get("entries_total") if last_log else None,
+        # Corrections
+        "pendingCorrections": pending_corrections,
+        "totalCorrections": total_corrections,
     }
     return jsonify(result)
 

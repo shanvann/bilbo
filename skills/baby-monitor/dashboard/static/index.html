@@ -79,7 +79,14 @@
 
     <!-- Block Detail Panel -->
     <section id="block-detail" class="card" style="display:none">
-      <h2>Block Detail <button id="block-detail-close" class="tl-nav-btn" style="float:right">✕ Close</button></h2>
+      <h2>Block Detail
+        <span class="block-nav">
+          <button id="block-prev" class="viewer-btn">◀ Prev Block</button>
+          <span id="block-counter" class="viewer-counter"></span>
+          <button id="block-next" class="viewer-btn">Next Block ▶</button>
+        </span>
+        <button id="block-detail-close" class="tl-nav-btn" style="float:right">✕ Close</button>
+      </h2>
       <div id="block-detail-summary" class="block-summary"></div>
       <div id="block-detail-viewer" class="block-viewer">
         <div class="viewer-frame">

@@ -437,6 +437,11 @@ footer {
 }
 
 /* Block detail panel */
+.block-nav {
+  font-size: 0.85rem;
+  font-weight: normal;
+  margin-left: 16px;
+}
 .block-summary {
   margin-bottom: 12px;
   font-size: 0.95rem;

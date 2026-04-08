@@ -180,6 +180,25 @@
       <div class="perf-breakdown" id="perf-breakdown"></div>
     </section>
 
+    <!-- Training Stats -->
+    <section id="training-stats" class="card" style="display:none">
+      <h2>Training Stats <span class="subtitle" id="train-version"></span></h2>
+      <div class="train-grid">
+        <div class="train-col">
+          <h3>Data</h3>
+          <div id="train-data" class="train-details"></div>
+        </div>
+        <div class="train-col">
+          <h3>Presence Classifier</h3>
+          <div id="train-presence" class="train-details"></div>
+        </div>
+        <div class="train-col">
+          <h3>Eye State Classifier</h3>
+          <div id="train-eye" class="train-details"></div>
+        </div>
+      </div>
+    </section>
+
     <!-- Recent Events Table -->
     <section class="card">
       <h2>Recent Events
@@ -217,6 +236,6 @@
     </div>
   </footer>
 
-  <script src="/static/app.js?v=5"></script>
+  <script src="/static/app.js?v=6"></script>
 </body>
 </html>

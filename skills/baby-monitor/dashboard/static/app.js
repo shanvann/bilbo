@@ -239,9 +239,9 @@ async function loadTimeline() {
 // ---------------------------------------------------------------------------
 let viewerEntries = [];
 let viewerIndex = 0;
-let lastTrainedAt = null; // fetched once per block open
+let trainingData = null; // shared training state from API
 
-async function showBlockDetail(seg, durStr) {
+function showBlockDetail(seg, durStr) {
   const panel = document.getElementById('block-detail');
   const summary = document.getElementById('block-detail-summary');
 
@@ -250,13 +250,6 @@ async function showBlockDetail(seg, durStr) {
     formatTimeET(seg.start.toISOString()) + ' → ' +
     formatTimeET(seg.end.toISOString()) +
     ' (' + durStr + ', ' + seg.entries.length + ' frames)';
-
-  // Fetch latest training timestamp
-  try {
-    const res = await fetch('/api/training-status');
-    const data = await res.json();
-    lastTrainedAt = data.lastTrained ? new Date(data.lastTrained) : null;
-  } catch (e) { lastTrainedAt = null; }
 
   viewerEntries = seg.entries;
   viewerIndex = 0;
@@ -297,12 +290,14 @@ function renderViewer() {
   const stateSelect = document.getElementById('viewer-state');
   stateSelect.value = eyeState;
 
-  // Retrain status indicator
+  // Retrain status indicator (derived from training API data)
   const retrainEl = document.getElementById('viewer-retrain-status');
   const correctedAtStr = e.eyeStateCorrectedAt || e._correctedAt;
+  const lastTrainedStr = trainingData && trainingData.lastTrained;
   if (e.eyeStateEdited || correctedAtStr) {
     const correctedAt = correctedAtStr ? new Date(correctedAtStr) : null;
-    if (lastTrainedAt && correctedAt && correctedAt < lastTrainedAt) {
+    const lastTrained = lastTrainedStr ? new Date(lastTrainedStr) : null;
+    if (lastTrained && correctedAt && correctedAt < lastTrained) {
       retrainEl.textContent = 'retrained';
       retrainEl.className = 'viewer-retrain-status retrained';
     } else {
@@ -556,6 +551,7 @@ async function loadTrainingStatus() {
   try {
     const res = await fetch('/api/training-status');
     const data = await res.json();
+    trainingData = data; // shared state for viewer
 
     // Model info line
     const el = document.getElementById('footer-model');
@@ -566,10 +562,16 @@ async function loadTrainingStatus() {
         month: 'short', day: 'numeric',
         hour: 'numeric', minute: '2-digit', hour12: true,
       });
-      const trigger = data.trigger ? ' (' + data.trigger + ')' : '';
-      el.textContent = (data.version || 'model') + ' — trained ' + timeStr + trigger;
+      let info = (data.version || 'model') + ' — trained ' + timeStr;
+      if (data.pendingCorrections > 0) {
+        info += ' — ' + data.pendingCorrections + ' pending';
+      }
+      el.textContent = info;
     } else {
       el.textContent = 'No model trained yet';
+      if (data.pendingCorrections > 0) {
+        el.textContent += ' — ' + data.pendingCorrections + ' corrections ready';
+      }
     }
 
     // Button state
@@ -583,7 +585,6 @@ async function loadTrainingStatus() {
       const elapsed = startedAt ? Math.round((Date.now() - startedAt.getTime()) / 1000) : 0;
       const elapsedStr = elapsed > 60 ? Math.floor(elapsed / 60) + 'm ' + (elapsed % 60) + 's' : elapsed + 's';
       abortBtn.textContent = 'Abort (' + elapsedStr + ')';
-      // Start polling if not already
       if (!trainPollInterval) {
         trainPollInterval = setInterval(loadTrainingStatus, 5000);
       }
@@ -591,8 +592,9 @@ async function loadTrainingStatus() {
       btn.style.display = '';
       abortBtn.style.display = 'none';
       btn.disabled = false;
-      btn.textContent = 'Retrain Model';
-      // Stop polling
+      btn.textContent = data.pendingCorrections > 0
+        ? 'Retrain (' + data.pendingCorrections + ' new)'
+        : 'Retrain Model';
       if (trainPollInterval) {
         clearInterval(trainPollInterval);
         trainPollInterval = null;

@@ -71,9 +71,10 @@ AUDIT_LOG_FILE = DATA_DIR / "audit-log.jsonl"
 # Audit settings
 AUDIT_SAMPLE_SIZE = 50  # frames to spot-check per --audit run
 
-# Inline spot-check: fraction of birdeye frames also sent to cloud API
-# for continuous validation. Cloud API result overrides birdeye on disagreement.
-SPOT_CHECK_RATE = 0.50  # 50% of birdeye-decided frames
+# Shadow mode: birdeye runs on every frame but results are logged,
+# not used for decisions. Cloud API remains the production pipeline.
+# When shadow agreement exceeds this threshold, birdeye can be promoted.
+SHADOW_PROMOTION_THRESHOLD = 0.95  # 95% agreement to promote birdeye to prod
 
 # ---------------------------------------------------------------------------
 # Birdeye classifier config

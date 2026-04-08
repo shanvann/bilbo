@@ -34,8 +34,7 @@ from pathlib import Path
 # or `python3 scripts/monitor.py` from baby-monitor/
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import random
-from lib.config import ENV_FILE, MODEL_CHAIN, SPOT_CHECK_RATE, load_env, log, set_verbose
+from lib.config import ENV_FILE, MODEL_CHAIN, load_env, log, set_verbose
 from lib.capture import capture_frame, enforce_disk_limit
 from lib.detect import detect_empty_bassinet, make_empty_entry
 from lib.vision import analyze_frame, flatten_analysis
@@ -212,97 +211,79 @@ def main():
 
     enforce_disk_limit()
 
-    # --- Stage 1: Birdeye (local classifiers) ---
-    flat = try_local_analysis(frame_path)
+    # =======================================================================
+    # Production pipeline: pixel-diff → cloud API (reliable, ground truth)
+    # Shadow pipeline: birdeye runs in parallel (logged, not used for decisions)
+    #
+    # Birdeye results are compared against cloud API to track agreement.
+    # Once agreement exceeds threshold, birdeye can be promoted to production.
+    # =======================================================================
 
-    if flat is not None:
-        log.info("pipeline: birdeye -> %s", flat.get("state"))
+    # --- Shadow: run birdeye (results logged but not used for prod decisions) ---
+    shadow_birdeye = try_local_analysis(frame_path)
+    if shadow_birdeye is not None:
+        log.info("shadow: birdeye -> %s (conf: presence=%.3f eye=%s)",
+                 shadow_birdeye.get("state"),
+                 shadow_birdeye.get("presenceConfidence", 0),
+                 shadow_birdeye.get("eyeConfidence", "n/a"))
 
-        # --- Inline spot-check: validate birdeye against cloud API ---
-        if random.random() < SPOT_CHECK_RATE:
-            log.info("spot-check: validating birdeye result against cloud API")
-            try:
-                analysis = analyze_frame(frame_path, api_key, anthropic_key)
-                cloud_flat = flatten_analysis(analysis, str(frame_path))
+    # --- Production: pixel-diff gate → cloud API ---
+    is_empty, diff_score = detect_empty_bassinet(frame_path)
 
-                cloud_state = cloud_flat.get("state", "Unknown")
-                birdeye_state = flat.get("state", "Unknown")
-
-                # Normalize: treat not-present baby as "not_present"
-                if not cloud_flat.get("babyPresent", False):
-                    cloud_state = "not_present"
-                if not flat.get("babyPresent", False):
-                    birdeye_state = "not_present"
-
-                agreed = birdeye_state.lower() == cloud_state.lower()
-                flat["spotCheck"] = {
-                    "cloudState": cloud_state,
-                    "birdeyeState": birdeye_state,
-                    "agreed": agreed,
-                }
-
-                if agreed:
-                    log.info("spot-check: AGREE birdeye=%s cloud=%s", birdeye_state, cloud_state)
-                else:
-                    log.warning("spot-check: DISAGREE birdeye=%s cloud=%s -> overriding with cloud",
-                                birdeye_state, cloud_state)
-                    # Override birdeye with cloud API result
-                    flat = cloud_flat
-                    flat["spotCheck"] = {
-                        "cloudState": cloud_state,
-                        "birdeyeState": birdeye_state,
-                        "agreed": False,
-                        "overridden": True,
-                    }
-                    flat["detectionMethod"] = "spot-check"
-
-                # Save head position from cloud API
-                head_pos = cloud_flat.get("headPosition")
-                if isinstance(head_pos, dict) and head_pos.get("visible", False):
-                    from lib.classifiers import save_head_state
-                    save_head_state(head_pos["x"], head_pos["y"], source="spot-check")
-
-            except Exception as e:
-                log.warning("spot-check: cloud API failed, keeping birdeye result: %s", e)
+    if is_empty:
+        flat = make_empty_entry(frame_path, diff_score)
+        log.info("pipeline: pixel-diff -> empty (score=%.2f), cloud API skipped", diff_score)
     else:
-        # --- Stage 2: Pixel-diff gate (cheap check before expensive cloud API) ---
-        # Birdeye failed or was uncertain. Before paying for a cloud API call,
-        # check if the bassinet is simply empty via pixel-diff.
-        is_empty, diff_score = detect_empty_bassinet(frame_path)
+        log.info("pipeline: pixel-diff -> changed (score=%.2f), calling cloud API", diff_score)
+        try:
+            analysis = analyze_frame(frame_path, api_key, anthropic_key)
+        except RuntimeError as e:
+            log.error("pipeline: analysis failed, aborting - %s", e)
+            _output("error", error=str(e), frame=str(frame_path))
+            return 1
 
-        if is_empty:
-            flat = make_empty_entry(frame_path, diff_score)
-            log.info("pipeline: birdeye unavailable, pixel-diff -> empty (score=%.2f), cloud API skipped",
-                     diff_score)
+        flat = flatten_analysis(analysis, str(frame_path))
+        flat["diffScore"] = round(diff_score, 2) if diff_score >= 0 else None
+
+        # Heuristic: if state is "Unknown", baby is present, and position matches
+        # the previous frame, infer "Asleep" (baby hasn't moved, likely sleeping)
+        if flat.get("state") == "Unknown" and flat.get("babyPresent"):
+            prev = get_last_entry()
+            if prev and prev.get("babyPresent") and prev.get("sleepPosition") == flat.get("sleepPosition"):
+                if flat.get("sleepPosition") != "Unknown":
+                    log.info("heuristic: state Unknown -> Asleep (position unchanged: %s)", flat.get("sleepPosition"))
+                    flat["state"] = "Asleep"
+                    flat["stateInferred"] = True
+
+        # Update head position from cloud API (for birdeye shadow)
+        head_pos = flat.get("headPosition")
+        if isinstance(head_pos, dict) and head_pos.get("visible", False):
+            from lib.classifiers import save_head_state
+            save_head_state(head_pos["x"], head_pos["y"], source="cloud-api")
+
+    # --- Compare shadow birdeye vs production result ---
+    if shadow_birdeye is not None:
+        prod_state = flat.get("state", "Unknown")
+        if not flat.get("babyPresent", False):
+            prod_state = "not_present"
+        birdeye_state = shadow_birdeye.get("state", "Unknown")
+        if not shadow_birdeye.get("babyPresent", False):
+            birdeye_state = "not_present"
+
+        agreed = birdeye_state.lower() == prod_state.lower()
+        flat["shadow"] = {
+            "birdeyeState": birdeye_state,
+            "prodState": prod_state,
+            "agreed": agreed,
+            "presenceConfidence": shadow_birdeye.get("presenceConfidence"),
+            "eyeConfidence": shadow_birdeye.get("eyeConfidence"),
+            "eyeState": shadow_birdeye.get("eyeState"),
+            "birdeyeTimings": shadow_birdeye.get("birdeyeTimings"),
+        }
+        if agreed:
+            log.info("shadow: AGREE birdeye=%s prod=%s", birdeye_state, prod_state)
         else:
-            # --- Stage 3: Cloud vision API (last resort) ---
-            log.info("pipeline: birdeye uncertain, pixel-diff -> changed (score=%.2f), calling cloud API",
-                     diff_score)
-            try:
-                analysis = analyze_frame(frame_path, api_key, anthropic_key)
-            except RuntimeError as e:
-                log.error("pipeline: analysis failed, aborting - %s", e)
-                _output("error", error=str(e), frame=str(frame_path))
-                return 1
-
-            flat = flatten_analysis(analysis, str(frame_path))
-            flat["diffScore"] = round(diff_score, 2) if diff_score >= 0 else None
-
-            # Heuristic: if state is "Unknown", baby is present, and position matches
-            # the previous frame, infer "Asleep" (baby hasn't moved, likely sleeping)
-            if flat.get("state") == "Unknown" and flat.get("babyPresent"):
-                prev = get_last_entry()
-                if prev and prev.get("babyPresent") and prev.get("sleepPosition") == flat.get("sleepPosition"):
-                    if flat.get("sleepPosition") != "Unknown":
-                        log.info("heuristic: state Unknown -> Asleep (position unchanged: %s)", flat.get("sleepPosition"))
-                        flat["state"] = "Asleep"
-                        flat["stateInferred"] = True
-
-            # Update head position from cloud API response (for birdeye's next tick)
-            head_pos = flat.get("headPosition")
-            if isinstance(head_pos, dict) and head_pos.get("visible", False):
-                from lib.classifiers import save_head_state
-                save_head_state(head_pos["x"], head_pos["y"], source="cloud-api")
+            log.warning("shadow: DISAGREE birdeye=%s prod=%s", birdeye_state, prod_state)
 
     alerts = check_alerts(flat)
 

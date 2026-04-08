@@ -29,8 +29,6 @@ import time
 from pathlib import Path
 
 from .config import (
-    PIPELINE_DIR,
-    PIPELINE_CONFIG,
     PRESENCE_MODEL,
     EYE_STATE_MODEL,
 )
@@ -82,8 +80,8 @@ def _get_classifiers():
     from .classifiers import BabyPresenceClassifier, EyeStateClassifier
 
     device = "cpu"
-    presence_path = PIPELINE_DIR / PRESENCE_MODEL
-    eye_path = PIPELINE_DIR / EYE_STATE_MODEL
+    presence_path = PRESENCE_MODEL
+    eye_path = EYE_STATE_MODEL
 
     log.info("%s: loading classifiers (device=%s)", BIRDEYE, device)
     t0 = time.monotonic()

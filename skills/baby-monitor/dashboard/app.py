@@ -706,7 +706,7 @@ def api_monitor_stats():
     # If user corrected the entry via dashboard, use the correction as ground truth
     # instead of the original cloud API state. This means agreement is measured
     # against the best known label, not just the raw production output.
-    EYE_TO_STATE = {"eyes_open": "awake", "eyes_closed": "asleep", "face_not_visible": "unknown"}
+    EYE_TO_STATE = {"eyes_open": "awake", "eyes_closed": "asleep", "face_not_visible": "unknown", "not_in_bassinet": "not_present"}
     shadow_entries = [e for e in entries if isinstance(e.get("shadow"), dict)]
     shadow_agreed = 0
     for e in shadow_entries:

@@ -578,6 +578,91 @@ def cmd_audit(sample_size: int = None):
     return 0
 
 
+def cmd_list_models():
+    """List available model versions."""
+    version_dirs = sorted(
+        [d for d in MODELS_DIR.iterdir() if d.is_dir() and d.name.startswith("v_")],
+        key=lambda d: d.name,
+    )
+    if not version_dirs:
+        print("No versioned models found.")
+        return 0
+
+    # Check which is current
+    latest_link = MODELS_DIR / "latest"
+    current = None
+    if latest_link.is_symlink():
+        current = latest_link.resolve().name
+
+    # Load training log for metadata
+    training_log = MODELS_DIR / "training-log.jsonl"
+    log_entries = {}
+    if training_log.exists():
+        for line in training_log.read_text().strip().splitlines():
+            if line:
+                entry = json.loads(line)
+                log_entries[entry.get("version")] = entry
+
+    print(f"Model versions ({len(version_dirs)} total, latest 20 kept):")
+    print()
+    for d in version_dirs:
+        marker = " ← active" if d.name == current else ""
+        meta = log_entries.get(d.name, {})
+        entries = meta.get("entries_total", "?")
+        sources = meta.get("label_sources", {})
+        corrections = sources.get("correction", 0)
+        audit = sources.get("audit", 0)
+        ts = meta.get("timestamp", "")[:19]
+        print(f"  {d.name}  trained={ts}  entries={entries}  "
+              f"corrections={corrections}  audit={audit}{marker}")
+
+    return 0
+
+
+def cmd_rollback(version: str):
+    """Rollback to a specific model version."""
+    target = MODELS_DIR / version
+    if not target.is_dir():
+        # Try partial match
+        matches = [d for d in MODELS_DIR.iterdir()
+                    if d.is_dir() and d.name.startswith("v_") and version in d.name]
+        if len(matches) == 1:
+            target = matches[0]
+        elif len(matches) > 1:
+            print(f"Ambiguous version '{version}'. Matches:", file=sys.stderr)
+            for m in matches:
+                print(f"  {m.name}", file=sys.stderr)
+            return 1
+        else:
+            print(f"Version '{version}' not found.", file=sys.stderr)
+            return 1
+
+    # Check it has model files
+    if not (target / "presence_classifier.pt").exists() and not (target / "eye_state_classifier.pt").exists():
+        print(f"Version {target.name} has no model files.", file=sys.stderr)
+        return 1
+
+    # Update latest symlink
+    latest_link = MODELS_DIR / "latest"
+    old_version = None
+    if latest_link.is_symlink():
+        old_version = latest_link.resolve().name
+        latest_link.unlink()
+    latest_link.symlink_to(target.name)
+
+    # Also copy into top-level models/ for backward compat
+    import shutil
+    for pt_file in target.glob("*.pt"):
+        shutil.copy2(pt_file, MODELS_DIR / pt_file.name)
+
+    print(f"Rolled back: {old_version or 'none'} → {target.name}")
+    print("Reload launchd to use the rolled-back models:")
+    print("  launchctl unload ~/Library/LaunchAgents/com.openclaw.baby-monitor.plist")
+    print("  launchctl load ~/Library/LaunchAgents/com.openclaw.baby-monitor.plist")
+
+    return 0
+
+
 def cmd_retrain():
     """Retrain classifiers using corrections + audit disagreements as supplemental data.
 
@@ -738,6 +823,10 @@ examples:
                       help="spot-check birdeye decisions against cloud API")
     mode.add_argument("--retrain", action="store_true",
                       help="retrain classifiers with corrections + audit data")
+    mode.add_argument("--list-models", action="store_true",
+                      help="list available model versions")
+    mode.add_argument("--rollback", metavar="VERSION",
+                      help="rollback to a specific model version")
     p.add_argument("--dry-run", action="store_true",
                    help="run full pipeline but do not write to the JSONL log")
     p.add_argument("--verbose", "-v", action="store_true",

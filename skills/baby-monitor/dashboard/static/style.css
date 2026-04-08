@@ -563,7 +563,11 @@ footer {
   padding: 12px 8px;
   background: rgba(42, 58, 92, 0.3);
   border-radius: 8px;
-  cursor: help;
+}
+.perf-desc {
+  font-size: 0.65rem;
+  color: #556;
+  margin-top: 2px;
 }
 .perf-value {
   font-size: 1.4rem;

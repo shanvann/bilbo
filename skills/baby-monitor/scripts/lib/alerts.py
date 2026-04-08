@@ -12,16 +12,13 @@ from .config import (
     ALERT_RULES,
     ALERT_STATE_FILE,
     BURST_AWAKE_THRESHOLD,
-    BURST_CONFIRM_COUNT,
-    BURST_INTERVAL_SEC,
     EDGE_ALERT_COOLDOWN_MIN,
     JSONL_FILE,
     WAKE_COOLDOWN_MIN,
     WAKE_WINDOW,
 )
-from .capture import capture_frame
 from .storage import get_recent_entries
-from .vision import _build_ssl_context, analyze_frame, flatten_analysis
+from .vision import _build_ssl_context
 
 log = logging.getLogger("monitor")
 
@@ -119,69 +116,38 @@ def should_burst(current_entry: dict) -> bool:
     return True
 
 
-def run_burst_confirmation(rtsp_url: str, api_key: str, anthropic_key: str, trigger_entry: dict) -> dict | None:
-    """Capture and analyze 2 additional frames at 60s intervals to confirm wake.
+def check_wake_confirmation(current_entry: dict) -> dict | None:
+    """Confirm wake by looking at recent natural entries (no extra captures).
 
-    Returns alert dict if confirmed (2+ of 3 frames show Awake), None otherwise.
-    All burst frames are logged to JSONL.
+    With 1-min capture intervals, the last 3 entries span ~3 minutes — enough
+    to confirm a real wake vs a single noisy frame. No blocking sleep needed.
+
+    Returns alert dict if confirmed (2+ of last 3 entries show Awake), None otherwise.
     """
-    all_states = [trigger_entry.get("state", "Unknown")]
-    log.info("burst: starting confirmation (2 frames at %ds intervals)", BURST_INTERVAL_SEC)
+    recent = get_recent_entries(3)
+    # Include the current entry (not yet in JSONL)
+    all_entries = recent + [current_entry]
+    # Take the last 3 baby-present entries
+    present = [e for e in all_entries if e.get("babyPresent")][-3:]
+    all_states = [e.get("state", "Unknown") for e in present]
 
-    for burst_i in range(BURST_CONFIRM_COUNT):
-        log.info("burst: waiting %ds before confirmation frame %d/%d",
-                 BURST_INTERVAL_SEC, burst_i + 1, BURST_CONFIRM_COUNT)
-        time.sleep(BURST_INTERVAL_SEC)
-
-        # Capture
-        try:
-            frame_path = capture_frame(rtsp_url)
-        except RuntimeError as e:
-            log.error("burst: capture failed for frame %d: %s", burst_i + 1, e)
-            all_states.append("Unknown")
-            continue
-
-        # Analyze
-        try:
-            analysis = analyze_frame(frame_path, api_key, anthropic_key)
-        except RuntimeError as e:
-            log.error("burst: analysis failed for frame %d: %s", burst_i + 1, e)
-            all_states.append("Unknown")
-            continue
-
-        flat = flatten_analysis(analysis, str(frame_path))
-        burst_state = flat.get("state", "Unknown")
-        all_states.append(burst_state)
-
-        # Log burst frame to JSONL
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        burst_entry = {"timestamp": now, "frame": str(frame_path), **flat,
-                       "alerts": [], "burstFrame": True, "burstIndex": burst_i + 1}
-        entry_json = json.dumps(burst_entry)
-        with open(JSONL_FILE, "a") as f:
-            f.write(entry_json + "\n")
-        log.info("burst: frame %d/%d state=%s position=%s (logged)",
-                 burst_i + 1, BURST_CONFIRM_COUNT, burst_state,
-                 flat.get("sleepPosition", "?"))
-
-    # Evaluate: how many of the 3 frames showed Awake?
     awake_count = all_states.count("Awake")
-    log.info("burst: confirmation complete — states=%s awake=%d/%d threshold=%d",
+    log.info("wake-confirm: recent states=%s awake=%d/%d threshold=%d",
              all_states, awake_count, len(all_states), BURST_AWAKE_THRESHOLD)
 
     if awake_count >= BURST_AWAKE_THRESHOLD:
-        log.info("burst: CONFIRMED active wake (%d/%d Awake)", awake_count, len(all_states))
+        log.info("wake-confirm: CONFIRMED active wake (%d/%d Awake)", awake_count, len(all_states))
         return {
             "type": "active_wake",
             "burst_states": all_states,
             "awake_count": awake_count,
             "total_frames": len(all_states),
-            "last_state": all_states[-1],
-            "last_position": trigger_entry.get("sleepPosition", "Unknown"),
-            "timestamp": trigger_entry.get("timestamp", ""),
+            "last_state": all_states[-1] if all_states else "Unknown",
+            "last_position": current_entry.get("sleepPosition", "Unknown"),
+            "timestamp": current_entry.get("timestamp", ""),
         }
     else:
-        log.info("burst: NOT confirmed (%d/%d Awake) — suppressing alert", awake_count, len(all_states))
+        log.info("wake-confirm: NOT confirmed (%d/%d Awake) — suppressing", awake_count, len(all_states))
         return None
 
 

@@ -147,17 +147,18 @@ python pipeline/train_classifiers.py \
 
 ### Baby Report (`skills/baby-report/`)
 
-Generates activity reports from two data sources:
-- **Sleep**: camera monitor JSONL (ground truth), CSV fallback for pre-camera days
-- **Feeds, pumps, diapers, weight**: activity CSV from parent tracking app
+Generates activity reports from camera data, manual tracking CSV, and monitor performance metrics.
 
 ```bash
-report.py --range 7d                 # weekly report
+report.py --range 7d                 # weekly report (all sections)
 report.py --range 24h                # last 24 hours
 report.py --from 2026-03-25 --to 2026-03-31
 report.py --section sleep            # single section
+report.py --section monitor          # BIRDEYE performance metrics
 report.py --format json              # structured output
 ```
+
+Sections: `sleep`, `feeding`, `pumping`, `diapers`, `weight`, `monitor`. The `monitor` section reports BIRDEYE vs cloud API usage, confidence stats, inference timing, API cost savings, coverage gaps, and state transitions.
 
 ## Dashboard
 
@@ -178,6 +179,61 @@ python3 app.py                       # accessible at http://localhost:5555
 - **Recent events** — last 20 state transitions with timestamps
 
 **Remote access:** Expose via Cloudflare Tunnel with Zero Trust auth for secure access from anywhere.
+
+## Design Decisions
+
+Key tradeoffs and the reasoning behind them.
+
+### Capture Interval
+
+| Interval | Frames/day | Disk/week | Wake detection delay | Cloud API cost (2% fallback) |
+|----------|-----------|-----------|---------------------|------------------------------|
+| 4 min | 360 | ~1.5 GB | Up to 4 min | ~$0.07/day |
+| 2 min | 720 | ~3.0 GB | Up to 2 min | ~$0.14/day |
+| **1 min (chosen)** | **1,440** | **~6.0 GB** | **Up to 1 min** | **~$0.29/day** |
+
+**Decision:** 1-minute intervals. With birdeye running locally in 40ms, the cost per frame is effectively zero. The tradeoff is disk — 6GB/week for 7-day frame retention. This also eliminates the need for special burst capture logic (see below).
+
+### Detection Pipeline Order
+
+| Order | When birdeye is healthy | When birdeye is down |
+|-------|------------------------|---------------------|
+| pixel-diff → birdeye → cloud | Pixel-diff runs on every frame (wasted on baby-present frames) | Pixel-diff catches empties, cloud handles rest |
+| **birdeye → pixel-diff → cloud (chosen)** | **Birdeye handles everything, pixel-diff never runs** | **Pixel-diff catches empties before cloud API** |
+| birdeye → cloud (no pixel-diff) | Same | Every frame hits cloud API ($0.01 each) |
+
+**Decision:** Birdeye first, pixel-diff as safety net. Pixel-diff only runs on the ~2% of frames where birdeye fails — and even then, it saves a cloud API call when the bassinet is simply empty. Costs nothing when birdeye is healthy, saves money when it's not.
+
+### Local vs Cloud Analysis
+
+| Approach | Latency | Cost | Accuracy | Privacy |
+|----------|---------|------|----------|---------|
+| Cloud API only | 2-5s | ~$0.01/frame | High (GPT-4o) | Frames sent to OpenAI |
+| **Local + cloud fallback (chosen)** | **40ms local, 2-5s fallback** | **~$0.003/frame avg** | **92% local, 100% with fallback** | **98% of frames stay on-device** |
+| Local only (no fallback) | 40ms | $0 | 92% (face-down = unknown) | Full privacy |
+
+**Decision:** Local-first with cloud fallback. BIRDEYE handles 98% of frames on-device. The 2% fallback (mostly face-not-visible) gets the cloud API's full analysis AND returns the head position to improve birdeye's next crop. Self-improving loop.
+
+### Wake Confirmation
+
+| Approach | Detection delay | Blocking time | Complexity |
+|----------|----------------|---------------|------------|
+| Single frame | Instant | 0 | Low, but noisy (false alarms) |
+| Burst capture (old) | +2 min | **2 min blocking** (sleeps between captures) | High (extra captures, API calls) |
+| **Look-back (chosen)** | +2 min | **0 (non-blocking)** | Low (check last 3 entries) |
+
+**Decision:** Look-back confirmation. With 1-minute intervals, 3 recent entries naturally span ~3 minutes. Requiring 2/3 entries to show "Awake" filters noise without blocking the pipeline or triggering extra captures. Same confirmation quality, zero added latency per run.
+
+### Frame Retention
+
+| Retention | Disk budget | Use case |
+|-----------|------------|----------|
+| 1 day | ~1 GB | Debugging only |
+| 3 days | ~4 GB | Short-term review |
+| **7 days (chosen)** | **~6 GB** | **Retraining, backtest, weekly reports** |
+| 30 days | ~25 GB | Full history (not worth the disk) |
+
+**Decision:** 7-day retention with 6GB cap. Keeps enough frames to retrain classifiers on recent data, run weekly backtests, and review any alerts from the past week. Oldest frames auto-deleted when cap is reached.
 
 ## Workspace Files
 

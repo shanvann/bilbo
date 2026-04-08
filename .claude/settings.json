@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"\nimport sys, json\nd = json.load(sys.stdin)\np = d.get('tool_input',{}).get('file_path','') or d.get('tool_response',{}).get('filePath','')\nif 'skills/baby-monitor/scripts/' in p or 'skills/baby-monitor/references/' in p:\n    print(json.dumps({'hookSpecificOutput':{'hookEventName':'PostToolUse','additionalContext':'SYNC CHECK: You modified baby-monitor source code. Before committing, verify these are up to date: (1) README.md — architecture diagram, file paths, CLI examples, design decisions (2) skills/baby-monitor/SKILL.md — architecture, scripts table, directory structure, log format (3) skills/baby-report/SKILL.md — if detection methods or report metrics changed (4) skills/baby-monitor/dashboard/app.py — if JSONL schema or new fields were added'}}))\n\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

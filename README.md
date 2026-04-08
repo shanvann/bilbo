@@ -4,16 +4,15 @@ An AI-powered baby monitor agent that watches over your newborn via an IP camera
 
 ## What It Does
 
-Bilbo captures a frame from your bassinet camera every 4 minutes, analyzes it with AI vision, and builds a detailed picture of your baby's sleep and behavior:
+Bilbo captures a frame from your bassinet camera every minute, analyzes it locally with two on-device classifiers, and builds a detailed picture of your baby's sleep and behavior:
 
 - **Tracks sleep state** — Asleep, Awake, Unknown — with position (Back, Side, Stomach) and location in bassinet
-- **Runs locally first** — BIRDEYE (two on-device MobileNetV3 classifiers) handles 98% of frames in ~40ms, falling back to cloud API only when uncertain
-- **Detects wake-ups** — burst-confirms with 3 frames over 2 minutes to filter noise, then sends a Telegram alert with feedback buttons (✅/❌) to track accuracy
+- **Runs locally first** — BIRDEYE (two MobileNetV3-Small classifiers) handles ~98% of frames in ~40ms, falling back to cloud API only when uncertain
+- **Detects wake-ups** — confirms by checking last 3 entries (2/3 must show Awake), then sends a Telegram alert with feedback buttons to track accuracy
 - **Safety alerts** — immediate notification if baby is pressed against the bassinet side
-- **Saves API costs** — pixel-diff skips empty frames (~31%), BIRDEYE handles the rest locally (~98% of non-empty frames). Cloud API called on ~2% of total frames
-- **Never goes down** — cloud API fallback chain (gpt-4o-mini → gpt-4o) handles cases where local classifiers are uncertain
+- **Saves API costs** — BIRDEYE handles ~98% of frames locally. Pixel-diff catches empty bassinets when birdeye is down. Cloud API (gpt-4o) called on ~2% of frames as last resort
 - **Adaptive head tracking** — when cloud API is called, it returns the baby's head position, which BIRDEYE uses to center its crop on the next tick
-- **Generates reports** — daily/weekly activity reports combining camera data with manual tracking (feeds, pumps, diapers, weight)
+- **Generates reports** — daily/weekly activity reports combining camera data with manual tracking (feeds, pumps, diapers, weight) and monitor performance metrics
 - **Human-in-the-loop** — dashboard lets you correct vision model mistakes (edit state/position per frame)
 
 > **Note:** The camera only monitors the bassinet. Sleep that happens elsewhere (stroller, being held, car seat) is not captured — sleep totals from camera data are a lower bound.
@@ -49,11 +48,8 @@ Create `.env.baby-monitor` in the workspace root:
 # Camera
 RTSP_STREAM_URL="rtsp://username:password@192.168.x.x/stream1"
 
-# Vision API (primary)
+# Cloud API (backup to local classifiers — only called on ~2% of frames)
 OPENAI_API_KEY="sk-..."
-
-# Vision API (fallback)
-ANTHROPIC_API_KEY="sk-ant-..."
 
 # Telegram alerts
 TELEGRAM_BOT_TOKEN="123456:ABC..."    # Your Telegram bot token
@@ -62,7 +58,7 @@ TELEGRAM_CHAT_ID="123456789"          # Your Telegram user ID
 
 ### Start Monitoring
 
-Install the launchd service (runs every 4 minutes, survives reboots):
+Install the launchd service (runs every minute, survives reboots):
 
 ```bash
 # Copy the plist (edit paths if your workspace differs)
@@ -81,7 +77,7 @@ The core monitoring pipeline.
 
 **Architecture:**
 ```
-launchd (every 4 min) → capture frame (ffmpeg)
+launchd (every 1 min) → capture frame (ffmpeg)
   → Stage 1: BIRDEYE (local classifiers, ~40ms)
     → Classifier 1: bassinet crop → baby present?
     → Classifier 2: head-region crop → eyes_open / eyes_closed / face_not_visible
@@ -91,12 +87,11 @@ launchd (every 4 min) → capture frame (ffmpeg)
     → empty bassinet? → log as absent, done
     → changed? ↓
   → Stage 3: cloud vision API (last resort, ~2-5s, $0.01/call)
-    → full analysis (gpt-4o-mini → gpt-4o)
+    → full analysis (gpt-4o)
     → also returns head position → saved for next tick
   → log to JSONL
   → wake detection: Awake after sleep?
-    → burst: 2 more frames at 60s intervals
-    → 2/3 Awake? → Telegram alert with feedback buttons
+    → check last 3 entries: 2/3 Awake? → Telegram alert with feedback buttons
   → edge detection: pressed against side?
     → immediate Telegram alert
 ```
@@ -116,8 +111,7 @@ launchd (every 4 min) → capture frame (ffmpeg)
 | `scripts/monitor.py` | Main pipeline — capture, detect, analyze, alert |
 | `scripts/lib/classifiers.py` | BIRDEYE — presence + eye state classifiers |
 | `scripts/lib/local_pipeline.py` | BIRDEYE orchestration and fallback logic |
-| `scripts/report.py` | Performance reporting (birdeye vs cloud API stats) |
-| `pipeline/train_classifiers.py` | Train classifiers from sleep-log labels |
+| `scripts/train_classifiers.py` | Train classifiers from sleep-log labels |
 | `references/prompt.md` | Cloud API prompt and JSON schema |
 | `data/sleep-log.jsonl` | Append-only analysis log (gitignored) |
 | `data/head-state.json` | Last known head position (gitignored) |
@@ -132,14 +126,12 @@ monitor.py --backtest --alerts       # test wake alert accuracy
 monitor.py --alert-stats             # show alert precision from user feedback
 monitor.py --status                  # system health overview
 monitor.py --last 10                 # show recent log entries
-report.py --hours 24                 # BIRDEYE performance report
-report.py --from 2026-04-01 --json   # machine-readable report
 ```
 
 **Training:**
 ```bash
 # Train both classifiers (~10 min on CPU, labels from sleep-log.jsonl)
-python pipeline/train_classifiers.py \
+python scripts/train_classifiers.py \
   --sleep-log data/sleep-log.jsonl \
   --frames data/frames/ \
   --face-crops pipeline/output/bootstrap/face_crops/

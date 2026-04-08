@@ -1,6 +1,7 @@
 """Constants, paths, model chain config, and logging setup."""
 
 import logging
+import logging.handlers
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,8 @@ LOG_FILE = DATA_DIR / "system.log"
 JSONL_FILE = DATA_DIR / "sleep-log.jsonl"
 PROMPT_FILE = SKILL_DIR / "references" / "prompt.md"
 ENV_FILE = Path("~/.openclaw/workspace/.env.baby-monitor")
+PIPELINE_DIR = SKILL_DIR / "pipeline"
+PIPELINE_CONFIG = PIPELINE_DIR / "config.yaml"
 
 MAX_FRAMES_KB = 1 * 1024 * 1024  # 1 GB
 REFS_DIR = DATA_DIR / "references"
@@ -30,9 +33,7 @@ ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 # ---------------------------------------------------------------------------
 MODEL_CHAIN = [
     {"provider": "openai", "model": "gpt-4o-mini", "timeout": 20},
-    {"provider": "openai", "model": "gpt-4o", "timeout": 30},
-    {"provider": "anthropic", "model": "claude-sonnet-4-6", "timeout": 60},
-]
+    {"provider": "openai", "model": "gpt-4o", "timeout": 30}]
 
 API_RETRIES = 2  # retries per model (before falling through to next)
 CAPTURE_TIMEOUT = 30
@@ -65,6 +66,21 @@ EDGE_ALERT_COOLDOWN_MIN = 30
 # ---------------------------------------------------------------------------
 ALERT_STATE_FILE = DATA_DIR / "alert-state.json"
 ALERT_FEEDBACK_FILE = DATA_DIR / "alert-feedback.jsonl"
+HEAD_STATE_FILE = DATA_DIR / "head-state.json"
+
+# ---------------------------------------------------------------------------
+# Birdeye classifier config
+# ---------------------------------------------------------------------------
+# Fixed crop region for baby presence classifier (fraction of frame)
+# Crops the center of the bassinet, excluding the walls
+BASSINET_CROP = {"x": 0.15, "y": 0.10, "w": 0.70, "h": 0.80}
+# Head crop size as fraction of frame dimensions (square crop around head center)
+HEAD_CROP_SIZE = 0.30
+# Default head position (center-upper area of bassinet) when no state file exists
+DEFAULT_HEAD_POS = {"x": 0.50, "y": 0.35}
+# Classifier model paths (relative to PIPELINE_DIR)
+PRESENCE_MODEL = "models/presence_classifier.pt"
+EYE_STATE_MODEL = "models/eye_state_classifier.pt"
 
 # ---------------------------------------------------------------------------
 # Legacy alert rules (currently disabled)
@@ -97,7 +113,7 @@ LOG_FMT = "[%(asctime)s] monitor: %(message)s"
 log = logging.getLogger("monitor")
 log.setLevel(logging.DEBUG)
 
-_fh = logging.FileHandler(LOG_FILE)
+_fh = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
 _fh.setFormatter(UTCFormatter(LOG_FMT))
 log.addHandler(_fh)
 

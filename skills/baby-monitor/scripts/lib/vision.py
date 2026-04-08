@@ -81,10 +81,17 @@ def _call_anthropic(image_b64: str, prompt_text: str, api_key: str, model: str, 
 def _call_openai(image_b64: str, prompt_text: str, api_key: str,
                   model: str, timeout: int) -> tuple[dict, str]:
     """Call OpenAI vision API. Returns (analysis_dict, model_used)."""
-    payload = json.dumps({
-        "model": model,
-        "max_tokens": 1024,
-        "messages": [
+    try:
+        from openai import OpenAI
+    except ImportError:
+        log.error("openai library not installed. Please run: pip install -r requirements.txt")
+        raise RuntimeError("OpenAI library not found")
+
+    client = OpenAI(api_key=api_key, timeout=timeout)
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
             {
                 "role": "user",
                 "content": [
@@ -99,22 +106,13 @@ def _call_openai(image_b64: str, prompt_text: str, api_key: str,
                 ],
             }
         ],
-    }).encode()
+        max_tokens=1024,
+    )
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-    }
-
-    ctx = _build_ssl_context()
-    req = urllib.request.Request(OPENAI_API_URL, data=payload, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-        body = json.loads(resp.read())
-
-    raw = body["choices"][0]["message"]["content"]
+    raw = response.choices[0].message.content
     cleaned = _strip_markdown_fences(raw)
     analysis = json.loads(cleaned)
-    model_used = body.get("model", model)
+    model_used = response.model
     return analysis, model_used
 
 
@@ -171,10 +169,10 @@ def analyze_frame(image_path: Path, api_key: str, anthropic_key: str = None) -> 
             except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
                 elapsed = time.monotonic() - t0
                 if isinstance(e, urllib.error.HTTPError):
-                    detail = e.read().decode(errors="replace")[:200]
-                    last_err = f"{provider}/{model} HTTP {e.code}: {detail}"
-                    log.warning("analyze: %s failed (HTTP %d, %.1fs): %s",
-                                model, e.code, elapsed, detail[:100])
+                    raw_body = e.read().decode(errors="replace")[:500]
+                    last_err = f"{provider}/{model} HTTP {e.code}: {raw_body}"
+                    log.warning("analyze: %s failed (HTTP %d, %.1fs). RAW: %s",
+                                model, e.code, elapsed, raw_body)
                     # Retry on rate limit or server error
                     if e.code == 429 or e.code >= 500:
                         if attempt < API_RETRIES:
@@ -221,6 +219,7 @@ _ATTR_MAP = {
     "Bassinet condition": "bassinetCondition",
     "External hazards (inside bassinet)": "hazards",
     "Baby location in bassinet": "bassinetLocation",
+    "Head position in frame": "headPosition",
 }
 
 # Values that become booleans

@@ -678,11 +678,31 @@ def api_monitor_stats():
     cloud = [e for e in entries if e.get("detectionMethod") in ("vision-api", "openai-vision")]
     pixel_diff = [e for e in entries if e.get("detectionMethod") == "pixel-diff"]
 
-    # Birdeye confidence + timing stats
-    presence_confs = [e["presenceConfidence"] for e in birdeye if e.get("presenceConfidence") is not None]
-    eye_confs = [e["eyeConfidence"] for e in birdeye if e.get("eyeConfidence") is not None]
-    timings = [e["birdeyeTimings"]["total"] for e in birdeye
-               if isinstance(e.get("birdeyeTimings"), dict) and "total" in e["birdeyeTimings"]]
+    # Birdeye confidence + timing stats (from both direct birdeye entries AND shadow data)
+    presence_confs = []
+    eye_confs = []
+    timings = []
+    # From direct birdeye entries (when birdeye was prod)
+    for e in birdeye:
+        if e.get("presenceConfidence") is not None:
+            presence_confs.append(e["presenceConfidence"])
+        if e.get("eyeConfidence") is not None:
+            eye_confs.append(e["eyeConfidence"])
+        bt = e.get("birdeyeTimings")
+        if isinstance(bt, dict) and "total" in bt:
+            timings.append(bt["total"])
+    # From shadow entries (when cloud API is prod, birdeye ran in parallel)
+    for e in entries:
+        shadow = e.get("shadow")
+        if not isinstance(shadow, dict):
+            continue
+        if shadow.get("presenceConfidence") is not None:
+            presence_confs.append(shadow["presenceConfidence"])
+        if shadow.get("eyeConfidence") is not None:
+            eye_confs.append(shadow["eyeConfidence"])
+        bt = shadow.get("birdeyeTimings")
+        if isinstance(bt, dict) and "total" in bt:
+            timings.append(bt["total"])
 
     def stats(vals):
         if not vals:

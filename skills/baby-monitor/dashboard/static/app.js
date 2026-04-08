@@ -541,14 +541,29 @@ function renderTrainingStats() {
   const sources = trainingData.lastLabelSources || {};
   const total = trainingData.lastEntriesTotal || 0;
 
-  // Version + trained time
+  // Version + trained time + run status
   const trainedAt = trainingData.lastTrained
     ? new Date(trainingData.lastTrained).toLocaleString('en-US', {
         timeZone: 'America/New_York', month: 'short', day: 'numeric',
         hour: 'numeric', minute: '2-digit', hour12: true })
     : '?';
-  document.getElementById('train-version').textContent =
-    trainingData.version + ' — ' + trainedAt;
+
+  let statusBadge = '';
+  if (trainingData.running) {
+    statusBadge = ' <span style="color:var(--accent-blue);font-size:0.8rem">⟳ training now</span>';
+  } else if (trainingData.runStatus === 'aborted') {
+    statusBadge = ' <span style="color:var(--accent-red);font-size:0.8rem">✕ aborted</span>';
+  } else if (trainingData.runStatus === 'failed') {
+    statusBadge = ' <span style="color:var(--accent-red);font-size:0.8rem">✕ failed</span>';
+  } else if (trainingData.runStatus === 'completed' && trainingData.finishedAt) {
+    const finAt = new Date(trainingData.finishedAt).toLocaleString('en-US', {
+      timeZone: 'America/New_York', month: 'short', day: 'numeric',
+      hour: 'numeric', minute: '2-digit', hour12: true });
+    statusBadge = ' <span style="color:var(--accent-green);font-size:0.8rem">✓ last run ' + finAt + '</span>';
+  }
+
+  document.getElementById('train-version').innerHTML =
+    (trainingData.version || '?') + ' — trained ' + trainedAt + statusBadge;
 
   // Data column
   const dataEl = document.getElementById('train-data');

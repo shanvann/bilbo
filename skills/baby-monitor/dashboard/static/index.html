@@ -8,7 +8,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 </head>
 <body>
-  <!-- Top Bar: Live Status -->
+  <!-- Top Bar: Compact Status -->
   <header id="status-bar">
     <div class="status-left">
       <div id="status-icon" class="status-icon"></div>
@@ -21,9 +21,6 @@
       <div id="status-alerts" class="status-alerts"></div>
     </div>
     <div class="status-right">
-      <div id="frame-container" class="frame-thumb-container">
-        <img id="frame-thumb" class="frame-thumb" alt="Latest frame" style="display:none">
-      </div>
       <div class="status-meta">
         <div id="status-time" class="meta-line"></div>
         <div id="status-health" class="meta-line"></div>
@@ -39,6 +36,13 @@
 
   <!-- Main Content -->
   <main>
+    <!-- Live Frame (hero) -->
+    <section class="card live-frame-card">
+      <div class="live-frame-container">
+        <img id="frame-thumb" class="live-frame-img" alt="Latest frame" style="display:none">
+        <div id="live-frame-placeholder" class="live-frame-placeholder">No frame yet</div>
+      </div>
+    </section>
     <!-- Timeline -->
     <section class="card">
       <h2>Timeline

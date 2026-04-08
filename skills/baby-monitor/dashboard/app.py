@@ -487,13 +487,20 @@ def _write_training_state(state: dict):
     TRAINING_STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
-def _get_last_training_log() -> dict | None:
+def _get_last_training_logs(n: int = 2) -> list[dict]:
+    """Return the last N training log entries (newest first)."""
     if not TRAINING_LOG.exists():
-        return None
+        return []
     lines = TRAINING_LOG.read_text().strip().splitlines()
     if not lines:
-        return None
-    return json.loads(lines[-1])
+        return []
+    result = []
+    for line in reversed(lines[-n:]):
+        try:
+            result.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+    return result
 
 
 @app.route("/api/training-status")
@@ -502,7 +509,9 @@ def api_training_status():
     global _train_process
 
     state = _read_training_state()
-    last_log = _get_last_training_log()
+    logs = _get_last_training_logs(2)
+    last_log = logs[0] if logs else None
+    prev_log = logs[1] if len(logs) > 1 else None
 
     # Check if a tracked process is still running
     running = False
@@ -548,6 +557,9 @@ def api_training_status():
         "lastMetrics": last_log.get("metrics") if last_log else None,
         "lastLabelSources": last_log.get("label_sources") if last_log else None,
         "lastEntriesTotal": last_log.get("entries_total") if last_log else None,
+        # Previous training for delta comparison
+        "prevVersion": prev_log.get("version") if prev_log else None,
+        "prevMetrics": prev_log.get("metrics") if prev_log else None,
         # Corrections
         "pendingCorrections": pending_corrections,
         "totalCorrections": total_corrections,

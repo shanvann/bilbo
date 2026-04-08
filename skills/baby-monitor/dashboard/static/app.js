@@ -217,6 +217,8 @@ async function loadTimeline() {
       }
     }
 
+    // Store blocks with their durStr for block-level navigation
+    allBlocks = [];
     for (const seg of merged) {
       const blockStart = Math.max(seg.start.getTime(), start.getTime());
       const blockEnd = Math.min(seg.end.getTime(), timelineEnd.getTime());
@@ -225,6 +227,10 @@ async function loadTimeline() {
       const widthPct = ((blockEnd - blockStart) / totalMs) * 100;
       const durMin = Math.round((blockEnd - blockStart) / 60000);
       const durStr = durMin >= 60 ? Math.floor(durMin / 60) + 'h ' + (durMin % 60) + 'm' : durMin + 'm';
+
+      seg._durStr = durStr;
+      allBlocks.push(seg);
+      const blockIdx = allBlocks.length - 1;
 
       const block = document.createElement('div');
       block.className = 'tl-block ' + seg.cat;
@@ -235,7 +241,7 @@ async function loadTimeline() {
         formatTimeET(seg.end.toISOString()) + '\n' +
         'Duration: ' + durStr + '\n(click for details)';
       block.style.cursor = 'pointer';
-      block.addEventListener('click', () => showBlockDetail(seg, durStr));
+      block.addEventListener('click', () => openBlock(blockIdx));
       barEl.appendChild(block);
     }
 
@@ -251,6 +257,14 @@ async function loadTimeline() {
 let viewerEntries = [];
 let viewerIndex = 0;
 let trainingData = null; // shared training state from API
+let allBlocks = [];      // all merged timeline blocks (for block prev/next)
+let currentBlockIndex = -1;
+
+function openBlock(idx) {
+  currentBlockIndex = idx;
+  const seg = allBlocks[idx];
+  showBlockDetail(seg, seg._durStr);
+}
 
 function showBlockDetail(seg, durStr) {
   const panel = document.getElementById('block-detail');
@@ -261,6 +275,12 @@ function showBlockDetail(seg, durStr) {
     formatTimeET(seg.start.toISOString()) + ' → ' +
     formatTimeET(seg.end.toISOString()) +
     ' (' + durStr + ', ' + seg.entries.length + ' frames)';
+
+  // Block nav buttons
+  document.getElementById('block-prev').disabled = currentBlockIndex <= 0;
+  document.getElementById('block-next').disabled = currentBlockIndex >= allBlocks.length - 1;
+  document.getElementById('block-counter').textContent =
+    'Block ' + (currentBlockIndex + 1) + ' / ' + allBlocks.length;
 
   viewerEntries = seg.entries;
   viewerIndex = 0;
@@ -384,6 +404,12 @@ document.getElementById('viewer-state').addEventListener('change', async (ev) =>
 
 document.getElementById('block-detail-close').addEventListener('click', () => {
   document.getElementById('block-detail').style.display = 'none';
+});
+document.getElementById('block-prev').addEventListener('click', () => {
+  if (currentBlockIndex > 0) openBlock(currentBlockIndex - 1);
+});
+document.getElementById('block-next').addEventListener('click', () => {
+  if (currentBlockIndex < allBlocks.length - 1) openBlock(currentBlockIndex + 1);
 });
 
 // ---------------------------------------------------------------------------

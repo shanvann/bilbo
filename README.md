@@ -1,6 +1,6 @@
 # BILBO — Baby Intelligent Lookout & Behavior Observer
 
-An AI-powered baby monitor agent that watches over your newborn via an IP camera, tracks sleep patterns, detects wake events, and sends real-time alerts — all running locally on a Mac with [OpenClaw](https://github.com/openclaw/openclaw).
+A baby bassinet monitor that captures a frame every minute from an IP camera, classifies sleep state locally with two on-device ML models (BIRDEYE), and sends Telegram alerts when the baby wakes up. Runs on a Mac via launchd with cloud API (GPT-4o) as fallback for the ~2% of frames the local models can't resolve.
 
 ## What It Does
 

@@ -548,12 +548,16 @@ async function loadEvents() {
 }
 
 // ---------------------------------------------------------------------------
-// Training status & retrain button
+// Training status & retrain/abort buttons
 // ---------------------------------------------------------------------------
+let trainPollInterval = null;
+
 async function loadTrainingStatus() {
   try {
     const res = await fetch('/api/training-status');
     const data = await res.json();
+
+    // Model info line
     const el = document.getElementById('footer-model');
     if (data.lastTrained) {
       const dt = new Date(data.lastTrained);
@@ -562,43 +566,82 @@ async function loadTrainingStatus() {
         month: 'short', day: 'numeric',
         hour: 'numeric', minute: '2-digit', hour12: true,
       });
-      el.textContent = 'Model ' + (data.version || '') + ' — trained ' + timeStr;
+      const trigger = data.trigger ? ' (' + data.trigger + ')' : '';
+      el.textContent = (data.version || 'model') + ' — trained ' + timeStr + trigger;
     } else {
       el.textContent = 'No model trained yet';
     }
+
+    // Button state
+    const btn = document.getElementById('footer-retrain');
+    const abortBtn = document.getElementById('footer-abort');
+
+    if (data.running) {
+      btn.style.display = 'none';
+      abortBtn.style.display = '';
+      const startedAt = data.startedAt ? new Date(data.startedAt) : null;
+      const elapsed = startedAt ? Math.round((Date.now() - startedAt.getTime()) / 1000) : 0;
+      const elapsedStr = elapsed > 60 ? Math.floor(elapsed / 60) + 'm ' + (elapsed % 60) + 's' : elapsed + 's';
+      abortBtn.textContent = 'Abort (' + elapsedStr + ')';
+      // Start polling if not already
+      if (!trainPollInterval) {
+        trainPollInterval = setInterval(loadTrainingStatus, 5000);
+      }
+    } else {
+      btn.style.display = '';
+      abortBtn.style.display = 'none';
+      btn.disabled = false;
+      btn.textContent = 'Retrain Model';
+      // Stop polling
+      if (trainPollInterval) {
+        clearInterval(trainPollInterval);
+        trainPollInterval = null;
+      }
+    }
+
+    return data;
   } catch (e) {
     console.error('Training status error:', e);
+    return null;
   }
 }
 
 document.getElementById('footer-retrain').addEventListener('click', async () => {
   const btn = document.getElementById('footer-retrain');
   btn.disabled = true;
-  btn.textContent = 'Retraining...';
+  btn.textContent = 'Starting...';
 
   try {
-    const res = await fetch('/api/retrain', { method: 'POST' });
+    const res = await fetch('/api/retrain', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trigger: 'dashboard' }),
+    });
     const data = await res.json();
-    if (data.ok) {
-      btn.textContent = 'Retrain started';
-      // Poll for completion (training-status will update when done)
-      const poll = setInterval(async () => {
-        await loadTrainingStatus();
-        const el = document.getElementById('footer-model');
-        // Check if version changed
-        if (el.textContent.includes('trained')) {
-          clearInterval(poll);
-          btn.textContent = 'Retrain Model';
-          btn.disabled = false;
-        }
-      }, 10000); // check every 10s
-      // Safety timeout: re-enable after 15 min regardless
-      setTimeout(() => { clearInterval(poll); btn.textContent = 'Retrain Model'; btn.disabled = false; }, 900000);
+    if (!data.ok) {
+      btn.textContent = data.error || 'Failed';
+      setTimeout(() => { btn.textContent = 'Retrain Model'; btn.disabled = false; }, 3000);
+      return;
     }
+    // Poll will pick up the running state
+    await loadTrainingStatus();
   } catch (e) {
-    btn.textContent = 'Retrain failed';
+    btn.textContent = 'Error';
     btn.disabled = false;
     console.error('Retrain error:', e);
+  }
+});
+
+document.getElementById('footer-abort').addEventListener('click', async () => {
+  const btn = document.getElementById('footer-abort');
+  btn.disabled = true;
+  btn.textContent = 'Aborting...';
+
+  try {
+    await fetch('/api/retrain/abort', { method: 'POST' });
+    await loadTrainingStatus();
+  } catch (e) {
+    console.error('Abort error:', e);
   }
 });
 

@@ -578,6 +578,60 @@ document.getElementById('footer-abort').addEventListener('click', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// Model Performance section
+// ---------------------------------------------------------------------------
+async function loadMonitorStats() {
+  try {
+    const res = await fetch('/api/monitor-stats?hours=24');
+    const d = await res.json();
+
+    document.getElementById('perf-period').textContent = '(last 24h, ' + d.total + ' frames)';
+
+    // Birdeye rate
+    const rate = d.birdeyeRate != null ? Math.round(d.birdeyeRate * 100) + '%' : '--';
+    document.getElementById('perf-birdeye-rate').textContent = rate;
+
+    // Cloud calls
+    document.getElementById('perf-cloud-calls').textContent = d.cost ? d.cost.apiCalls : '--';
+
+    // Cost saved
+    document.getElementById('perf-cost-saved').textContent = d.cost ? '$' + d.cost.estSaved.toFixed(2) : '--';
+
+    // Latency
+    const lat = d.timing ? d.timing.avg + 'ms' : '--';
+    document.getElementById('perf-latency').textContent = d.timing ? Math.round(d.timing.avg * 1000) + 'ms' : '--';
+
+    // Eye confidence
+    document.getElementById('perf-confidence').textContent = d.confidence && d.confidence.eye
+      ? d.confidence.eye.avg.toFixed(2) : '--';
+
+    // Gaps
+    document.getElementById('perf-gaps').textContent = d.gaps != null ? d.gaps : '--';
+
+    // Breakdown bar
+    const breakdown = document.getElementById('perf-breakdown');
+    if (d.total > 0) {
+      const bPct = Math.round((d.methods.birdeye || 0) / d.total * 100);
+      const cPct = Math.round((d.methods.cloud_api || 0) / d.total * 100);
+      const pPct = Math.round((d.methods.pixel_diff || 0) / d.total * 100);
+      breakdown.innerHTML =
+        '<div class="perf-bar">' +
+          (bPct > 0 ? '<div class="perf-bar-seg birdeye" style="width:' + bPct + '%" title="Birdeye ' + bPct + '%">' + bPct + '%</div>' : '') +
+          (pPct > 0 ? '<div class="perf-bar-seg pixel-diff" style="width:' + pPct + '%" title="Pixel-diff ' + pPct + '%">' + (pPct > 5 ? pPct + '%' : '') + '</div>' : '') +
+          (cPct > 0 ? '<div class="perf-bar-seg cloud" style="width:' + cPct + '%" title="Cloud API ' + cPct + '%">' + (cPct > 3 ? cPct + '%' : '') + '</div>' : '') +
+        '</div>' +
+        '<div class="perf-bar-legend">' +
+          '<span><span class="legend-dot" style="background:var(--accent-green)"></span> Birdeye</span>' +
+          '<span><span class="legend-dot" style="background:var(--accent-blue)"></span> Pixel-diff</span>' +
+          '<span><span class="legend-dot" style="background:var(--accent-orange)"></span> Cloud API</span>' +
+        '</div>';
+    }
+  } catch (e) {
+    console.error('Monitor stats error:', e);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Next frame countdown timer (ticks every second)
 // ---------------------------------------------------------------------------
 let lastCaptureAgoSec = null;  // seconds since last capture (from API)
@@ -622,6 +676,7 @@ async function loadAll() {
     loadTimeline(),
     loadEvents(),
     loadTrainingStatus(),
+    loadMonitorStats(),
   ]);
   document.getElementById('footer-refresh').textContent =
     'Last refreshed: ' + new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York' });

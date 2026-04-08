@@ -76,18 +76,26 @@
     <section id="block-detail" class="card" style="display:none">
       <h2>Block Detail <button id="block-detail-close" class="tl-nav-btn" style="float:right">✕ Close</button></h2>
       <div id="block-detail-summary" class="block-summary"></div>
-      <div class="table-wrap">
-        <table id="block-detail-table">
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>State</th>
-              <th>Position</th>
-              <th>Frame</th>
-            </tr>
-          </thead>
-          <tbody id="block-detail-body"></tbody>
-        </table>
+      <div id="block-detail-viewer" class="block-viewer">
+        <div class="viewer-frame">
+          <img id="viewer-img" class="viewer-img" alt="Frame">
+        </div>
+        <div class="viewer-controls">
+          <div class="viewer-nav">
+            <button id="viewer-prev" class="viewer-btn">◀ Prev</button>
+            <span id="viewer-counter" class="viewer-counter">1 / 10</span>
+            <button id="viewer-next" class="viewer-btn">Next ▶</button>
+          </div>
+          <div class="viewer-meta">
+            <span id="viewer-time" class="viewer-time"></span>
+            <select id="viewer-state" class="detail-select viewer-state-select">
+              <option value="Asleep">Asleep</option>
+              <option value="Awake">Awake</option>
+              <option value="Unknown">Unknown</option>
+            </select>
+            <span id="viewer-saved" class="viewer-saved"></span>
+          </div>
+        </div>
       </div>
     </section>
 

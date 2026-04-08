@@ -617,9 +617,10 @@ async function loadMonitorStats() {
 
     document.getElementById('perf-period').textContent = '(last 24h, ' + d.total + ' frames)';
 
-    // Birdeye rate
-    const rate = d.birdeyeRate != null ? Math.round(d.birdeyeRate * 100) + '%' : '--';
-    document.getElementById('perf-birdeye-rate').textContent = rate;
+    // Shadow coverage (how many frames birdeye produced a result for)
+    const shadowCoverage = d.shadow && d.shadow.total > 0
+      ? Math.round(d.shadow.total / d.total * 100) + '%' : '--';
+    document.getElementById('perf-birdeye-rate').textContent = shadowCoverage;
 
     // Cloud cost
     document.getElementById('perf-cloud-calls').textContent = d.cost
@@ -642,12 +643,12 @@ async function loadMonitorStats() {
     // Gaps
     document.getElementById('perf-gaps').textContent = d.gaps != null ? d.gaps : '--';
 
-    // Agreement rate
+    // Shadow agreement rate
     const agEl = document.getElementById('perf-agreement');
-    if (d.spotCheck && d.spotCheck.total > 0) {
-      const pct = Math.round(d.spotCheck.agreementRate * 100);
-      agEl.textContent = pct + '% (' + d.spotCheck.agreed + '/' + d.spotCheck.total + ')';
-      agEl.style.color = pct >= 90 ? 'var(--accent-green)' : pct >= 70 ? 'var(--accent-orange)' : 'var(--accent-red)';
+    if (d.shadow && d.shadow.total > 0) {
+      const pct = Math.round(d.shadow.agreementRate * 100);
+      agEl.textContent = pct + '% (' + d.shadow.agreed + '/' + d.shadow.total + ')';
+      agEl.style.color = pct >= 95 ? 'var(--accent-green)' : pct >= 80 ? 'var(--accent-orange)' : 'var(--accent-red)';
     } else {
       agEl.textContent = 'No data';
       agEl.style.color = '';
@@ -656,22 +657,19 @@ async function loadMonitorStats() {
     // Breakdown bar
     const breakdown = document.getElementById('perf-breakdown');
     if (d.total > 0) {
-      const bPct = Math.round((d.methods.birdeye || 0) / d.total * 100);
       const cPct = Math.round((d.methods.cloud_api || 0) / d.total * 100);
       const pPct = Math.round((d.methods.pixel_diff || 0) / d.total * 100);
-      const sPct = Math.round((d.methods.spot_check || 0) / d.total * 100);
+      // Shadow disagreements shown as a fraction of cloud API calls
+      const dPct = d.shadow ? Math.round((d.methods.shadow_disagreed || 0) / d.total * 100) : 0;
       breakdown.innerHTML =
         '<div class="perf-bar">' +
-          (bPct > 0 ? '<div class="perf-bar-seg birdeye" style="width:' + bPct + '%" title="Birdeye ' + bPct + '%">' + (bPct > 5 ? bPct + '%' : '') + '</div>' : '') +
           (pPct > 0 ? '<div class="perf-bar-seg pixel-diff" style="width:' + pPct + '%" title="Pixel-diff ' + pPct + '%">' + (pPct > 5 ? pPct + '%' : '') + '</div>' : '') +
-          (sPct > 0 ? '<div class="perf-bar-seg spot-check" style="width:' + sPct + '%" title="Spot-check override ' + sPct + '%">' + (sPct > 3 ? sPct + '%' : '') + '</div>' : '') +
-          (cPct > 0 ? '<div class="perf-bar-seg cloud" style="width:' + cPct + '%" title="Cloud API ' + cPct + '%">' + (cPct > 3 ? cPct + '%' : '') + '</div>' : '') +
+          (cPct > 0 ? '<div class="perf-bar-seg cloud" style="width:' + cPct + '%" title="Cloud API ' + cPct + '%">' + (cPct > 5 ? cPct + '%' : '') + '</div>' : '') +
         '</div>' +
         '<div class="perf-bar-legend">' +
-          '<span><span class="legend-dot" style="background:var(--accent-green)"></span> Birdeye</span>' +
-          '<span><span class="legend-dot" style="background:var(--accent-blue)"></span> Pixel-diff</span>' +
-          (sPct > 0 ? '<span><span class="legend-dot" style="background:var(--accent-red)"></span> Spot-check override</span>' : '') +
-          '<span><span class="legend-dot" style="background:var(--accent-orange)"></span> Cloud API</span>' +
+          '<span><span class="legend-dot" style="background:var(--accent-blue)"></span> Pixel-diff (empty)</span>' +
+          '<span><span class="legend-dot" style="background:var(--accent-orange)"></span> Cloud API (prod)</span>' +
+          (d.shadow && d.shadow.total > 0 ? '<span> · Shadow birdeye ran on ' + d.shadow.total + ' frames</span>' : '') +
         '</div>';
     }
   } catch (e) {

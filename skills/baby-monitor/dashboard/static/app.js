@@ -547,6 +547,61 @@ async function loadEvents() {
 }
 
 // ---------------------------------------------------------------------------
+// Training status & retrain button
+// ---------------------------------------------------------------------------
+async function loadTrainingStatus() {
+  try {
+    const res = await fetch('/api/training-status');
+    const data = await res.json();
+    const el = document.getElementById('footer-model');
+    if (data.lastTrained) {
+      const dt = new Date(data.lastTrained);
+      const timeStr = dt.toLocaleString('en-US', {
+        timeZone: 'America/New_York',
+        month: 'short', day: 'numeric',
+        hour: 'numeric', minute: '2-digit', hour12: true,
+      });
+      el.textContent = 'Model ' + (data.version || '') + ' — trained ' + timeStr;
+    } else {
+      el.textContent = 'No model trained yet';
+    }
+  } catch (e) {
+    console.error('Training status error:', e);
+  }
+}
+
+document.getElementById('footer-retrain').addEventListener('click', async () => {
+  const btn = document.getElementById('footer-retrain');
+  btn.disabled = true;
+  btn.textContent = 'Retraining...';
+
+  try {
+    const res = await fetch('/api/retrain', { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      btn.textContent = 'Retrain started';
+      // Poll for completion (training-status will update when done)
+      const poll = setInterval(async () => {
+        await loadTrainingStatus();
+        const el = document.getElementById('footer-model');
+        // Check if version changed
+        if (el.textContent.includes('trained')) {
+          clearInterval(poll);
+          btn.textContent = 'Retrain Model';
+          btn.disabled = false;
+        }
+      }, 10000); // check every 10s
+      // Safety timeout: re-enable after 15 min regardless
+      setTimeout(() => { clearInterval(poll); btn.textContent = 'Retrain Model'; btn.disabled = false; }, 900000);
+    }
+  } catch (e) {
+    btn.textContent = 'Retrain failed';
+    btn.disabled = false;
+    console.error('Retrain error:', e);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Init & auto-refresh
 // ---------------------------------------------------------------------------
 async function loadAll() {
@@ -556,6 +611,7 @@ async function loadAll() {
     loadStats(),
     loadSleepTrends(),
     loadEvents(),
+    loadTrainingStatus(),
   ]);
   document.getElementById('footer-refresh').textContent =
     'Last refreshed: ' + new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York' });

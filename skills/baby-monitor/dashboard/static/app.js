@@ -615,35 +615,10 @@ async function loadMonitorStats() {
     const res = await fetch('/api/monitor-stats?hours=' + hours);
     const d = await res.json();
 
-    document.getElementById('perf-period').textContent = '(last 24h, ' + d.total + ' frames)';
+    const rangeLabel = {'0.167':'10m','0.5':'30m','1':'1h','12':'12h','24':'24h','168':'1w'}[hours] || hours+'h';
+    document.getElementById('perf-period').textContent = '(' + rangeLabel + ', ' + d.total + ' frames)';
 
-    // Shadow coverage (how many frames birdeye produced a result for)
-    const shadowCoverage = d.shadow && d.shadow.total > 0
-      ? Math.round(d.shadow.total / d.total * 100) + '%' : '--';
-    document.getElementById('perf-birdeye-rate').textContent = shadowCoverage;
-
-    // Cloud cost
-    document.getElementById('perf-cloud-calls').textContent = d.cost
-      ? '$' + d.cost.estCost.toFixed(2) + ' (' + d.cost.apiCalls + ')'
-      : '--';
-
-    // Cost saved
-    document.getElementById('perf-cost-saved').textContent = d.cost
-      ? '$' + d.cost.estSaved.toFixed(2) + ' (' + d.cost.apiAvoided + ')'
-      : '--';
-
-    // Latency
-    const lat = d.timing ? d.timing.avg + 'ms' : '--';
-    document.getElementById('perf-latency').textContent = d.timing ? Math.round(d.timing.avg * 1000) + 'ms' : '--';
-
-    // Eye confidence
-    document.getElementById('perf-confidence').textContent = d.confidence && d.confidence.eye
-      ? d.confidence.eye.avg.toFixed(2) : '--';
-
-    // Gaps
-    document.getElementById('perf-gaps').textContent = d.gaps != null ? d.gaps : '--';
-
-    // Shadow agreement rate
+    // Agreement (the key metric)
     const agEl = document.getElementById('perf-agreement');
     if (d.shadow && d.shadow.total > 0) {
       const pct = Math.round(d.shadow.agreementRate * 100);
@@ -654,22 +629,57 @@ async function loadMonitorStats() {
       agEl.style.color = '';
     }
 
-    // Breakdown bar
+    // Disagreements
+    document.getElementById('perf-disagreements').textContent =
+      d.shadow ? d.shadow.disagreed : '--';
+
+    // Prod cost
+    document.getElementById('perf-cloud-cost').textContent = d.cost
+      ? '$' + d.cost.estCost.toFixed(2) + ' (' + d.cost.apiCalls + ' calls)'
+      : '--';
+
+    // Shadow latency
+    document.getElementById('perf-latency').textContent =
+      d.timing ? Math.round(d.timing.avg * 1000) + 'ms' : '--';
+
+    // Eye confidence
+    document.getElementById('perf-confidence').textContent =
+      d.confidence && d.confidence.eye ? d.confidence.eye.avg.toFixed(2) : '--';
+
+    // Corrections pending
+    document.getElementById('perf-corrections').textContent =
+      trainingData ? trainingData.pendingCorrections : '--';
+
+    // Gaps
+    document.getElementById('perf-gaps').textContent = d.gaps != null ? d.gaps : '--';
+
+    // Breakdown bar: prod pipeline (pixel-diff + cloud) with shadow overlay
     const breakdown = document.getElementById('perf-breakdown');
     if (d.total > 0) {
       const cPct = Math.round((d.methods.cloud_api || 0) / d.total * 100);
       const pPct = Math.round((d.methods.pixel_diff || 0) / d.total * 100);
-      // Shadow disagreements shown as a fraction of cloud API calls
-      const dPct = d.shadow ? Math.round((d.methods.shadow_disagreed || 0) / d.total * 100) : 0;
+      const shadowTotal = d.shadow ? d.shadow.total : 0;
+      const agPct = d.shadow && shadowTotal > 0 ? Math.round(d.shadow.agreed / shadowTotal * 100) : 0;
+      const dgPct = d.shadow && shadowTotal > 0 ? Math.round(d.shadow.disagreed / shadowTotal * 100) : 0;
+
       breakdown.innerHTML =
+        '<div style="margin-bottom:6px;font-size:0.75rem;color:var(--text-dim)">Production pipeline</div>' +
         '<div class="perf-bar">' +
           (pPct > 0 ? '<div class="perf-bar-seg pixel-diff" style="width:' + pPct + '%" title="Pixel-diff ' + pPct + '%">' + (pPct > 5 ? pPct + '%' : '') + '</div>' : '') +
           (cPct > 0 ? '<div class="perf-bar-seg cloud" style="width:' + cPct + '%" title="Cloud API ' + cPct + '%">' + (cPct > 5 ? cPct + '%' : '') + '</div>' : '') +
         '</div>' +
+        (shadowTotal > 0 ?
+          '<div style="margin:8px 0 6px;font-size:0.75rem;color:var(--text-dim)">Shadow birdeye (' + shadowTotal + ' frames compared)</div>' +
+          '<div class="perf-bar">' +
+            '<div class="perf-bar-seg birdeye" style="width:' + agPct + '%" title="Agreed ' + agPct + '%">' + (agPct > 5 ? agPct + '% agree' : '') + '</div>' +
+            '<div class="perf-bar-seg spot-check" style="width:' + dgPct + '%" title="Disagreed ' + dgPct + '%">' + (dgPct > 3 ? dgPct + '%' : '') + '</div>' +
+          '</div>'
+          : '') +
         '<div class="perf-bar-legend">' +
-          '<span><span class="legend-dot" style="background:var(--accent-blue)"></span> Pixel-diff (empty)</span>' +
-          '<span><span class="legend-dot" style="background:var(--accent-orange)"></span> Cloud API (prod)</span>' +
-          (d.shadow && d.shadow.total > 0 ? '<span> · Shadow birdeye ran on ' + d.shadow.total + ' frames</span>' : '') +
+          '<span><span class="legend-dot" style="background:var(--accent-blue)"></span> Pixel-diff</span>' +
+          '<span><span class="legend-dot" style="background:var(--accent-orange)"></span> Cloud API</span>' +
+          (shadowTotal > 0 ? '<span><span class="legend-dot" style="background:var(--accent-green)"></span> Agreed</span>' : '') +
+          (shadowTotal > 0 ? '<span><span class="legend-dot" style="background:var(--accent-red)"></span> Disagreed</span>' : '') +
         '</div>';
     }
   } catch (e) {

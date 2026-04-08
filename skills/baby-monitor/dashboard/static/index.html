@@ -129,39 +129,39 @@
       </h2>
       <div class="perf-grid" id="perf-grid">
         <div class="perf-item">
-          <div class="perf-value" id="perf-birdeye-rate">--</div>
-          <div class="perf-label">Shadow Coverage</div>
-          <div class="perf-desc">% of frames birdeye ran on</div>
+          <div class="perf-value" id="perf-agreement">--</div>
+          <div class="perf-label">Agreement</div>
+          <div class="perf-desc">Shadow birdeye vs ground truth (&ge;95% to promote)</div>
         </div>
         <div class="perf-item">
-          <div class="perf-value" id="perf-cloud-calls">--</div>
-          <div class="perf-label">Cloud API Cost</div>
-          <div class="perf-desc">Frames sent to GPT-4o (count)</div>
+          <div class="perf-value" id="perf-disagreements">--</div>
+          <div class="perf-label">Disagreements</div>
+          <div class="perf-desc">Frames where birdeye got it wrong</div>
         </div>
         <div class="perf-item">
-          <div class="perf-value" id="perf-cost-saved">--</div>
-          <div class="perf-label">Est. Saved</div>
-          <div class="perf-desc">From avoiding cloud API (count)</div>
+          <div class="perf-value" id="perf-cloud-cost">--</div>
+          <div class="perf-label">Prod Cost</div>
+          <div class="perf-desc">Cloud API spend (current prod)</div>
         </div>
         <div class="perf-item">
           <div class="perf-value" id="perf-latency">--</div>
-          <div class="perf-label">Avg Latency</div>
-          <div class="perf-desc">Birdeye inference time on CPU</div>
+          <div class="perf-label">Shadow Latency</div>
+          <div class="perf-desc">Birdeye speed (prod latency after promotion)</div>
         </div>
         <div class="perf-item">
           <div class="perf-value" id="perf-confidence">--</div>
           <div class="perf-label">Eye Confidence</div>
-          <div class="perf-desc">How certain the model is (0-1)</div>
+          <div class="perf-desc">Birdeye classifier certainty (0-1)</div>
+        </div>
+        <div class="perf-item">
+          <div class="perf-value" id="perf-corrections">--</div>
+          <div class="perf-label">Corrections</div>
+          <div class="perf-desc">Human labels pending retrain</div>
         </div>
         <div class="perf-item">
           <div class="perf-value" id="perf-gaps">--</div>
           <div class="perf-label">Gaps (&gt;10m)</div>
           <div class="perf-desc">Periods with no captured frames</div>
-        </div>
-        <div class="perf-item">
-          <div class="perf-value" id="perf-agreement">--</div>
-          <div class="perf-label">Agreement</div>
-          <div class="perf-desc">Shadow birdeye vs prod cloud API</div>
         </div>
       </div>
       <div class="perf-breakdown" id="perf-breakdown"></div>
@@ -204,6 +204,6 @@
     </div>
   </footer>
 
-  <script src="/static/app.js?v=4"></script>
+  <script src="/static/app.js?v=5"></script>
 </body>
 </html>

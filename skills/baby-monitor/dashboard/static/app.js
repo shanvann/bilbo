@@ -279,9 +279,14 @@ function renderViewer() {
   // Time
   document.getElementById('viewer-time').textContent = formatTimeET(e.timestamp);
 
-  // Eye state dropdown — map from sleep state if no eyeState field
-  const stateSelect = document.getElementById('viewer-state');
+  // Model prediction label
   const eyeState = e.eyeState || (e.state === 'Awake' ? 'eyes_open' : e.state === 'Asleep' ? 'eyes_closed' : 'face_not_visible');
+  const labelMap = { eyes_open: 'Eyes Open', eyes_closed: 'Eyes Closed', face_not_visible: 'Face Not Visible' };
+  const modelLabel = document.getElementById('viewer-model-label');
+  modelLabel.textContent = 'Model: ' + (labelMap[eyeState] || eyeState);
+
+  // Eye state dropdown
+  const stateSelect = document.getElementById('viewer-state');
   stateSelect.value = eyeState;
 
   // Clear saved indicator

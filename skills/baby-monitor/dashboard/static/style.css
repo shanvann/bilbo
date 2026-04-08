@@ -465,6 +465,13 @@ footer {
   font-size: 1rem;
   padding: 6px 10px;
 }
+.viewer-model-label {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  background: rgba(42, 58, 92, 0.5);
+  padding: 4px 8px;
+  border-radius: 4px;
+}
 .viewer-saved {
   font-size: 0.85rem;
   color: var(--accent-blue);

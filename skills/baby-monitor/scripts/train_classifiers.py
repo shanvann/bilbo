@@ -71,17 +71,65 @@ TIME_BLOCK_MINUTES = 30
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_sleep_log(path: Path) -> list[dict]:
-    """Load sleep-log.jsonl, return list of entries with vision-api labels."""
+def load_sleep_log(path: Path, corrections_path: Path = None, audit_path: Path = None) -> list[dict]:
+    """Load sleep-log.jsonl with corrections and audit overrides applied.
+
+    Priority: dashboard corrections > audit disagreements > original cloud API labels.
+    Also includes birdeye entries that were corrected or audited (they become labeled data).
+    """
+    # Load corrections index: timestamp → corrected state
+    corrections = {}
+    if corrections_path and corrections_path.exists():
+        for line in corrections_path.read_text().strip().splitlines():
+            if not line:
+                continue
+            c = json.loads(line)
+            ts = c.get("originalTimestamp")
+            if ts and c.get("correctedState"):
+                corrections[ts] = c["correctedState"]
+        log.info("Loaded %d corrections from %s", len(corrections), corrections_path.name)
+
+    # Load audit index: timestamp → cloud API state (ground truth for disagreements)
+    audit_labels = {}
+    if audit_path and audit_path.exists():
+        for line in audit_path.read_text().strip().splitlines():
+            if not line:
+                continue
+            a = json.loads(line)
+            ts = a.get("originalTimestamp")
+            if ts and a.get("cloudState"):
+                audit_labels[ts] = a["cloudState"]
+        log.info("Loaded %d audit labels from %s", len(audit_labels), audit_path.name)
+
     entries = []
     for line in path.read_text().strip().splitlines():
         if not line:
             continue
         e = json.loads(line)
-        # Only use cloud API labels as ground truth
-        if e.get("detectionMethod") != "vision-api":
+        ts = e.get("timestamp")
+
+        # Apply corrections (highest priority — human ground truth)
+        if ts in corrections:
+            e["state"] = corrections[ts]
+            e["_label_source"] = "correction"
+            entries.append(e)
             continue
-        entries.append(e)
+
+        # Apply audit labels (cloud API second opinion on birdeye frames)
+        if ts in audit_labels:
+            e["state"] = audit_labels[ts]
+            e["_label_source"] = "audit"
+            entries.append(e)
+            continue
+
+        # Original cloud API labels + dashboard-edited birdeye entries
+        if e.get("detectionMethod") == "vision-api":
+            entries.append(e)
+        elif e.get("stateEdited"):
+            # Birdeye entry that was manually corrected in dashboard
+            e["_label_source"] = "dashboard-edit"
+            entries.append(e)
+
     return entries
 
 
@@ -465,17 +513,65 @@ def train_classifier(
         torch.save(best_state, output_path)
         log.info("Best model saved to %s", output_path)
 
-    # Final val confusion matrix
+    # --- Compute final metrics on best model ---
+    metrics = {
+        "best_epoch": epoch - patience_counter,
+        "total_epochs": epoch,
+        "best_val_loss": round(best_val_loss, 4),
+        "val_accuracy": round(val_correct / max(val_total, 1), 4),
+        "val_total": val_total,
+        "train_total": len(train_ds),
+    }
+
+    # Confusion matrix
     if val_preds:
-        log.info("Validation confusion matrix:")
+        confusion = {}
         for true_cls in range(num_classes):
-            row = []
+            row = {}
             for pred_cls in range(num_classes):
                 count = sum(1 for t, p in zip(val_labels, val_preds) if t == true_cls and p == pred_cls)
-                row.append(count)
+                if count > 0:
+                    row[class_names[pred_cls]] = count
+            confusion[class_names[true_cls]] = row
+        metrics["confusion_matrix"] = confusion
+
+        log.info("Validation confusion matrix:")
+        for true_cls in range(num_classes):
+            row = [sum(1 for t, p in zip(val_labels, val_preds) if t == true_cls and p == pred_cls)
+                   for pred_cls in range(num_classes)]
             log.info("  %15s: %s", class_names[true_cls], row)
 
-    return best_val_loss
+        # Per-class precision, recall, f1
+        per_class = {}
+        for cls_idx, cls_name in enumerate(class_names):
+            tp = sum(1 for t, p in zip(val_labels, val_preds) if t == cls_idx and p == cls_idx)
+            fp = sum(1 for t, p in zip(val_labels, val_preds) if t != cls_idx and p == cls_idx)
+            fn = sum(1 for t, p in zip(val_labels, val_preds) if t == cls_idx and p != cls_idx)
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+            per_class[cls_name] = {
+                "precision": round(precision, 3),
+                "recall": round(recall, 3),
+                "f1": round(f1, 3),
+                "support": tp + fn,
+            }
+        metrics["per_class"] = per_class
+
+        # Critical metric for eye state classifier: awake→asleep miss rate
+        if "eyes_open" in class_names and "eyes_closed" in class_names:
+            open_idx = class_names.index("eyes_open")
+            closed_idx = class_names.index("eyes_closed")
+            open_as_closed = sum(1 for t, p in zip(val_labels, val_preds)
+                                 if t == open_idx and p == closed_idx)
+            total_open = sum(1 for t in val_labels if t == open_idx)
+            miss_rate = open_as_closed / total_open if total_open > 0 else 0
+            metrics["awake_asleep_miss_rate"] = round(miss_rate, 3)
+            metrics["awake_asleep_misses"] = f"{open_as_closed}/{total_open}"
+            log.info("Critical: awake→asleep misses: %d/%d (%.1f%%)",
+                     open_as_closed, total_open, miss_rate * 100)
+
+    return metrics
 
 
 # ---------------------------------------------------------------------------
@@ -491,6 +587,8 @@ def main():
     parser.add_argument("--output", default="../pipeline/models", help="Output directory for .pt files")
     parser.add_argument("--model", default="all", choices=["all", "presence", "eye-state"])
     parser.add_argument("--face-crops", help="Dir with validated face crops: {eyes_open,eyes_closed,eyes_unclear}/")
+    parser.add_argument("--corrections", help="Path to corrections.jsonl (dashboard edits)")
+    parser.add_argument("--audit", help="Path to audit-log.jsonl (audit disagreements)")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=0.001)
@@ -501,8 +599,11 @@ def main():
     frames_dir = Path(args.frames)
     output_dir = Path(args.output)
 
-    entries = load_sleep_log(sleep_log_path)
-    log.info("Loaded %d cloud-API-labeled entries from %s", len(entries), sleep_log_path.name)
+    corrections_path = Path(args.corrections) if args.corrections else None
+    audit_path = Path(args.audit) if args.audit else None
+
+    entries = load_sleep_log(sleep_log_path, corrections_path, audit_path)
+    log.info("Loaded %d labeled entries from %s", len(entries), sleep_log_path.name)
 
     # Time-block split
     train_entries, val_entries, test_entries = time_block_split(entries)
@@ -519,7 +620,7 @@ def main():
         val_ds = PresenceDataset(val_entries, frames_dir, get_val_transform())
         log.info("Presence: train=%d, val=%d", len(train_ds), len(val_ds))
 
-        train_classifier(
+        presence_metrics = train_classifier(
             train_ds, val_ds,
             num_classes=2,
             class_names=PresenceDataset.CLASS_NAMES,
@@ -529,6 +630,8 @@ def main():
             lr=args.lr,
             patience=args.patience,
         )
+    else:
+        presence_metrics = None
 
     # --- Eye state classifier ---
     if args.model in ("all", "eye-state"):
@@ -556,7 +659,7 @@ def main():
         log.info("Eye state: train=%d, val=%d", len(train_ds), len(val_ds))
 
         # Weight eyes_open higher to penalize awake→asleep errors
-        train_classifier(
+        eye_metrics = train_classifier(
             train_ds, val_ds,
             num_classes=3,
             class_names=EyeStateDataset.CLASS_NAMES,
@@ -567,8 +670,74 @@ def main():
             patience=args.patience,
             class_weights=[2.0, 1.0, 1.0],  # penalize missing eyes_open
         )
+    else:
+        eye_metrics = None
 
-    log.info("Training complete. Models saved to %s/", output_dir)
+    # --- Version the models ---
+    version_id = datetime.now().strftime("v_%Y%m%d_%H%M%S")
+    version_dir = output_dir / version_id
+    version_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy trained models into versioned directory
+    import shutil
+    for pt_file in output_dir.glob("*.pt"):
+        shutil.copy2(pt_file, version_dir / pt_file.name)
+
+    # Update "latest" symlink
+    latest_link = output_dir / "latest"
+    if latest_link.is_symlink() or latest_link.exists():
+        latest_link.unlink()
+    latest_link.symlink_to(version_id)
+    log.info("Model version: %s (symlinked as latest)", version_id)
+
+    # Prune old versions (keep last 20)
+    MAX_VERSIONS = 20
+    version_dirs = sorted(
+        [d for d in output_dir.iterdir() if d.is_dir() and d.name.startswith("v_")],
+        key=lambda d: d.name,
+    )
+    if len(version_dirs) > MAX_VERSIONS:
+        for old in version_dirs[:-MAX_VERSIONS]:
+            shutil.rmtree(old)
+            log.info("Pruned old model version: %s", old.name)
+
+    # Count label sources
+    source_counts = Counter(e.get("_label_source", "cloud-api") for e in entries)
+
+    # Log training run to training-log.jsonl
+    training_log = output_dir / "training-log.jsonl"
+    log_entry = {
+        "version": version_id,
+        "timestamp": datetime.now().isoformat(),
+        "entries_total": len(entries),
+        "label_sources": dict(source_counts),
+        "split": {
+            "train": len(train_entries),
+            "val": len(val_entries),
+            "test": len(test_entries),
+        },
+        "models_trained": args.model,
+        "config": {
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "lr": args.lr,
+            "patience": args.patience,
+            "face_crops": args.face_crops is not None,
+            "corrections": args.corrections is not None,
+            "audit": args.audit is not None,
+        },
+        "metrics": {
+            "presence": presence_metrics,
+            "eye_state": eye_metrics,
+        },
+    }
+    with open(training_log, "a") as f:
+        f.write(json.dumps(log_entry) + "\n")
+
+    log.info("Training complete. Version %s saved to %s/", version_id, output_dir)
+    print(f"\nModel version: {version_id}")
+    print(f"Training log:  {training_log}")
+    print(f"Versions kept: {len([d for d in output_dir.iterdir() if d.is_dir() and d.name.startswith('v_')])}/{MAX_VERSIONS}")
 
 
 if __name__ == "__main__":

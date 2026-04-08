@@ -71,17 +71,65 @@ TIME_BLOCK_MINUTES = 30
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_sleep_log(path: Path) -> list[dict]:
-    """Load sleep-log.jsonl, return list of entries with vision-api labels."""
+def load_sleep_log(path: Path, corrections_path: Path = None, audit_path: Path = None) -> list[dict]:
+    """Load sleep-log.jsonl with corrections and audit overrides applied.
+
+    Priority: dashboard corrections > audit disagreements > original cloud API labels.
+    Also includes birdeye entries that were corrected or audited (they become labeled data).
+    """
+    # Load corrections index: timestamp → corrected state
+    corrections = {}
+    if corrections_path and corrections_path.exists():
+        for line in corrections_path.read_text().strip().splitlines():
+            if not line:
+                continue
+            c = json.loads(line)
+            ts = c.get("originalTimestamp")
+            if ts and c.get("correctedState"):
+                corrections[ts] = c["correctedState"]
+        log.info("Loaded %d corrections from %s", len(corrections), corrections_path.name)
+
+    # Load audit index: timestamp → cloud API state (ground truth for disagreements)
+    audit_labels = {}
+    if audit_path and audit_path.exists():
+        for line in audit_path.read_text().strip().splitlines():
+            if not line:
+                continue
+            a = json.loads(line)
+            ts = a.get("originalTimestamp")
+            if ts and a.get("cloudState"):
+                audit_labels[ts] = a["cloudState"]
+        log.info("Loaded %d audit labels from %s", len(audit_labels), audit_path.name)
+
     entries = []
     for line in path.read_text().strip().splitlines():
         if not line:
             continue
         e = json.loads(line)
-        # Only use cloud API labels as ground truth
-        if e.get("detectionMethod") != "vision-api":
+        ts = e.get("timestamp")
+
+        # Apply corrections (highest priority — human ground truth)
+        if ts in corrections:
+            e["state"] = corrections[ts]
+            e["_label_source"] = "correction"
+            entries.append(e)
             continue
-        entries.append(e)
+
+        # Apply audit labels (cloud API second opinion on birdeye frames)
+        if ts in audit_labels:
+            e["state"] = audit_labels[ts]
+            e["_label_source"] = "audit"
+            entries.append(e)
+            continue
+
+        # Original cloud API labels + dashboard-edited birdeye entries
+        if e.get("detectionMethod") == "vision-api":
+            entries.append(e)
+        elif e.get("stateEdited"):
+            # Birdeye entry that was manually corrected in dashboard
+            e["_label_source"] = "dashboard-edit"
+            entries.append(e)
+
     return entries
 
 
@@ -491,6 +539,8 @@ def main():
     parser.add_argument("--output", default="../pipeline/models", help="Output directory for .pt files")
     parser.add_argument("--model", default="all", choices=["all", "presence", "eye-state"])
     parser.add_argument("--face-crops", help="Dir with validated face crops: {eyes_open,eyes_closed,eyes_unclear}/")
+    parser.add_argument("--corrections", help="Path to corrections.jsonl (dashboard edits)")
+    parser.add_argument("--audit", help="Path to audit-log.jsonl (audit disagreements)")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=0.001)
@@ -501,8 +551,11 @@ def main():
     frames_dir = Path(args.frames)
     output_dir = Path(args.output)
 
-    entries = load_sleep_log(sleep_log_path)
-    log.info("Loaded %d cloud-API-labeled entries from %s", len(entries), sleep_log_path.name)
+    corrections_path = Path(args.corrections) if args.corrections else None
+    audit_path = Path(args.audit) if args.audit else None
+
+    entries = load_sleep_log(sleep_log_path, corrections_path, audit_path)
+    log.info("Loaded %d labeled entries from %s", len(entries), sleep_log_path.name)
 
     # Time-block split
     train_entries, val_entries, test_entries = time_block_split(entries)

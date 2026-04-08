@@ -235,12 +235,14 @@ async function loadTimeline() {
 }
 
 // ---------------------------------------------------------------------------
-// Block detail panel
+// Block detail panel — frame-by-frame viewer with prev/next
 // ---------------------------------------------------------------------------
+let viewerEntries = [];
+let viewerIndex = 0;
+
 function showBlockDetail(seg, durStr) {
   const panel = document.getElementById('block-detail');
   const summary = document.getElementById('block-detail-summary');
-  const tbody = document.getElementById('block-detail-body');
 
   summary.innerHTML =
     '<strong>' + seg.label + '</strong> &mdash; ' +
@@ -248,93 +250,98 @@ function showBlockDetail(seg, durStr) {
     formatTimeET(seg.end.toISOString()) +
     ' (' + durStr + ', ' + seg.entries.length + ' frames)';
 
-  const stateOptions = ['Asleep', 'Awake', 'Unknown'];
-  const posOptions = ['Back', 'Side', 'Stomach', 'Unknown'];
-
-  tbody.innerHTML = '';
-  seg.entries.forEach(e => {
-    const tr = document.createElement('tr');
-
-    // Time
-    const tdTime = document.createElement('td');
-    tdTime.textContent = formatTimeET(e.timestamp);
-    tr.appendChild(tdTime);
-
-    // State (editable dropdown)
-    const tdState = document.createElement('td');
-    const stateSelect = document.createElement('select');
-    stateSelect.className = 'detail-select';
-    stateOptions.forEach(opt => {
-      const o = document.createElement('option');
-      o.value = opt;
-      o.textContent = opt;
-      if ((e.state || 'Unknown') === opt) o.selected = true;
-      stateSelect.appendChild(o);
-    });
-    stateSelect.dataset.ts = e.timestamp;
-    stateSelect.dataset.field = 'state';
-    stateSelect.addEventListener('change', (ev) => updateEntry(e.timestamp, 'state', ev.target.value));
-    tdState.appendChild(stateSelect);
-    tr.appendChild(tdState);
-
-    // Position (editable dropdown)
-    const tdPos = document.createElement('td');
-    const posSelect = document.createElement('select');
-    posSelect.className = 'detail-select';
-    posOptions.forEach(opt => {
-      const o = document.createElement('option');
-      o.value = opt;
-      o.textContent = opt;
-      if ((e.position || 'Unknown') === opt) o.selected = true;
-      posSelect.appendChild(o);
-    });
-    posSelect.addEventListener('change', (ev) => updateEntry(e.timestamp, 'position', ev.target.value));
-    tdPos.appendChild(posSelect);
-    tr.appendChild(tdPos);
-
-    // Frame link
-    const tdFrame = document.createElement('td');
-    if (e.frame) {
-      const link = document.createElement('a');
-      link.href = frameUrl(e.frame);
-      link.target = '_blank';
-      link.textContent = '📷 View';
-      link.className = 'frame-link';
-      tdFrame.appendChild(link);
-    } else {
-      tdFrame.textContent = '—';
-    }
-    tr.appendChild(tdFrame);
-
-    tbody.appendChild(tr);
-  });
+  viewerEntries = seg.entries;
+  viewerIndex = 0;
+  renderViewer();
 
   panel.style.display = 'block';
   panel.scrollIntoView({ behavior: 'smooth' });
 }
 
-async function updateEntry(timestamp, field, value) {
+function renderViewer() {
+  if (viewerEntries.length === 0) return;
+  const e = viewerEntries[viewerIndex];
+
+  // Image
+  const img = document.getElementById('viewer-img');
+  if (e.frame) {
+    img.src = frameUrl(e.frame);
+    img.style.display = 'block';
+    img.onclick = () => showFrameModal(e.frame);
+  } else {
+    img.style.display = 'none';
+  }
+
+  // Counter
+  document.getElementById('viewer-counter').textContent =
+    (viewerIndex + 1) + ' / ' + viewerEntries.length;
+
+  // Time
+  document.getElementById('viewer-time').textContent = formatTimeET(e.timestamp);
+
+  // State dropdown
+  const stateSelect = document.getElementById('viewer-state');
+  stateSelect.value = e.state || 'Unknown';
+
+  // Clear saved indicator
+  document.getElementById('viewer-saved').textContent = '';
+
+  // Button states
+  document.getElementById('viewer-prev').disabled = viewerIndex === 0;
+  document.getElementById('viewer-next').disabled = viewerIndex === viewerEntries.length - 1;
+}
+
+document.getElementById('viewer-prev').addEventListener('click', () => {
+  if (viewerIndex > 0) { viewerIndex--; renderViewer(); }
+});
+
+document.getElementById('viewer-next').addEventListener('click', () => {
+  if (viewerIndex < viewerEntries.length - 1) { viewerIndex++; renderViewer(); }
+});
+
+// Keyboard navigation: arrow keys
+document.addEventListener('keydown', (ev) => {
+  const panel = document.getElementById('block-detail');
+  if (panel.style.display === 'none') return;
+  if (ev.target.tagName === 'SELECT' || ev.target.tagName === 'INPUT') return;
+
+  if (ev.key === 'ArrowLeft' && viewerIndex > 0) {
+    viewerIndex--; renderViewer(); ev.preventDefault();
+  } else if (ev.key === 'ArrowRight' && viewerIndex < viewerEntries.length - 1) {
+    viewerIndex++; renderViewer(); ev.preventDefault();
+  }
+});
+
+// State change from viewer
+document.getElementById('viewer-state').addEventListener('change', async (ev) => {
+  const e = viewerEntries[viewerIndex];
+  if (!e) return;
+  const newState = ev.target.value;
+  const saved = document.getElementById('viewer-saved');
+  saved.textContent = 'saving...';
+
   try {
-    const body = { timestamp };
-    if (field === 'state') body.state = value;
-    if (field === 'position') body.position = value;
     const res = await fetch('/api/update-entry', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ timestamp: e.timestamp, state: newState }),
     });
     const data = await res.json();
     if (data.ok) {
-      // Brief visual feedback
-      event.target.style.outline = '2px solid #4a9eff';
-      setTimeout(() => { event.target.style.outline = ''; }, 500);
+      e.state = newState; // update local data
+      saved.textContent = 'saved';
+      saved.style.color = '#4a9eff';
+      setTimeout(() => { saved.textContent = ''; }, 1500);
     } else {
-      console.error('Update failed:', data.error);
+      saved.textContent = 'error';
+      saved.style.color = '#ff5252';
     }
-  } catch (e) {
-    console.error('Update error:', e);
+  } catch (err) {
+    saved.textContent = 'error';
+    saved.style.color = '#ff5252';
+    console.error('Update error:', err);
   }
-}
+});
 
 document.getElementById('block-detail-close').addEventListener('click', () => {
   document.getElementById('block-detail').style.display = 'none';

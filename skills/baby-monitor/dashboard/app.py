@@ -702,9 +702,23 @@ def api_monitor_stats():
         if (entries[i]["_ts"] - entries[i - 1]["_ts"]).total_seconds() > 600:
             gap_count += 1
 
-    # Shadow birdeye agreement rate (birdeye ran in parallel with prod)
+    # Shadow birdeye agreement rate
+    # If user corrected the entry via dashboard, use the correction as ground truth
+    # instead of the original cloud API state. This means agreement is measured
+    # against the best known label, not just the raw production output.
+    EYE_TO_STATE = {"eyes_open": "awake", "eyes_closed": "asleep", "face_not_visible": "unknown"}
     shadow_entries = [e for e in entries if isinstance(e.get("shadow"), dict)]
-    shadow_agreed = sum(1 for e in shadow_entries if e["shadow"].get("agreed"))
+    shadow_agreed = 0
+    for e in shadow_entries:
+        birdeye_state = e["shadow"].get("birdeyeState", "Unknown").lower()
+        # Ground truth: dashboard correction > cloud API
+        if e.get("eyeStateEdited") and e.get("eyeState"):
+            ground_truth = EYE_TO_STATE.get(e["eyeState"], "unknown")
+        else:
+            gt = e["shadow"].get("prodState", "Unknown")
+            ground_truth = gt.lower() if gt else "unknown"
+        if birdeye_state == ground_truth:
+            shadow_agreed += 1
     shadow_disagreed = len(shadow_entries) - shadow_agreed
 
     return jsonify({

@@ -645,7 +645,7 @@ def api_monitor_stats():
     """
     from collections import Counter
 
-    hours = int(request.args.get("hours", 24))
+    hours = float(request.args.get("hours", 24))
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
 
     entries = []

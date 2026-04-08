@@ -164,6 +164,7 @@ def api_timeline():
                 "state": e.get("state"),
                 "eyeState": e.get("eyeState"),
                 "eyeStateEdited": e.get("eyeStateEdited", False),
+                "eyeStateCorrectedAt": e.get("eyeStateCorrectedAt"),
                 "frame": e.get("frame"),
                 "alerts": e.get("alerts", []),
             })
@@ -418,6 +419,7 @@ def api_update_entry():
             if new_eye_state:
                 entry["eyeState"] = new_eye_state
                 entry["eyeStateEdited"] = True
+                entry["eyeStateCorrectedAt"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             updated = True
         new_lines.append(json.dumps(entry))
 

@@ -442,6 +442,19 @@ footer {
   font-weight: normal;
   margin-left: 16px;
 }
+.block-label-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: rgba(42, 58, 92, 0.2);
+  border-radius: 6px;
+}
+.block-label-text {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
 .block-summary {
   margin-bottom: 12px;
   font-size: 0.95rem;

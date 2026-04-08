@@ -407,6 +407,59 @@ document.getElementById('viewer-state').addEventListener('change', async (ev) =>
 document.getElementById('block-detail-close').addEventListener('click', () => {
   document.getElementById('block-detail').style.display = 'none';
 });
+
+// Block-level label override
+document.getElementById('block-label-apply').addEventListener('click', async () => {
+  const select = document.getElementById('block-label-select');
+  const status = document.getElementById('block-label-status');
+  const newEyeState = select.value;
+
+  if (!newEyeState || viewerEntries.length === 0) return;
+
+  const btn = document.getElementById('block-label-apply');
+  btn.disabled = true;
+  status.textContent = '0/' + viewerEntries.length;
+  status.style.color = 'var(--text-dim)';
+
+  let success = 0;
+  let failed = 0;
+
+  for (let i = 0; i < viewerEntries.length; i++) {
+    const e = viewerEntries[i];
+    try {
+      const res = await fetch('/api/update-entry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ timestamp: e.timestamp, eyeState: newEyeState }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        e.eyeState = newEyeState;
+        e.eyeStateEdited = true;
+        e._correctedAt = new Date().toISOString();
+        success++;
+      } else {
+        failed++;
+      }
+    } catch (err) {
+      failed++;
+    }
+    status.textContent = (i + 1) + '/' + viewerEntries.length;
+  }
+
+  if (failed === 0) {
+    status.textContent = 'All ' + success + ' frames updated';
+    status.style.color = 'var(--accent-blue)';
+  } else {
+    status.textContent = success + ' updated, ' + failed + ' failed';
+    status.style.color = 'var(--accent-orange)';
+  }
+
+  btn.disabled = false;
+  select.value = '';
+  renderViewer(); // refresh current frame display
+  setTimeout(() => { status.textContent = ''; }, 3000);
+});
 document.getElementById('block-prev').addEventListener('click', () => {
   if (currentBlockIndex > 0) openBlock(currentBlockIndex - 1);
 });

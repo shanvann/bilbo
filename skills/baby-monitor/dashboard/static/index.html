@@ -88,6 +88,17 @@
         <button id="block-detail-close" class="tl-nav-btn" style="float:right">✕ Close</button>
       </h2>
       <div id="block-detail-summary" class="block-summary"></div>
+      <div class="block-label-row">
+        <span class="block-label-text">Label all frames in block:</span>
+        <select id="block-label-select" class="detail-select">
+          <option value="">— select —</option>
+          <option value="eyes_open">Eyes Open</option>
+          <option value="eyes_closed">Eyes Closed</option>
+          <option value="face_not_visible">Face Not Visible</option>
+        </select>
+        <button id="block-label-apply" class="viewer-btn">Apply to all</button>
+        <span id="block-label-status" class="viewer-saved"></span>
+      </div>
       <div id="block-detail-viewer" class="block-viewer">
         <div class="viewer-frame">
           <img id="viewer-img" class="viewer-img" alt="Frame">

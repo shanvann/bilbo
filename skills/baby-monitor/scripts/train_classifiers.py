@@ -488,7 +488,7 @@ def main():
     )
     parser.add_argument("--sleep-log", required=True, help="Path to sleep-log.jsonl")
     parser.add_argument("--frames", required=True, help="Directory containing frame images")
-    parser.add_argument("--output", default="models", help="Output directory for .pt files")
+    parser.add_argument("--output", default="../pipeline/models", help="Output directory for .pt files")
     parser.add_argument("--model", default="all", choices=["all", "presence", "eye-state"])
     parser.add_argument("--face-crops", help="Dir with validated face crops: {eyes_open,eyes_closed,eyes_unclear}/")
     parser.add_argument("--epochs", type=int, default=30)

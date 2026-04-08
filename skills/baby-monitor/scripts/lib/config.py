@@ -19,7 +19,7 @@ ENV_FILE = Path("/Users/shanit/.openclaw/workspace/.env.baby-monitor")
 PIPELINE_DIR = SKILL_DIR / "pipeline"
 PIPELINE_CONFIG = PIPELINE_DIR / "config.yaml"
 
-MAX_FRAMES_KB = 1 * 1024 * 1024  # 1 GB
+MAX_FRAMES_KB = 6 * 1024 * 1024  # 6 GB (~7 days at 1-min intervals)
 REFS_DIR = DATA_DIR / "references"
 
 # ---------------------------------------------------------------------------
@@ -52,9 +52,7 @@ WAKE_SCORE_THRESHOLD = 4
 WAKE_COOLDOWN_MIN = 30
 WAKE_WINDOW = 6  # number of recent entries to analyze
 
-BURST_INTERVAL_SEC = 60   # seconds between burst captures
-BURST_CONFIRM_COUNT = 2   # number of confirmation frames
-BURST_AWAKE_THRESHOLD = 2  # minimum Awake readings (out of 3 total) to confirm wake
+BURST_AWAKE_THRESHOLD = 2  # minimum Awake readings (out of last 3 entries) to confirm wake
 
 # ---------------------------------------------------------------------------
 # Edge alert

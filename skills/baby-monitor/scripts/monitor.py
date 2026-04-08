@@ -42,11 +42,11 @@ from lib.local_pipeline import try_local_analysis
 from lib.alerts import (
     check_alerts,
     check_edge_alert,
+    check_wake_confirmation,
     get_alert_stats,
     log_alert_feedback,
     record_alert_feedback,
     reset_wake_cooldown,
-    run_burst_confirmation,
     save_alert_state,
     send_telegram_alert,
     should_burst,
@@ -259,29 +259,27 @@ def main():
     if not args.dry_run:
         check_edge_alert(entry, env)
 
-    # --- Active wake detection (burst confirmation) ---
+    # --- Active wake detection (look-back confirmation, no extra captures) ---
     if not args.dry_run:
         if entry.get("babyPresent"):
             if should_burst(entry):
-                wake_alert = run_burst_confirmation(rtsp_url, api_key, anthropic_key, entry)
+                wake_alert = check_wake_confirmation(entry)
                 if wake_alert:
                     log.info("pipeline: ACTIVE WAKE confirmed (%d/%d Awake)",
                              wake_alert["awake_count"], wake_alert["total_frames"])
                     ts_str = wake_alert["timestamp"]
                     try:
                         ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                        # Convert UTC to ET
                         import zoneinfo
                         et_tz = zoneinfo.ZoneInfo("America/New_York")
                         local_time = ts_dt.astimezone(et_tz).strftime("%I:%M %p")
                     except Exception:
                         local_time = ts_str
-                    # Generate alert ID for feedback tracking
                     alert_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
                     wake_msg = (
                         f"🍼 Baby waking up!\n"
                         f"Confirmed: {wake_alert['awake_count']}/{wake_alert['total_frames']} "
-                        f"frames show Awake (burst check over ~2 min)\n"
+                        f"recent frames show Awake\n"
                         f"First detected at {local_time}\n\n"
                         f"Was this correct?"
                     )

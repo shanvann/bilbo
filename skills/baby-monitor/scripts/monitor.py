@@ -38,6 +38,7 @@ from lib.config import ENV_FILE, MODEL_CHAIN, load_env, log, set_verbose
 from lib.capture import capture_frame, enforce_disk_limit
 from lib.detect import detect_empty_bassinet, make_empty_entry
 from lib.vision import analyze_frame, flatten_analysis
+from lib.local_pipeline import try_local_analysis
 from lib.alerts import (
     check_alerts,
     check_edge_alert,
@@ -51,7 +52,7 @@ from lib.alerts import (
     should_burst,
 )
 from lib.storage import append_entry, get_last_entry
-from lib.cli import cmd_backtest, cmd_last, cmd_status, parse_args
+from lib.cli import cmd_backtest, cmd_backtest_birdeye, cmd_last, cmd_status, parse_args
 
 
 def _output(status: str, **kwargs):
@@ -104,6 +105,11 @@ def main():
         return 0
 
     if args.backtest:
+        if args.birdeye:
+            return cmd_backtest_birdeye(
+                last_n=args.count,
+                from_date=args.from_date,
+            )
         return cmd_backtest(
             last_n=args.count,
             from_date=args.from_date,
@@ -198,28 +204,41 @@ def main():
         alerts = []
         log.info("pipeline: bassinet empty (pixel-diff score=%.2f), API skipped", diff_score)
     else:
-        # --- Full OpenAI vision analysis ---
-        log.info("pipeline: sending frame to vision API")
-        try:
-            analysis = analyze_frame(frame_path, api_key, anthropic_key)
-        except RuntimeError as e:
-            log.error("pipeline: analysis failed, aborting - %s", e)
-            _output("error", error=str(e), frame=str(frame_path))
-            return 1
+        # --- Try birdeye (local 3-model cascade) first ---
+        flat = try_local_analysis(frame_path)
 
-        # Flatten + check alerts
-        flat = flatten_analysis(analysis, str(frame_path))
-        flat["diffScore"] = round(diff_score, 2) if diff_score >= 0 else None
+        if flat is not None:
+            log.info("pipeline: birdeye -> %s (cloud API skipped)", flat.get("state"))
+            flat["diffScore"] = round(diff_score, 2) if diff_score >= 0 else None
+        else:
+            # --- Fallback: cloud vision API ---
+            log.info("pipeline: birdeye uncertain/unavailable, falling back to cloud API")
+            try:
+                analysis = analyze_frame(frame_path, api_key, anthropic_key)
+            except RuntimeError as e:
+                log.error("pipeline: analysis failed, aborting - %s", e)
+                _output("error", error=str(e), frame=str(frame_path))
+                return 1
 
-        # Heuristic: if state is "Unknown", baby is present, and position matches
-        # the previous frame, infer "Asleep" (baby hasn't moved, likely sleeping)
-        if flat.get("state") == "Unknown" and flat.get("babyPresent"):
-            prev = get_last_entry()
-            if prev and prev.get("babyPresent") and prev.get("sleepPosition") == flat.get("sleepPosition"):
-                if flat.get("sleepPosition") != "Unknown":
-                    log.info("heuristic: state Unknown -> Asleep (position unchanged: %s)", flat.get("sleepPosition"))
-                    flat["state"] = "Asleep"
-                    flat["stateInferred"] = True
+            # Flatten + check alerts
+            flat = flatten_analysis(analysis, str(frame_path))
+            flat["diffScore"] = round(diff_score, 2) if diff_score >= 0 else None
+
+            # Heuristic: if state is "Unknown", baby is present, and position matches
+            # the previous frame, infer "Asleep" (baby hasn't moved, likely sleeping)
+            if flat.get("state") == "Unknown" and flat.get("babyPresent"):
+                prev = get_last_entry()
+                if prev and prev.get("babyPresent") and prev.get("sleepPosition") == flat.get("sleepPosition"):
+                    if flat.get("sleepPosition") != "Unknown":
+                        log.info("heuristic: state Unknown -> Asleep (position unchanged: %s)", flat.get("sleepPosition"))
+                        flat["state"] = "Asleep"
+                        flat["stateInferred"] = True
+
+            # Update head position from cloud API response (for birdeye's next tick)
+            head_pos = flat.get("headPosition")
+            if isinstance(head_pos, dict) and head_pos.get("visible", False):
+                from lib.classifiers import save_head_state
+                save_head_state(head_pos["x"], head_pos["y"], source="cloud-api")
 
         alerts = check_alerts(flat)
 
@@ -272,13 +291,36 @@ def main():
             # Baby removed — reset cooldown so next wake can trigger
             reset_wake_cooldown()
 
+    # --- Structured run summary (system.log + stdout) ---
+    detection_method = flat.get("detectionMethod", "pixel-diff")
+    state = flat.get("state", "unknown")
+    model_used = flat.get("modelUsed", "n/a")
+    birdeye_timings = flat.get("birdeyeTimings", {})
+
+    log.info("RUN_SUMMARY method=%s state=%s model=%s elapsed=%.1fs baby=%s alerts=%d",
+             detection_method, state, model_used, elapsed,
+             flat.get("babyPresent", "?"), len(alerts))
+
+    # Enriched JSON output (goes to cron-stdout.log)
+    output_extras = {
+        "detectionMethod": detection_method,
+        "state": state,
+        "modelUsed": model_used,
+        "elapsed": round(elapsed, 2),
+    }
+    if birdeye_timings:
+        output_extras["birdeyeTimings"] = birdeye_timings
+    if flat.get("presenceConfidence") is not None:
+        output_extras["presenceConfidence"] = flat["presenceConfidence"]
+    if flat.get("eyeConfidence") is not None:
+        output_extras["eyeConfidence"] = flat["eyeConfidence"]
+
     if alerts:
         summary = "ALERT: " + "; ".join(alerts)
-        log.warning("pipeline: %d alerts detected in %.1fs: %s", len(alerts), elapsed, summary)
-        _output("alert", frame=str(frame_path), alerts=alerts, summary=summary)
+        log.warning("pipeline: %d alerts detected: %s", len(alerts), summary)
+        _output("alert", frame=str(frame_path), alerts=alerts, summary=summary, **output_extras)
     else:
-        log.info("pipeline: completed in %.1fs, no alerts", elapsed)
-        _output("ok", frame=str(frame_path), alerts=[], summary="Check completed, no safety alerts.")
+        _output("ok", frame=str(frame_path), alerts=[], summary="No safety alerts.", **output_extras)
 
     log.info("--- run end: %.1fs ---", elapsed)
     return 0

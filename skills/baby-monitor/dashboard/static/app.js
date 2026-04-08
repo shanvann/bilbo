@@ -570,21 +570,29 @@ let lastCaptureCheckedAt = null; // Date.now() when we got that value
 const CAPTURE_INTERVAL_SEC = 60;
 const REFRESH_INTERVAL_SEC = 60;
 
+let refreshTriggered = false;
+
 function updateCountdown() {
   const el = document.getElementById('live-frame-countdown');
   if (!el || lastCaptureAgoSec == null) return;
 
-  // How many seconds ago was the last capture, right now?
   const elapsed = lastCaptureAgoSec + Math.floor((Date.now() - lastCaptureCheckedAt) / 1000);
-  // Next capture expected at CAPTURE_INTERVAL_SEC after last capture
   const untilCapture = Math.max(0, CAPTURE_INTERVAL_SEC - elapsed);
-  // Next page refresh
-  const untilRefresh = untilCapture + 3; // ~3s for capture + processing
+  const untilRefresh = untilCapture + 5; // ~5s for capture + birdeye + write
 
   if (untilCapture <= 0) {
-    el.textContent = 'New frame any moment...';
+    el.textContent = 'Refreshing...';
+    // Auto-refresh once when timer expires (avoid hammering)
+    if (!refreshTriggered) {
+      refreshTriggered = true;
+      setTimeout(async () => {
+        await loadAll();
+        refreshTriggered = false;
+      }, 5000); // wait 5s for capture to complete, then fetch
+    }
   } else {
     el.textContent = 'Next frame in ~' + untilRefresh + 's';
+    refreshTriggered = false;
   }
 }
 

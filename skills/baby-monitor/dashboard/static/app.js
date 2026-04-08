@@ -580,8 +580,14 @@ function renderTrainingStats() {
     prevInfo = '<div class="train-row"><span title="Previous model for delta comparison">Previous model</span><span class="train-val">' + trainingData.prevVersion + '</span></div>';
   }
 
+  // Pending corrections count
+  const pending = trainingData.pendingCorrections || 0;
+  const pendingColor = pending > 0 ? 'var(--accent-orange)' : 'var(--text-dim)';
+  const pendingRow = '<div class="train-row"><span title="Corrections made since last training that will be included in the next retrain">Pending changes</span><span class="train-val" style="color:' + pendingColor + '">' + pending + '</span></div>';
+
   dataEl.innerHTML =
     '<div class="train-row"><span title="How often birdeye matches ground truth on live production frames">Live alignment</span><span class="train-val" style="color:' + alignColor + '">' + liveAlignment + '</span></div>' +
+    pendingRow +
     prevInfo +
     '<div style="margin:8px 0 2px;font-size:0.7rem;color:#445" title="Data used in the last training run">Training data:</div>' +
     '<div class="train-row"><span title="Total labeled frames fed to the trainer">Total entries</span><span class="train-val">' + total + '</span></div>' +
@@ -624,6 +630,13 @@ function renderTrainingStats() {
       html += '<div class="train-row"><span title="CRITICAL: % of truly-awake frames the model predicted as asleep. Must be &lt;5% for safety.">Awake→Asleep misses</span><span class="' + missClass + '">'
         + metrics.awake_asleep_misses + ' (' + (metrics.awake_asleep_miss_rate * 100).toFixed(0) + '%)'
         + delta(metrics.awake_asleep_miss_rate, pm.awake_asleep_miss_rate, '%', false)
+        + '</span></div>';
+    }
+
+    if (metrics.asleep_awake_false_alarm_rate != null) {
+      html += '<div class="train-row"><span title="% of truly-asleep frames the model predicted as awake. Causes unnecessary alerts but not dangerous.">Asleep→Awake false alarms</span><span class="train-val">'
+        + metrics.asleep_awake_false_alarms + ' (' + (metrics.asleep_awake_false_alarm_rate * 100).toFixed(0) + '%)'
+        + delta(metrics.asleep_awake_false_alarm_rate, pm.asleep_awake_false_alarm_rate, '%', false)
         + '</span></div>';
     }
 

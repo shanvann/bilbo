@@ -642,21 +642,35 @@ async function loadMonitorStats() {
     // Gaps
     document.getElementById('perf-gaps').textContent = d.gaps != null ? d.gaps : '--';
 
+    // Agreement rate
+    const agEl = document.getElementById('perf-agreement');
+    if (d.spotCheck && d.spotCheck.total > 0) {
+      const pct = Math.round(d.spotCheck.agreementRate * 100);
+      agEl.textContent = pct + '% (' + d.spotCheck.agreed + '/' + d.spotCheck.total + ')';
+      agEl.style.color = pct >= 90 ? 'var(--accent-green)' : pct >= 70 ? 'var(--accent-orange)' : 'var(--accent-red)';
+    } else {
+      agEl.textContent = 'No data';
+      agEl.style.color = '';
+    }
+
     // Breakdown bar
     const breakdown = document.getElementById('perf-breakdown');
     if (d.total > 0) {
       const bPct = Math.round((d.methods.birdeye || 0) / d.total * 100);
       const cPct = Math.round((d.methods.cloud_api || 0) / d.total * 100);
       const pPct = Math.round((d.methods.pixel_diff || 0) / d.total * 100);
+      const sPct = Math.round((d.methods.spot_check || 0) / d.total * 100);
       breakdown.innerHTML =
         '<div class="perf-bar">' +
-          (bPct > 0 ? '<div class="perf-bar-seg birdeye" style="width:' + bPct + '%" title="Birdeye ' + bPct + '%">' + bPct + '%</div>' : '') +
+          (bPct > 0 ? '<div class="perf-bar-seg birdeye" style="width:' + bPct + '%" title="Birdeye ' + bPct + '%">' + (bPct > 5 ? bPct + '%' : '') + '</div>' : '') +
           (pPct > 0 ? '<div class="perf-bar-seg pixel-diff" style="width:' + pPct + '%" title="Pixel-diff ' + pPct + '%">' + (pPct > 5 ? pPct + '%' : '') + '</div>' : '') +
+          (sPct > 0 ? '<div class="perf-bar-seg spot-check" style="width:' + sPct + '%" title="Spot-check override ' + sPct + '%">' + (sPct > 3 ? sPct + '%' : '') + '</div>' : '') +
           (cPct > 0 ? '<div class="perf-bar-seg cloud" style="width:' + cPct + '%" title="Cloud API ' + cPct + '%">' + (cPct > 3 ? cPct + '%' : '') + '</div>' : '') +
         '</div>' +
         '<div class="perf-bar-legend">' +
           '<span><span class="legend-dot" style="background:var(--accent-green)"></span> Birdeye</span>' +
           '<span><span class="legend-dot" style="background:var(--accent-blue)"></span> Pixel-diff</span>' +
+          (sPct > 0 ? '<span><span class="legend-dot" style="background:var(--accent-red)"></span> Spot-check override</span>' : '') +
           '<span><span class="legend-dot" style="background:var(--accent-orange)"></span> Cloud API</span>' +
         '</div>';
     }

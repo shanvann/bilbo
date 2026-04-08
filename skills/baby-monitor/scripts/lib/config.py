@@ -69,7 +69,11 @@ CORRECTIONS_FILE = DATA_DIR / "corrections.jsonl"
 AUDIT_LOG_FILE = DATA_DIR / "audit-log.jsonl"
 
 # Audit settings
-AUDIT_SAMPLE_SIZE = 50  # frames to spot-check per audit run
+AUDIT_SAMPLE_SIZE = 50  # frames to spot-check per --audit run
+
+# Inline spot-check: fraction of birdeye frames also sent to cloud API
+# for continuous validation. Cloud API result overrides birdeye on disagreement.
+SPOT_CHECK_RATE = 0.10  # 10% of birdeye-decided frames
 
 # ---------------------------------------------------------------------------
 # Birdeye classifier config

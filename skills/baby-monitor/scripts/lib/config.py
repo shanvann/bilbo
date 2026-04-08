@@ -16,8 +16,7 @@ LOG_FILE = DATA_DIR / "system.log"
 JSONL_FILE = DATA_DIR / "sleep-log.jsonl"
 PROMPT_FILE = SKILL_DIR / "references" / "prompt.md"
 ENV_FILE = Path("/Users/shanit/.openclaw/workspace/.env.baby-monitor")
-PIPELINE_DIR = SKILL_DIR / "pipeline"
-PIPELINE_CONFIG = PIPELINE_DIR / "config.yaml"
+MODELS_DIR = SKILL_DIR / "pipeline" / "models"
 
 MAX_FRAMES_KB = 6 * 1024 * 1024  # 6 GB (~7 days at 1-min intervals)
 REFS_DIR = DATA_DIR / "references"
@@ -77,9 +76,9 @@ BASSINET_CROP = {"x": 0.15, "y": 0.10, "w": 0.70, "h": 0.80}
 HEAD_CROP_SIZE = 0.30
 # Default head position (center-upper area of bassinet) when no state file exists
 DEFAULT_HEAD_POS = {"x": 0.50, "y": 0.35}
-# Classifier model paths (relative to PIPELINE_DIR)
-PRESENCE_MODEL = "models/presence_classifier.pt"
-EYE_STATE_MODEL = "models/eye_state_classifier.pt"
+# Classifier model paths
+PRESENCE_MODEL = MODELS_DIR / "presence_classifier.pt"
+EYE_STATE_MODEL = MODELS_DIR / "eye_state_classifier.pt"
 
 # ---------------------------------------------------------------------------
 # Legacy alert rules (currently disabled)

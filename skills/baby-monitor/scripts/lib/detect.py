@@ -86,7 +86,7 @@ def make_empty_entry(frame_path: Path, diff_score: float) -> dict:
         "swaddle": "Unknown",
         "headCovering": "Unknown",
         "lighting": "Unknown",
-        "state": "Unknown",
+        "state": "not_present",
         "bodyPosture": "Unknown",
         "pacifierEngaged": "Unknown",
         "bassinetCondition": "Unknown",

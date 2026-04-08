@@ -580,10 +580,13 @@ function renderTrainingStats() {
     prevInfo = '<div class="train-row"><span title="Previous model for delta comparison">Previous model</span><span class="train-val">' + trainingData.prevVersion + '</span></div>';
   }
 
-  // Pending corrections count
+  // Corrections counts
   const pending = trainingData.pendingCorrections || 0;
+  const totalCorr = trainingData.totalCorrections || 0;
+  const trained = totalCorr - pending;
   const pendingColor = pending > 0 ? 'var(--accent-orange)' : 'var(--text-dim)';
-  const pendingRow = '<div class="train-row"><span title="Corrections made since last training that will be included in the next retrain">Pending changes</span><span class="train-val" style="color:' + pendingColor + '">' + pending + '</span></div>';
+  const pendingRow = '<div class="train-row"><span title="Corrections made since last training — will be included in the next retrain">Pending changes</span><span class="train-val" style="color:' + pendingColor + '">' + pending + '</span></div>' +
+    '<div class="train-row"><span title="Corrections already used in previous training runs">Previous changes</span><span class="train-val">' + trained + '</span></div>';
 
   dataEl.innerHTML =
     '<div class="train-row"><span title="How often birdeye matches ground truth on live production frames">Live alignment</span><span class="train-val" style="color:' + alignColor + '">' + liveAlignment + '</span></div>' +

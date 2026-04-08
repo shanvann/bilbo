@@ -468,6 +468,27 @@ def api_training_status():
     })
 
 
+@app.route("/api/retrain", methods=["POST"])
+def api_retrain():
+    """Trigger model retraining in the background."""
+    import subprocess
+    import threading
+
+    monitor_py = str(DATA_DIR.parent / "scripts" / "monitor.py")
+    python = str(DATA_DIR.parent / "venv" / "bin" / "python3")
+
+    def run_retrain():
+        subprocess.run(
+            [python, monitor_py, "--retrain"],
+            cwd=str(DATA_DIR.parent),
+        )
+
+    thread = threading.Thread(target=run_retrain, daemon=True)
+    thread.start()
+
+    return jsonify({"ok": True, "message": "Retrain started in background"})
+
+
 @app.route("/api/frame")
 def api_frame():
     frame_path = request.args.get("path", "")

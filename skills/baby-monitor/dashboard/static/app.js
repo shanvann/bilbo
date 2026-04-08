@@ -279,9 +279,10 @@ function renderViewer() {
   // Time
   document.getElementById('viewer-time').textContent = formatTimeET(e.timestamp);
 
-  // State dropdown
+  // Eye state dropdown — map from sleep state if no eyeState field
   const stateSelect = document.getElementById('viewer-state');
-  stateSelect.value = e.state || 'Unknown';
+  const eyeState = e.eyeState || (e.state === 'Awake' ? 'eyes_open' : e.state === 'Asleep' ? 'eyes_closed' : 'face_not_visible');
+  stateSelect.value = eyeState;
 
   // Clear saved indicator
   document.getElementById('viewer-saved').textContent = '';
@@ -312,11 +313,11 @@ document.addEventListener('keydown', (ev) => {
   }
 });
 
-// State change from viewer
+// Eye state change from viewer
 document.getElementById('viewer-state').addEventListener('change', async (ev) => {
   const e = viewerEntries[viewerIndex];
   if (!e) return;
-  const newState = ev.target.value;
+  const newEyeState = ev.target.value;
   const saved = document.getElementById('viewer-saved');
   saved.textContent = 'saving...';
 
@@ -324,11 +325,11 @@ document.getElementById('viewer-state').addEventListener('change', async (ev) =>
     const res = await fetch('/api/update-entry', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ timestamp: e.timestamp, state: newState }),
+      body: JSON.stringify({ timestamp: e.timestamp, eyeState: newEyeState }),
     });
     const data = await res.json();
     if (data.ok) {
-      e.state = newState; // update local data
+      e.eyeState = newEyeState; // update local data
       saved.textContent = 'saved';
       saved.style.color = '#4a9eff';
       setTimeout(() => { saved.textContent = ''; }, 1500);

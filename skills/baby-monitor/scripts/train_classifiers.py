@@ -77,17 +77,24 @@ def load_sleep_log(path: Path, corrections_path: Path = None, audit_path: Path =
     Priority: dashboard corrections > audit disagreements > original cloud API labels.
     Also includes birdeye entries that were corrected or audited (they become labeled data).
     """
-    # Load corrections index: timestamp → corrected state
-    corrections = {}
+    # Load corrections index: timestamp → corrected eye state or sleep state
+    corrections = {}       # ts → corrected sleep state (Awake/Asleep)
+    eye_corrections = {}   # ts → corrected eye state (eyes_open/eyes_closed/face_not_visible)
     if corrections_path and corrections_path.exists():
         for line in corrections_path.read_text().strip().splitlines():
             if not line:
                 continue
             c = json.loads(line)
             ts = c.get("originalTimestamp")
+            # Eye state corrections (direct labels for the eye classifier)
+            if ts and c.get("correctedEyeState"):
+                eye_corrections[ts] = c["correctedEyeState"]
+            # Sleep state corrections (mapped to eye state for training)
             if ts and c.get("correctedState"):
                 corrections[ts] = c["correctedState"]
-        log.info("Loaded %d corrections from %s", len(corrections), corrections_path.name)
+        log.info("Loaded %d corrections (%d eye state, %d sleep state) from %s",
+                 len(corrections) + len(eye_corrections),
+                 len(eye_corrections), len(corrections), corrections_path.name)
 
     # Load audit index: timestamp → cloud API state (ground truth for disagreements)
     audit_labels = {}
@@ -101,6 +108,9 @@ def load_sleep_log(path: Path, corrections_path: Path = None, audit_path: Path =
                 audit_labels[ts] = a["cloudState"]
         log.info("Loaded %d audit labels from %s", len(audit_labels), audit_path.name)
 
+    # Map eye state labels to sleep state for the training pipeline
+    EYE_TO_STATE = {"eyes_open": "Awake", "eyes_closed": "Asleep", "face_not_visible": "Unknown"}
+
     entries = []
     for line in path.read_text().strip().splitlines():
         if not line:
@@ -108,7 +118,15 @@ def load_sleep_log(path: Path, corrections_path: Path = None, audit_path: Path =
         e = json.loads(line)
         ts = e.get("timestamp")
 
-        # Apply corrections (highest priority — human ground truth)
+        # Eye state corrections (highest priority — direct eye labels from dashboard)
+        if ts in eye_corrections:
+            e["eyeState"] = eye_corrections[ts]
+            e["state"] = EYE_TO_STATE.get(eye_corrections[ts], "Unknown")
+            e["_label_source"] = "eye-correction"
+            entries.append(e)
+            continue
+
+        # Sleep state corrections (human ground truth)
         if ts in corrections:
             e["state"] = corrections[ts]
             e["_label_source"] = "correction"
@@ -122,11 +140,18 @@ def load_sleep_log(path: Path, corrections_path: Path = None, audit_path: Path =
             entries.append(e)
             continue
 
-        # Original cloud API labels + dashboard-edited birdeye entries
+        # Entries with eyeStateEdited flag (dashboard eye corrections already applied to JSONL)
+        if e.get("eyeStateEdited"):
+            eye = e.get("eyeState", "face_not_visible")
+            e["state"] = EYE_TO_STATE.get(eye, "Unknown")
+            e["_label_source"] = "eye-correction"
+            entries.append(e)
+            continue
+
+        # Original cloud API labels
         if e.get("detectionMethod") == "vision-api":
             entries.append(e)
         elif e.get("stateEdited"):
-            # Birdeye entry that was manually corrected in dashboard
             e["_label_source"] = "dashboard-edit"
             entries.append(e)
 

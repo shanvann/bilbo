@@ -109,7 +109,7 @@ def load_sleep_log(path: Path, corrections_path: Path = None, audit_path: Path =
         log.info("Loaded %d audit labels from %s", len(audit_labels), audit_path.name)
 
     # Map eye state labels to sleep state for the training pipeline
-    EYE_TO_STATE = {"eyes_open": "Awake", "eyes_closed": "Asleep", "face_not_visible": "Unknown"}
+    EYE_TO_STATE = {"eyes_open": "Awake", "eyes_closed": "Asleep", "face_not_visible": "Unknown", "not_in_bassinet": "not_present"}
 
     entries = []
     for line in path.read_text().strip().splitlines():

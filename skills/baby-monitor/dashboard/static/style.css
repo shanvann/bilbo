@@ -636,7 +636,38 @@ footer {
   color: var(--text-dim);
 }
 
+/* Training stats grid */
+.train-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+.train-col h3 {
+  font-size: 0.85rem;
+  color: var(--accent-blue);
+  margin-bottom: 8px;
+}
+.train-details {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  line-height: 1.8;
+}
+.train-details .train-row {
+  display: flex;
+  justify-content: space-between;
+}
+.train-details .train-val {
+  color: var(--text);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.train-details .train-crit {
+  color: var(--accent-orange);
+  font-weight: 600;
+}
+
 @media (max-width: 700px) {
+  .train-grid { grid-template-columns: 1fr; }
   .block-viewer { flex-direction: column; }
   .viewer-frame { max-width: 100%; }
   .perf-grid { grid-template-columns: repeat(2, 1fr); }

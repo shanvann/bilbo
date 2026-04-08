@@ -527,6 +527,59 @@ function updateTimelineStats(entries) {
 
 
 // ---------------------------------------------------------------------------
+// Training stats (populated from trainingData after loadTrainingStatus)
+// ---------------------------------------------------------------------------
+function renderTrainingStats() {
+  const section = document.getElementById('training-stats');
+  if (!trainingData || !trainingData.lastMetrics) {
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = '';
+
+  const m = trainingData.lastMetrics;
+  const sources = trainingData.lastLabelSources || {};
+  const total = trainingData.lastEntriesTotal || 0;
+
+  document.getElementById('train-version').textContent =
+    '(' + (trainingData.version || '?') + ')';
+
+  // Data column
+  const dataEl = document.getElementById('train-data');
+  const srcRows = Object.entries(sources).map(([k,v]) =>
+    '<div class="train-row"><span>' + k + '</span><span class="train-val">' + v + '</span></div>'
+  ).join('');
+  dataEl.innerHTML =
+    '<div class="train-row"><span>Total entries</span><span class="train-val">' + total + '</span></div>' +
+    srcRows;
+
+  // Helper to render per-class metrics
+  function renderClassifier(el, metrics) {
+    if (!metrics) { el.innerHTML = 'No data'; return; }
+    let html = '';
+    html += '<div class="train-row"><span>Val accuracy</span><span class="train-val">' + (metrics.val_accuracy * 100).toFixed(1) + '%</span></div>';
+    html += '<div class="train-row"><span>Best val loss</span><span class="train-val">' + metrics.best_val_loss + '</span></div>';
+    html += '<div class="train-row"><span>Epochs</span><span class="train-val">' + metrics.best_epoch + ' / ' + metrics.total_epochs + '</span></div>';
+
+    if (metrics.awake_asleep_miss_rate != null) {
+      const missClass = metrics.awake_asleep_miss_rate > 0.05 ? 'train-crit' : 'train-val';
+      html += '<div class="train-row"><span>Awake→Asleep misses</span><span class="' + missClass + '">' + metrics.awake_asleep_misses + ' (' + (metrics.awake_asleep_miss_rate * 100).toFixed(0) + '%)</span></div>';
+    }
+
+    if (metrics.per_class) {
+      html += '<div style="margin-top:6px;font-size:0.75rem;color:var(--text-dim)">Per-class F1:</div>';
+      for (const [cls, s] of Object.entries(metrics.per_class)) {
+        html += '<div class="train-row"><span>' + cls + '</span><span class="train-val">P=' + s.precision + ' R=' + s.recall + ' F1=' + s.f1 + '</span></div>';
+      }
+    }
+    el.innerHTML = html;
+  }
+
+  renderClassifier(document.getElementById('train-presence'), m.presence);
+  renderClassifier(document.getElementById('train-eye'), m.eye_state);
+}
+
+// ---------------------------------------------------------------------------
 // Recent events table
 // ---------------------------------------------------------------------------
 async function loadEvents() {
@@ -628,6 +681,7 @@ async function loadTrainingStatus() {
       }
     }
 
+    renderTrainingStats();
     return data;
   } catch (e) {
     console.error('Training status error:', e);

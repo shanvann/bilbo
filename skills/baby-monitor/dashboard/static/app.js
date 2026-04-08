@@ -152,8 +152,11 @@ async function loadTimeline() {
       document.getElementById('timeline-bar').innerHTML =
         '<div style="padding:8px;color:var(--text-dim)">No data for this date</div>';
       document.getElementById('timeline-labels').innerHTML = '';
+      updateTimelineStats([]);
       return;
     }
+
+    updateTimelineStats(entries);
 
     // For a specific date: midnight to midnight ET
     // For today/live: last 24h
@@ -384,34 +387,46 @@ document.getElementById('block-detail-close').addEventListener('click', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Stats cards
+// Timeline stats (in-bassinet vs out, computed from timeline entries)
 // ---------------------------------------------------------------------------
-async function loadStats() {
-  try {
-    // Sleep stats for today
-    const sleepRes = await fetch('/api/sleep-stats?days=1');
-    const sleepData = await sleepRes.json();
-    const today = sleepData.days && sleepData.days.length > 0 ? sleepData.days[sleepData.days.length - 1] : null;
-
-    if (today) {
-      const totalH = today.totalHours;
-      const hrs = Math.floor(totalH);
-      const mins = Math.round((totalH - hrs) * 60);
-      document.getElementById('stat-sleep-total').textContent = hrs + 'h ' + mins + 'm';
-
-      const longestH = today.longestSleepHours || today.longestStretchHours || 0;
-      const lHrs = Math.floor(longestH);
-      const lMins = Math.round((longestH - lHrs) * 60);
-      document.getElementById('stat-longest').textContent = lHrs + 'h ' + lMins + 'm';
-    } else {
-      document.getElementById('stat-sleep-total').textContent = '0h';
-      document.getElementById('stat-longest').textContent = '0h';
-    }
-
-    // Feeds and diapers removed
-  } catch (e) {
-    console.error('Stats error:', e);
+function updateTimelineStats(entries) {
+  if (!entries || entries.length === 0) {
+    document.getElementById('stat-in-bassinet').textContent = '--';
+    document.getElementById('stat-out-bassinet').textContent = '--';
+    return;
   }
+
+  let inMs = 0;
+  let outMs = 0;
+
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    const eTime = new Date(e.timestamp).getTime();
+    const nextTime = i + 1 < entries.length
+      ? new Date(entries[i + 1].timestamp).getTime()
+      : eTime; // last entry: no duration to add
+
+    if (i + 1 >= entries.length) continue;
+    const dur = nextTime - eTime;
+
+    if (e.babyPresent) {
+      inMs += dur;
+    } else {
+      outMs += dur;
+    }
+  }
+
+  const totalMs = inMs + outMs;
+  const fmtDur = (ms) => {
+    const totalMin = Math.round(ms / 60000);
+    const h = Math.floor(totalMin / 60);
+    const m = totalMin % 60;
+    return h > 0 ? h + 'h ' + m + 'm' : m + 'm';
+  };
+  const pct = (ms) => totalMs > 0 ? Math.round(ms / totalMs * 100) + '%' : '0%';
+
+  document.getElementById('stat-in-bassinet').textContent = fmtDur(inMs) + ' (' + pct(inMs) + ')';
+  document.getElementById('stat-out-bassinet').textContent = fmtDur(outMs) + ' (' + pct(outMs) + ')';
 }
 
 
@@ -605,7 +620,6 @@ async function loadAll() {
   await Promise.all([
     loadStatus(),
     loadTimeline(),
-    loadStats(),
     loadEvents(),
     loadTrainingStatus(),
   ]);

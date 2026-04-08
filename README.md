@@ -2,6 +2,24 @@
 
 A baby bassinet monitor that captures a frame every minute from an IP camera, classifies sleep state locally with two on-device ML models (BIRDEYE), and sends Telegram alerts when the baby wakes up. Runs on a Mac via launchd with cloud API (GPT-4o) as fallback for the ~2% of frames the local models can't resolve.
 
+## Table of Contents
+
+- [What It Does](#what-it-does)
+- [Hardware Setup](#hardware-setup)
+- [Software Setup](#software-setup)
+- [Skills](#skills)
+  - [Baby Monitor](#baby-monitor-skillsbaby-monitor)
+  - [Baby Report](#baby-report-skillsbaby-report)
+- [Dashboard](#dashboard)
+- [Design Decisions](#design-decisions)
+  - [Capture Interval](#capture-interval)
+  - [Detection Pipeline Order](#detection-pipeline-order)
+  - [Local vs Cloud Analysis](#local-vs-cloud-analysis)
+  - [Wake Confirmation](#wake-confirmation)
+  - [Frame Retention](#frame-retention)
+- [Workspace Files](#workspace-files)
+- [Data (not in repo)](#data-not-in-repo)
+
 ## What It Does
 
 Bilbo captures a frame from your bassinet camera every minute, analyzes it locally with two on-device classifiers, and builds a detailed picture of your baby's sleep and behavior:

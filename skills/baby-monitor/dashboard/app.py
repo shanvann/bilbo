@@ -14,6 +14,7 @@ app = Flask(__name__, static_folder="static")
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SLEEP_LOG = DATA_DIR / "sleep-log.jsonl"
 ACTIVITY_CSV = DATA_DIR / "activity-log.csv"
+CORRECTIONS_LOG = DATA_DIR / "corrections.jsonl"
 ET = timezone(timedelta(hours=-4))  # America/New_York (EDT)
 
 
@@ -156,7 +157,7 @@ def api_timeline():
     timeline = []
     for e in entries:
         ts = parse_ts(e.get("timestamp"))
-        if ts and ts >= cutoff and ts <= end_cutoff:
+        if ts and ts >= cutoff and ts < end_cutoff:
             timeline.append({
                 "timestamp": e["timestamp"],
                 "babyPresent": e.get("babyPresent"),
@@ -387,7 +388,10 @@ def api_events():
 
 @app.route("/api/update-entry", methods=["POST"])
 def api_update_entry():
-    """Update state and/or position for a JSONL entry by timestamp."""
+    """Update state and/or position for a JSONL entry by timestamp.
+
+    Also logs the correction to corrections.jsonl for retraining.
+    """
     data = request.get_json()
     ts = data.get("timestamp")
     new_state = data.get("state")
@@ -396,12 +400,14 @@ def api_update_entry():
     if not ts:
         return jsonify({"error": "timestamp required"}), 400
 
-    lines = JSONL_FILE.read_text().strip().splitlines()
+    lines = SLEEP_LOG.read_text().strip().splitlines()
     updated = False
+    original_entry = None
     new_lines = []
     for line in lines:
         entry = json.loads(line)
         if entry.get("timestamp") == ts:
+            original_entry = json.loads(line)  # snapshot before edit
             if new_state:
                 entry["state"] = new_state
                 entry["stateEdited"] = True
@@ -414,7 +420,24 @@ def api_update_entry():
     if not updated:
         return jsonify({"error": "entry not found"}), 404
 
-    JSONL_FILE.write_text("\n".join(new_lines) + "\n")
+    SLEEP_LOG.write_text("\n".join(new_lines) + "\n")
+
+    # Log correction for retraining
+    if original_entry:
+        correction = {
+            "correctedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "originalTimestamp": ts,
+            "frame": original_entry.get("frame"),
+            "originalState": original_entry.get("state"),
+            "correctedState": new_state,
+            "originalPosition": original_entry.get("sleepPosition"),
+            "correctedPosition": new_position,
+            "detectionMethod": original_entry.get("detectionMethod"),
+            "source": "dashboard",
+        }
+        with open(CORRECTIONS_LOG, "a") as f:
+            f.write(json.dumps(correction) + "\n")
+
     return jsonify({"ok": True})
 
 

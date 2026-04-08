@@ -58,7 +58,7 @@ BIRDEYE local classifier performance and cloud API usage. Reports:
 - **BIRDEYE confidence stats** — presence classifier and eye state classifier confidence distributions (avg, min, max, p50, p95)
 - **BIRDEYE inference timing** — per-frame latency (avg, p50, p95)
 - **BIRDEYE state distribution** — how many frames classified as Asleep, Awake, not_present
-- **Cloud API model usage** — which models were called (gpt-4o-mini, gpt-4o, etc.)
+- **Cloud API model usage** — which models were called (gpt-4o as backup to birdeye)
 - **Coverage gaps** — periods >10 min with no entries (cron missed or camera down)
 - **State transitions** — birdeye Awake↔Asleep transitions (helps spot flip-flopping)
 - **Alerts** — count and types of safety alerts triggered

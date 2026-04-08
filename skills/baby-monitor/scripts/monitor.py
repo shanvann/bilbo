@@ -196,23 +196,25 @@ def main():
 
     enforce_disk_limit()
 
-    # --- Pixel-diff empty detection ---
-    is_empty, diff_score = detect_empty_bassinet(frame_path)
+    # --- Stage 1: Birdeye (local classifiers) ---
+    flat = try_local_analysis(frame_path)
 
-    if is_empty:
-        flat = make_empty_entry(frame_path, diff_score)
-        alerts = []
-        log.info("pipeline: bassinet empty (pixel-diff score=%.2f), API skipped", diff_score)
+    if flat is not None:
+        log.info("pipeline: birdeye -> %s (cloud API skipped)", flat.get("state"))
     else:
-        # --- Try birdeye (local 3-model cascade) first ---
-        flat = try_local_analysis(frame_path)
+        # --- Stage 2: Pixel-diff gate (cheap check before expensive cloud API) ---
+        # Birdeye failed or was uncertain. Before paying for a cloud API call,
+        # check if the bassinet is simply empty via pixel-diff.
+        is_empty, diff_score = detect_empty_bassinet(frame_path)
 
-        if flat is not None:
-            log.info("pipeline: birdeye -> %s (cloud API skipped)", flat.get("state"))
-            flat["diffScore"] = round(diff_score, 2) if diff_score >= 0 else None
+        if is_empty:
+            flat = make_empty_entry(frame_path, diff_score)
+            log.info("pipeline: birdeye unavailable, pixel-diff -> empty (score=%.2f), cloud API skipped",
+                     diff_score)
         else:
-            # --- Fallback: cloud vision API ---
-            log.info("pipeline: birdeye uncertain/unavailable, falling back to cloud API")
+            # --- Stage 3: Cloud vision API (last resort) ---
+            log.info("pipeline: birdeye uncertain, pixel-diff -> changed (score=%.2f), calling cloud API",
+                     diff_score)
             try:
                 analysis = analyze_frame(frame_path, api_key, anthropic_key)
             except RuntimeError as e:
@@ -220,7 +222,6 @@ def main():
                 _output("error", error=str(e), frame=str(frame_path))
                 return 1
 
-            # Flatten + check alerts
             flat = flatten_analysis(analysis, str(frame_path))
             flat["diffScore"] = round(diff_score, 2) if diff_score >= 0 else None
 
@@ -240,7 +241,7 @@ def main():
                 from lib.classifiers import save_head_state
                 save_head_state(head_pos["x"], head_pos["y"], source="cloud-api")
 
-        alerts = check_alerts(flat)
+    alerts = check_alerts(flat)
 
     # Build flat log entry
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

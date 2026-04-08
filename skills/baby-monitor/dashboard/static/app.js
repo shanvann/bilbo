@@ -414,99 +414,6 @@ async function loadStats() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Sleep trends chart
-// ---------------------------------------------------------------------------
-let sleepChart = null;
-
-async function loadSleepTrends() {
-  try {
-    const res = await fetch('/api/sleep-stats?days=14');
-    const data = await res.json();
-    const days = data.days || [];
-
-    const labels = days.map(d => {
-      const dt = new Date(d.date + 'T12:00:00');
-      return dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-    });
-    const totalHours = days.map(d => d.totalHours);
-    const longestSleep = days.map(d => d.longestSleepHours || d.longestStretchHours || 0);
-    const longestBassinet = days.map(d => d.longestBassinetHours || 0);
-
-    const ctx = document.getElementById('sleep-chart').getContext('2d');
-
-    if (sleepChart) sleepChart.destroy();
-
-    sleepChart = new Chart(ctx, {
-      type: 'bar',
-      data: {
-        labels: labels,
-        datasets: [
-          {
-            label: 'Total Sleep (hours)',
-            data: totalHours,
-            backgroundColor: 'rgba(74, 158, 255, 0.6)',
-            borderColor: 'rgba(74, 158, 255, 1)',
-            borderWidth: 1,
-            borderRadius: 4,
-            order: 3,
-          },
-          {
-            label: 'Longest Sleep Stretch',
-            data: longestSleep,
-            type: 'line',
-            borderColor: 'rgba(255, 152, 0, 1)',
-            backgroundColor: 'rgba(255, 152, 0, 0.1)',
-            pointBackgroundColor: 'rgba(255, 152, 0, 1)',
-            pointRadius: 4,
-            tension: 0.3,
-            fill: false,
-            order: 1,
-          },
-          {
-            label: 'Longest In Bassinet',
-            data: longestBassinet,
-            type: 'line',
-            borderColor: 'rgba(76, 175, 80, 1)',
-            backgroundColor: 'rgba(76, 175, 80, 0.1)',
-            pointBackgroundColor: 'rgba(76, 175, 80, 1)',
-            pointRadius: 4,
-            tension: 0.3,
-            fill: false,
-            borderDash: [5, 3],
-            order: 2,
-          }
-        ]
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-          legend: {
-            labels: { color: '#e0e0e0', font: { size: 12 } }
-          }
-        },
-        scales: {
-          x: {
-            ticks: { color: '#8892a4' },
-            grid: { color: 'rgba(42, 58, 92, 0.5)' }
-          },
-          y: {
-            beginAtZero: true,
-            max: 20,
-            ticks: {
-              color: '#8892a4',
-              callback: v => v + 'h'
-            },
-            grid: { color: 'rgba(42, 58, 92, 0.5)' }
-          }
-        }
-      }
-    });
-  } catch (e) {
-    console.error('Chart error:', e);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Recent events table
@@ -691,7 +598,6 @@ async function loadAll() {
     loadStatus(),
     loadTimeline(),
     loadStats(),
-    loadSleepTrends(),
     loadEvents(),
     loadTrainingStatus(),
   ]);

@@ -7,10 +7,12 @@ An AI-powered baby monitor agent that watches over your newborn via an IP camera
 Bilbo captures a frame from your bassinet camera every 4 minutes, analyzes it with AI vision, and builds a detailed picture of your baby's sleep and behavior:
 
 - **Tracks sleep state** — Asleep, Awake, Unknown — with position (Back, Side, Stomach) and location in bassinet
-- **Detects wake-ups** — burst-confirms with 3 frames over 2 minutes to filter vision model noise, then sends a Telegram alert with feedback buttons (✅/❌) to track accuracy
+- **Runs locally first** — BIRDEYE (two on-device MobileNetV3 classifiers) handles 98% of frames in ~40ms, falling back to cloud API only when uncertain
+- **Detects wake-ups** — burst-confirms with 3 frames over 2 minutes to filter noise, then sends a Telegram alert with feedback buttons (✅/❌) to track accuracy
 - **Safety alerts** — immediate notification if baby is pressed against the bassinet side
-- **Saves API costs** — pixel-diff detection skips vision API calls when the bassinet is empty (~31% savings)
-- **Never goes down** — model fallback chain (gpt-4o-mini → gpt-4o → Claude Sonnet) handles API outages automatically
+- **Saves API costs** — pixel-diff skips empty frames (~31%), BIRDEYE handles the rest locally (~98% of non-empty frames). Cloud API called on ~2% of total frames
+- **Never goes down** — cloud API fallback chain (gpt-4o-mini → gpt-4o) handles cases where local classifiers are uncertain
+- **Adaptive head tracking** — when cloud API is called, it returns the baby's head position, which BIRDEYE uses to center its crop on the next tick
 - **Generates reports** — daily/weekly activity reports combining camera data with manual tracking (feeds, pumps, diapers, weight)
 - **Human-in-the-loop** — dashboard lets you correct vision model mistakes (edit state/position per frame)
 
@@ -81,32 +83,62 @@ The core monitoring pipeline.
 ```
 launchd (every 4 min) → capture frame (ffmpeg)
   → pixel-diff: empty? → skip API, log as absent
-  → not empty? → vision API (gpt-4o-mini → gpt-4o → claude-sonnet)
-    → log to JSONL
-    → wake detection: Awake after sleep?
-      → burst: 2 more frames at 60s intervals
-      → 2/3 Awake? → Telegram alert with feedback buttons
-    → edge detection: pressed against side?
-      → immediate Telegram alert
+  → not empty? → BIRDEYE (local classifiers)
+    → Classifier 1: bassinet crop → baby present?
+    → Classifier 2: head-region crop → eyes_open / eyes_closed / face_not_visible
+      → confident? → log locally, skip cloud API
+      → uncertain? → cloud API fallback (gpt-4o-mini → gpt-4o)
+        → also returns head position → saved for next tick
+  → log to JSONL
+  → wake detection: Awake after sleep?
+    → burst: 2 more frames at 60s intervals
+    → 2/3 Awake? → Telegram alert with feedback buttons
+  → edge detection: pressed against side?
+    → immediate Telegram alert
 ```
+
+**BIRDEYE** (Baby IR-aware Recognition & Detection of EYE-state) uses two MobileNetV3-Small classifiers trained on the cloud API's own historical labels. When the baby turns face-down or the model is uncertain, it falls back to the cloud API, which also returns the head's approximate position for the next local inference tick.
+
+| Metric | Value |
+|---|---|
+| Local accuracy | 92.2% (vs cloud API ground truth) |
+| Frames handled locally | 98% |
+| Inference latency | ~40ms on CPU |
+| awake→asleep critical misses | 4% |
 
 **Key files:**
 | File | Purpose |
 |---|---|
 | `scripts/monitor.py` | Main pipeline — capture, detect, analyze, alert |
-| `references/prompt.md` | Vision API prompt and JSON schema |
+| `scripts/lib/classifiers.py` | BIRDEYE — presence + eye state classifiers |
+| `scripts/lib/local_pipeline.py` | BIRDEYE orchestration and fallback logic |
+| `scripts/report.py` | Performance reporting (birdeye vs cloud API stats) |
+| `pipeline/train_classifiers.py` | Train classifiers from sleep-log labels |
+| `references/prompt.md` | Cloud API prompt and JSON schema |
 | `data/sleep-log.jsonl` | Append-only analysis log (gitignored) |
-| `data/references/` | Empty bassinet reference frames for pixel-diff calibration |
+| `data/head-state.json` | Last known head position (gitignored) |
 
 **CLI modes:**
 ```bash
 monitor.py                           # full pipeline (launchd runs this)
 monitor.py --dry-run                 # test without writing to log
-monitor.py --backtest --quick        # replay history against current detection logic
+monitor.py --backtest --birdeye      # test BIRDEYE accuracy vs cloud API labels
+monitor.py --backtest --quick        # replay history against pixel-diff logic
 monitor.py --backtest --alerts       # test wake alert accuracy
 monitor.py --alert-stats             # show alert precision from user feedback
 monitor.py --status                  # system health overview
 monitor.py --last 10                 # show recent log entries
+report.py --hours 24                 # BIRDEYE performance report
+report.py --from 2026-04-01 --json   # machine-readable report
+```
+
+**Training:**
+```bash
+# Train both classifiers (~10 min on CPU, labels from sleep-log.jsonl)
+python pipeline/train_classifiers.py \
+  --sleep-log data/sleep-log.jsonl \
+  --frames data/frames/ \
+  --face-crops pipeline/output/bootstrap/face_crops/
 ```
 
 ### Baby Report (`skills/baby-report/`)
@@ -160,4 +192,7 @@ All data files are gitignored:
 - `*.jsonl`, `*.csv` — monitor logs, activity data
 - `data/frames/` — captured camera frames
 - `*.log` — system and cron logs
-- `.venv/` — Python virtual environments
+- `*.pt`, `*.onnx` — trained model weights
+- `venv/`, `.venv/` — Python virtual environments
+- `pipeline/output/` — training output, bootstrap data
+- `pipeline/models/` — trained model checkpoints

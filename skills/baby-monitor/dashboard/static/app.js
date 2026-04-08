@@ -621,11 +621,15 @@ async function loadMonitorStats() {
     const rate = d.birdeyeRate != null ? Math.round(d.birdeyeRate * 100) + '%' : '--';
     document.getElementById('perf-birdeye-rate').textContent = rate;
 
-    // Cloud calls
-    document.getElementById('perf-cloud-calls').textContent = d.cost ? d.cost.apiCalls : '--';
+    // Cloud cost
+    document.getElementById('perf-cloud-calls').textContent = d.cost
+      ? '$' + d.cost.estCost.toFixed(2) + ' (' + d.cost.apiCalls + ')'
+      : '--';
 
     // Cost saved
-    document.getElementById('perf-cost-saved').textContent = d.cost ? '$' + d.cost.estSaved.toFixed(2) : '--';
+    document.getElementById('perf-cost-saved').textContent = d.cost
+      ? '$' + d.cost.estSaved.toFixed(2) + ' (' + d.cost.apiAvoided + ')'
+      : '--';
 
     // Latency
     const lat = d.timing ? d.timing.avg + 'ms' : '--';

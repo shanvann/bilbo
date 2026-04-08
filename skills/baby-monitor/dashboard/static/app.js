@@ -463,7 +463,8 @@ function updateTimelineStats(entries) {
 // ---------------------------------------------------------------------------
 async function loadEvents() {
   try {
-    const res = await fetch('/api/events');
+    const count = document.getElementById('events-count').value;
+    const res = await fetch('/api/events?count=' + count);
     const data = await res.json();
     const events = data.events || [];
 
@@ -610,7 +611,8 @@ document.getElementById('footer-abort').addEventListener('click', async () => {
 // ---------------------------------------------------------------------------
 async function loadMonitorStats() {
   try {
-    const res = await fetch('/api/monitor-stats?hours=24');
+    const hours = document.getElementById('perf-range').value;
+    const res = await fetch('/api/monitor-stats?hours=' + hours);
     const d = await res.json();
 
     document.getElementById('perf-period').textContent = '(last 24h, ' + d.total + ' frames)';
@@ -711,5 +713,7 @@ async function loadAll() {
 }
 
 initTimelineNav();
+document.getElementById('perf-range').addEventListener('change', loadMonitorStats);
+document.getElementById('events-count').addEventListener('change', loadEvents);
 loadAll();
 setInterval(loadAll, REFRESH_INTERVAL_SEC * 1000);

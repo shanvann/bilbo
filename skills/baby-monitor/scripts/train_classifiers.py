@@ -596,6 +596,16 @@ def train_classifier(
             log.info("Critical: awake→asleep misses: %d/%d (%.1f%%)",
                      open_as_closed, total_open, miss_rate * 100)
 
+            # Asleep→awake false alarms (eyes_closed predicted as eyes_open)
+            closed_as_open = sum(1 for t, p in zip(val_labels, val_preds)
+                                 if t == closed_idx and p == open_idx)
+            total_closed = sum(1 for t in val_labels if t == closed_idx)
+            false_alarm_rate = closed_as_open / total_closed if total_closed > 0 else 0
+            metrics["asleep_awake_false_alarm_rate"] = round(false_alarm_rate, 3)
+            metrics["asleep_awake_false_alarms"] = f"{closed_as_open}/{total_closed}"
+            log.info("False alarms: asleep→awake: %d/%d (%.1f%%)",
+                     closed_as_open, total_closed, false_alarm_rate * 100)
+
     return metrics
 
 

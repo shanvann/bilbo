@@ -529,7 +529,16 @@ def api_training_status():
                 _train_process = None
 
     # Count pending corrections (made after last training)
-    last_trained_ts = last_log.get("timestamp") if last_log else None
+    # Parse timestamps properly — training log uses naive ISO, corrections use Z suffix
+    last_trained_dt = None
+    if last_log and last_log.get("timestamp"):
+        try:
+            ts = last_log["timestamp"]
+            # Handle both naive and Z-suffix formats
+            last_trained_dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
+        except (ValueError, AttributeError):
+            pass
+
     pending_corrections = 0
     total_corrections = 0
     if CORRECTIONS_LOG.exists():
@@ -538,10 +547,16 @@ def api_training_status():
                 continue
             total_corrections += 1
             c = json.loads(line)
-            if last_trained_ts and c.get("correctedAt", "") > last_trained_ts:
+            corrected_at = c.get("correctedAt", "")
+            if not last_trained_dt:
                 pending_corrections += 1
-            elif not last_trained_ts:
-                pending_corrections += 1
+            elif corrected_at:
+                try:
+                    c_dt = datetime.fromisoformat(corrected_at.replace("Z", "+00:00")).replace(tzinfo=None)
+                    if c_dt > last_trained_dt:
+                        pending_corrections += 1
+                except (ValueError, AttributeError):
+                    pending_corrections += 1
 
     result = {
         # Current run

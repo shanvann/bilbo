@@ -35,5 +35,18 @@ Thumbs.db
 # Dashboard venv
 skills/baby-monitor/dashboard/.venv/
 
+# Baby monitor venvs and model weights
+skills/baby-monitor/venv/
+skills/baby-monitor/scripts/venv/
+skills/baby-monitor/pipeline/models/
+skills/baby-monitor/pipeline/output/
+skills/baby-monitor/pipeline/.venv/
+skills/baby-monitor/yolov8n.pt
+*.pt
+*.onnx
+
+# OpenClaw runs/cron output
+runs/
+
 # Claude Code
 .claude/

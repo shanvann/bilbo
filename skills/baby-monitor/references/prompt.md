@@ -84,6 +84,12 @@ Schema:
       "attribute": "External hazards (inside bassinet)",
       "observedValue": "None|Loose items|Cords nearby|Unknown",
       "possibleValues": ["None", "Loose items", "Cords nearby", "Unknown"]
+    },
+    {
+      "category": "Baby State",
+      "attribute": "Head position in frame",
+      "observedValue": {"x": 0.0, "y": 0.0, "visible": true},
+      "description": "Normalized (0-1) center of the baby's head within the image. (0,0)=top-left, (1,1)=bottom-right. Set visible=false if face/head is not visible."
     }
   ]
 }
@@ -98,6 +104,7 @@ Rules:
   - Body posture = "Unknown"
   - isPacifierEngaged = "Unknown"
   - Baby location in bassinet = "Unknown"
+  - Head position in frame = {"x": 0.0, "y": 0.0, "visible": false}
 - For captureMode:
   - "NightVision" only when the image clearly appears to use infrared/night-vision style capture
   - otherwise "Normal"

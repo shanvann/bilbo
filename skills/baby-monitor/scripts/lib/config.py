@@ -65,6 +65,11 @@ EDGE_ALERT_COOLDOWN_MIN = 30
 ALERT_STATE_FILE = DATA_DIR / "alert-state.json"
 ALERT_FEEDBACK_FILE = DATA_DIR / "alert-feedback.jsonl"
 HEAD_STATE_FILE = DATA_DIR / "head-state.json"
+CORRECTIONS_FILE = DATA_DIR / "corrections.jsonl"
+AUDIT_LOG_FILE = DATA_DIR / "audit-log.jsonl"
+
+# Audit settings
+AUDIT_SAMPLE_SIZE = 50  # frames to spot-check per audit run
 
 # ---------------------------------------------------------------------------
 # Birdeye classifier config

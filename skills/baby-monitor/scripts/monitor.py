@@ -52,7 +52,7 @@ from lib.alerts import (
     should_burst,
 )
 from lib.storage import append_entry, get_last_entry
-from lib.cli import cmd_backtest, cmd_backtest_birdeye, cmd_last, cmd_status, parse_args
+from lib.cli import cmd_audit, cmd_backtest, cmd_backtest_birdeye, cmd_last, cmd_retrain, cmd_status, parse_args
 
 
 def _output(status: str, **kwargs):
@@ -116,6 +116,12 @@ def main():
             quick=args.quick,
             alerts=args.alerts,
         )
+
+    if args.audit:
+        return cmd_audit(sample_size=args.sample)
+
+    if args.retrain:
+        return cmd_retrain()
 
     # --- Load config ---
 

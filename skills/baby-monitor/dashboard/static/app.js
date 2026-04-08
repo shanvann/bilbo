@@ -239,8 +239,9 @@ async function loadTimeline() {
 // ---------------------------------------------------------------------------
 let viewerEntries = [];
 let viewerIndex = 0;
+let lastTrainedAt = null; // fetched once per block open
 
-function showBlockDetail(seg, durStr) {
+async function showBlockDetail(seg, durStr) {
   const panel = document.getElementById('block-detail');
   const summary = document.getElementById('block-detail-summary');
 
@@ -249,6 +250,13 @@ function showBlockDetail(seg, durStr) {
     formatTimeET(seg.start.toISOString()) + ' → ' +
     formatTimeET(seg.end.toISOString()) +
     ' (' + durStr + ', ' + seg.entries.length + ' frames)';
+
+  // Fetch latest training timestamp
+  try {
+    const res = await fetch('/api/training-status');
+    const data = await res.json();
+    lastTrainedAt = data.lastTrained ? new Date(data.lastTrained) : null;
+  } catch (e) { lastTrainedAt = null; }
 
   viewerEntries = seg.entries;
   viewerIndex = 0;
@@ -288,6 +296,22 @@ function renderViewer() {
   // Eye state dropdown
   const stateSelect = document.getElementById('viewer-state');
   stateSelect.value = eyeState;
+
+  // Retrain status indicator
+  const retrainEl = document.getElementById('viewer-retrain-status');
+  if (e.eyeStateEdited || e._correctedAt) {
+    const correctedAt = e._correctedAt ? new Date(e._correctedAt) : null;
+    if (lastTrainedAt && correctedAt && correctedAt < lastTrainedAt) {
+      retrainEl.textContent = 'retrained';
+      retrainEl.className = 'viewer-retrain-status retrained';
+    } else {
+      retrainEl.textContent = 'pending retrain';
+      retrainEl.className = 'viewer-retrain-status pending';
+    }
+  } else {
+    retrainEl.textContent = '';
+    retrainEl.className = 'viewer-retrain-status';
+  }
 
   // Clear saved indicator
   document.getElementById('viewer-saved').textContent = '';
@@ -334,10 +358,12 @@ document.getElementById('viewer-state').addEventListener('change', async (ev) =>
     });
     const data = await res.json();
     if (data.ok) {
-      e.eyeState = newEyeState; // update local data
+      e.eyeState = newEyeState;
+      e.eyeStateEdited = true;
+      e._correctedAt = new Date().toISOString();
       saved.textContent = 'saved';
       saved.style.color = '#4a9eff';
-      setTimeout(() => { saved.textContent = ''; }, 1500);
+      setTimeout(() => { saved.textContent = ''; renderViewer(); }, 800);
     } else {
       saved.textContent = 'error';
       saved.style.color = '#ff5252';

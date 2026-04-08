@@ -477,6 +477,19 @@ footer {
   color: var(--accent-blue);
   min-width: 50px;
 }
+.viewer-retrain-status {
+  font-size: 0.8rem;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.viewer-retrain-status.pending {
+  color: var(--accent-orange);
+  background: rgba(255, 152, 0, 0.15);
+}
+.viewer-retrain-status.retrained {
+  color: var(--accent-green);
+  background: rgba(76, 175, 80, 0.15);
+}
 
 @media (max-width: 700px) {
   .block-viewer { flex-direction: column; }

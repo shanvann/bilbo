@@ -163,6 +163,7 @@ def api_timeline():
                 "babyPresent": e.get("babyPresent"),
                 "state": e.get("state"),
                 "eyeState": e.get("eyeState"),
+                "eyeStateEdited": e.get("eyeStateEdited", False),
                 "frame": e.get("frame"),
                 "alerts": e.get("alerts", []),
             })
@@ -444,6 +445,27 @@ def api_update_entry():
             f.write(json.dumps(correction) + "\n")
 
     return jsonify({"ok": True})
+
+
+@app.route("/api/training-status")
+def api_training_status():
+    """Return latest model version and training timestamp."""
+    models_dir = DATA_DIR.parent / "pipeline" / "models"
+    training_log = models_dir / "training-log.jsonl"
+
+    if not training_log.exists():
+        return jsonify({"lastTrained": None, "version": None})
+
+    # Read last line
+    lines = training_log.read_text().strip().splitlines()
+    if not lines:
+        return jsonify({"lastTrained": None, "version": None})
+
+    last = json.loads(lines[-1])
+    return jsonify({
+        "lastTrained": last.get("timestamp"),
+        "version": last.get("version"),
+    })
 
 
 @app.route("/api/frame")

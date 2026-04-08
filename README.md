@@ -186,9 +186,11 @@ How often the camera grabs a frame determines how quickly we detect a wake-up an
 | 2 min | 720 | ~3.0 GB | Up to 2 min | ~$0.14/day |
 | **1 min (chosen)** | **1,440** | **~6.0 GB** | **Up to 1 min** | **~$0.29/day** |
 
+**Decision:** 1-minute intervals. With birdeye at 40ms, the cost per frame is zero — the only tradeoff is disk (6GB/week). Also eliminates burst capture logic since 3 natural entries already span 3 minutes.
+
 - **4 min** — the original interval when every frame cost $0.01 in cloud API calls. Too slow for wake detection (baby could cry for 4 min before the next check).
 - **2 min** — a reasonable middle ground, but at 1-min the additional disk is only 3GB/week and wake detection latency halves again.
-- **1 min (chosen)** — birdeye runs locally in 40ms so the cost per frame is effectively zero. The tradeoff is disk (6GB/week), which is acceptable for 7-day retention. Also eliminates the need for special burst capture logic since 3 natural entries already span 3 minutes.
+- **1 min (chosen)** — birdeye runs locally in 40ms so the cost per frame is effectively zero. 6GB/week is acceptable for 7-day retention.
 
 ### Detection Pipeline Order
 
@@ -200,8 +202,10 @@ Three systems can analyze a frame (birdeye, pixel-diff, cloud API). The order th
 | **birdeye → pixel-diff → cloud (chosen)** | **Birdeye handles everything, pixel-diff never runs** | **Pixel-diff catches empties before cloud API** |
 | birdeye → cloud (no pixel-diff) | Same | Every frame hits cloud API ($0.01 each) |
 
+**Decision:** Birdeye first, pixel-diff as safety net. Costs nothing when birdeye is healthy, saves money when it's not.
+
 - **pixel-diff first** — the original order when cloud API was primary. Now wasteful: pixel-diff runs on every frame even though birdeye handles 98% of them, including empty bassinets.
-- **birdeye → pixel-diff → cloud (chosen)** — pixel-diff only activates on the ~2% where birdeye fails. Zero overhead when birdeye is healthy, catches empty bassinets before the $0.01 cloud call when it's not.
+- **birdeye → pixel-diff → cloud (chosen)** — pixel-diff only activates on the ~2% where birdeye fails. Catches empty bassinets before the $0.01 cloud call.
 - **no pixel-diff** — simpler, but during a birdeye outage (model corruption, bad update) every single frame hits the cloud API. Pixel-diff as a safety net costs nothing to keep.
 
 ### Local vs Cloud Analysis
@@ -214,9 +218,11 @@ The fundamental architecture question: run ML on-device, send frames to a cloud 
 | **Local + cloud fallback (chosen)** | **40ms local, 2-5s fallback** | **~$0.003/frame avg** | **92% local, 100% with fallback** | **98% of frames stay on-device** |
 | Local only (no fallback) | 40ms | $0 | 92% (face-down = unknown) | Full privacy |
 
+**Decision:** Local-first with cloud fallback. BIRDEYE handles 98% on-device; the 2% fallback gets full GPT-4o analysis and returns head position for a self-improving loop.
+
 - **Cloud only** — the original approach. Reliable and accurate, but $0.01/frame adds up at 1-min intervals (~$14/day) and every frame leaves the device.
-- **Local + cloud fallback (chosen)** — best of both worlds. 98% of frames stay on-device at 40ms; the 2% fallback (mostly face-not-visible) gets GPT-4o's full analysis AND returns the head position to improve birdeye's next crop. Self-improving loop.
-- **Local only** — maximum privacy and zero cost, but face-down/turned-head frames return "unknown" with no way to resolve them. Loses the adaptive head tracking that makes birdeye more accurate over time.
+- **Local + cloud fallback (chosen)** — 98% of frames stay on-device at 40ms. The 2% fallback (mostly face-not-visible) returns the head position to improve birdeye's next crop.
+- **Local only** — maximum privacy and zero cost, but face-down frames return "unknown" with no way to resolve them. Loses the adaptive head tracking that makes birdeye more accurate over time.
 
 ### Wake Confirmation
 
@@ -228,9 +234,11 @@ A single "Awake" frame could be noise (classifier error, motion blur). We need a
 | Burst capture (old) | +2 min | **2 min blocking** (sleeps between captures) | High (extra captures, API calls) |
 | **Look-back (chosen)** | +2 min | **0 (non-blocking)** | Low (check last 3 entries) |
 
-- **Single frame** — too noisy. The classifier occasionally misclassifies a sleeping baby as awake (8% false alarm rate). Alerting on every single "Awake" frame would spam Telegram.
-- **Burst capture** — the original approach: sleep 60s, capture another frame, sleep 60s, capture again, check 2/3. Blocks the entire pipeline for 2 minutes and triggers extra cloud API calls.
-- **Look-back (chosen)** — with 1-min natural captures, the last 3 entries already span ~3 minutes. Same 2/3 Awake threshold, same confirmation quality, but zero blocking time and no extra captures. The pipeline just checks recent history.
+**Decision:** Look-back confirmation. With 1-min intervals, 3 recent entries naturally span ~3 minutes — same confirmation quality, zero blocking time.
+
+- **Single frame** — too noisy. The classifier occasionally misclassifies a sleeping baby as awake (8% false alarm rate). Alerting on every "Awake" frame would spam Telegram.
+- **Burst capture** — the original approach: sleep 60s, capture, sleep 60s, capture, check 2/3. Blocks the pipeline for 2 minutes and triggers extra cloud API calls.
+- **Look-back (chosen)** — checks last 3 natural entries. Same 2/3 Awake threshold, but zero blocking time and no extra captures.
 
 ### Frame Retention
 
@@ -243,10 +251,12 @@ Captured frames are needed for retraining classifiers, backtesting detection cha
 | **7 days (chosen)** | **~6 GB** | **Retraining, backtest, weekly reports** |
 | 30 days | ~25 GB | Full history (not worth the disk) |
 
+**Decision:** 7-day retention with 6GB cap. Enough for weekly retraining, backtests, and alert review. Oldest frames auto-deleted when cap is reached.
+
 - **1 day** — sufficient for debugging a single issue, but too short to retrain classifiers or run meaningful backtests.
-- **3 days** — covers most debugging needs but weekly reports and weekly backtests need a full week of data.
-- **7 days (chosen)** — the sweet spot. Enough for weekly retraining cycles, full-week backtests, and reviewing any alert from the past week. 6GB is modest on modern hardware.
-- **30 days** — 25GB of JPEG frames for diminishing returns. Older frames become less useful for retraining as the baby grows and the camera setup changes.
+- **3 days** — covers most debugging needs but weekly reports and backtests need a full week of data.
+- **7 days (chosen)** — the sweet spot. Enough for weekly retraining cycles, full-week backtests, and reviewing any alert from the past week.
+- **30 days** — 25GB of JPEG frames for diminishing returns. Older frames become less useful as the baby grows and the camera setup changes.
 
 ## Workspace Files
 

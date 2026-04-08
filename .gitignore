@@ -48,5 +48,6 @@ skills/baby-monitor/yolov8n.pt
 # OpenClaw runs/cron output
 runs/
 
-# Claude Code
-.claude/
+# Claude Code (keep settings.json for hooks, ignore local overrides)
+.claude/*
+!.claude/settings.json

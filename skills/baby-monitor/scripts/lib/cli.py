@@ -259,6 +259,199 @@ def cmd_backtest(last_n: int = None, from_date: str = None, quick: bool = False,
     return 0 if stats["false_skip"] == 0 else 1
 
 
+def cmd_backtest_birdeye(last_n: int = None, from_date: str = None):
+    """Run birdeye (local cascade) against historical frames.
+
+    Uses the cloud API state labels in sleep-log.jsonl as ground truth.
+    Reports accuracy, confusion matrix, fallback rate, and timing.
+    """
+    from .local_pipeline import try_local_analysis, BIRDEYE
+    from .classifiers import save_head_state
+
+    if not JSONL_FILE.exists():
+        print("No JSONL log file found.", file=sys.stderr)
+        return 1
+
+    entries = read_all_entries()
+
+    if from_date:
+        entries = [e for e in entries if e.get("timestamp", "") >= from_date]
+    if last_n:
+        entries = entries[-last_n:]
+
+    # Only test entries that were analyzed by the cloud API (not pixel-diff skips)
+    # and have existing frame files
+    testable = []
+    skipped_no_frame = 0
+    skipped_not_api = 0
+    for e in entries:
+        method = e.get("detectionMethod", "")
+        if method != "vision-api":
+            skipped_not_api += 1
+            continue
+        frame = e.get("frame", "")
+        if not frame or not Path(frame).exists():
+            skipped_no_frame += 1
+            continue
+        testable.append(e)
+
+    if not testable:
+        print(f"No testable entries (skipped {skipped_not_api} non-API, {skipped_no_frame} missing frames).",
+              file=sys.stderr)
+        return 1
+
+    # Count how many entries have head position data from the cloud API
+    has_head_pos = sum(1 for e in testable
+                       if isinstance(e.get("headPosition"), dict) and "x" in e.get("headPosition", {}))
+    print(f"Birdeye backtest: {len(testable)} frames with cloud API ground truth")
+    print(f"  Skipped: {skipped_not_api} non-API entries, {skipped_no_frame} missing frames")
+    print(f"  Head position data: {has_head_pos}/{len(testable)} entries")
+    print(f"  (entries without head data use default position)")
+    print()
+
+    # State normalization: cloud API uses "Asleep"/"Awake"/"Unknown", birdeye uses same
+    def normalize_state(s):
+        if s is None:
+            return "unknown"
+        s = s.lower().strip()
+        if s in ("asleep", "awake", "unknown", "not_present"):
+            return s
+        if s == "no":
+            return "not_present"
+        return "unknown"
+
+    # Run birdeye on each frame
+    results = {
+        "total": len(testable),
+        "birdeye_decided": 0,      # birdeye returned a confident state
+        "birdeye_fallback": 0,     # birdeye returned None (would use cloud API)
+        "birdeye_error": 0,        # shouldn't happen, but track it
+        "correct": 0,
+        "incorrect": 0,
+        "confusion": {},           # {(true, pred): count}
+        "timings": [],
+        "fallback_reasons": [],    # what the ground truth was when birdeye fell back
+    }
+
+    for i, entry in enumerate(testable):
+        frame_path = Path(entry["frame"])
+        gt_present = entry.get("babyPresent", True)
+        gt_state = normalize_state(entry.get("state"))
+
+        # Ground truth: combine presence + state
+        if not gt_present:
+            gt_label = "not_present"
+        else:
+            gt_label = gt_state
+
+        # Simulate head state: use head position from this entry's cloud API
+        # data (if available), mimicking what would happen in production when
+        # the cloud API updates head-state.json on each fallback
+        head_pos = entry.get("headPosition")
+        if isinstance(head_pos, dict) and "x" in head_pos:
+            save_head_state(head_pos["x"], head_pos["y"], source="backtest")
+
+        birdeye_result = try_local_analysis(frame_path)
+
+        if birdeye_result is None:
+            results["birdeye_fallback"] += 1
+            results["fallback_reasons"].append(gt_label)
+            status = "FALLBACK"
+        else:
+            results["birdeye_decided"] += 1
+            pred_label = normalize_state(birdeye_result.get("state"))
+            pair = (gt_label, pred_label)
+            results["confusion"][pair] = results["confusion"].get(pair, 0) + 1
+
+            if gt_label == pred_label:
+                results["correct"] += 1
+                status = "OK"
+            else:
+                results["incorrect"] += 1
+                status = "MISS"
+
+            timings = birdeye_result.get("birdeyeTimings", {})
+            if "total" in timings:
+                results["timings"].append(timings["total"])
+
+        # Progress every 50 frames
+        if (i + 1) % 50 == 0 or i == len(testable) - 1:
+            pct = (i + 1) * 100 // len(testable)
+            print(f"  [{pct:3d}%] {i+1}/{len(testable)}  decided={results['birdeye_decided']}  "
+                  f"fallback={results['birdeye_fallback']}  correct={results['correct']}  "
+                  f"incorrect={results['incorrect']}", end="\r")
+
+    print()  # clear progress line
+    print()
+
+    # --- Report ---
+    decided = results["birdeye_decided"]
+    fallback = results["birdeye_fallback"]
+    correct = results["correct"]
+    incorrect = results["incorrect"]
+    total = results["total"]
+
+    print(f"{'='*65}")
+    print(f"BIRDEYE BACKTEST RESULTS")
+    print(f"{'='*65}")
+    print(f"Total frames tested:   {total}")
+    print(f"Birdeye decided:       {decided} ({decided*100//total}%)")
+    print(f"Birdeye fallback:      {fallback} ({fallback*100//total}% → would use cloud API)")
+    print()
+
+    if decided > 0:
+        accuracy = correct * 100 / decided
+        print(f"Accuracy (when decided): {correct}/{decided} = {accuracy:.1f}%")
+        print(f"  Correct:   {correct}")
+        print(f"  Incorrect: {incorrect}")
+        print()
+
+        # Confusion matrix
+        labels = sorted(set(k[0] for k in results["confusion"]) | set(k[1] for k in results["confusion"]))
+        if labels:
+            print(f"Confusion matrix (rows=ground truth, cols=birdeye):")
+            header = f"  {'':>12s}" + "".join(f"{l:>12s}" for l in labels)
+            print(header)
+            for true_l in labels:
+                row = f"  {true_l:>12s}"
+                for pred_l in labels:
+                    count = results["confusion"].get((true_l, pred_l), 0)
+                    row += f"{count:>12d}"
+                print(row)
+            print()
+
+        # Critical error: awake predicted as asleep
+        awake_as_asleep = results["confusion"].get(("awake", "asleep"), 0)
+        awake_total = sum(v for (t, p), v in results["confusion"].items() if t == "awake")
+        if awake_total > 0:
+            miss_rate = awake_as_asleep * 100 / awake_total
+            print(f"Critical: awake→asleep misses: {awake_as_asleep}/{awake_total} ({miss_rate:.1f}%)")
+        else:
+            print(f"Critical: no awake frames to evaluate awake→asleep error rate")
+
+    # Fallback analysis
+    if fallback > 0:
+        print()
+        print(f"Fallback breakdown (what ground truth was when birdeye fell back):")
+        from collections import Counter
+        fb_counts = Counter(results["fallback_reasons"])
+        for label, count in fb_counts.most_common():
+            print(f"  {label:>12s}: {count} ({count*100//fallback}%)")
+
+    # Timing stats
+    if results["timings"]:
+        ts = results["timings"]
+        avg = sum(ts) / len(ts)
+        p50 = sorted(ts)[len(ts) // 2]
+        p95 = sorted(ts)[int(len(ts) * 0.95)]
+        print()
+        print(f"Timing (per frame, birdeye-decided only):")
+        print(f"  avg={avg:.3f}s  p50={p50:.3f}s  p95={p95:.3f}s  min={min(ts):.3f}s  max={max(ts):.3f}s")
+
+    print()
+    return 0
+
+
 def cmd_status():
     # JSONL stats
     if JSONL_FILE.exists():
@@ -349,6 +542,8 @@ examples:
                    help="(backtest) skip API calls, only test pixel-diff gate")
     p.add_argument("--alerts", action="store_true",
                    help="(backtest) test active wake alert detection")
+    p.add_argument("--birdeye", action="store_true",
+                   help="(backtest) test birdeye local cascade against cloud API ground truth")
     p.add_argument("--from-date", metavar="DATE",
                    help="(backtest) only test entries from this date (YYYY-MM-DD)")
     p.add_argument("--count", metavar="N", type=int,

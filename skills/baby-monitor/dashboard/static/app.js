@@ -559,7 +559,12 @@ function renderTrainingStats() {
     const finAt = new Date(trainingData.finishedAt).toLocaleString('en-US', {
       timeZone: 'America/New_York', month: 'short', day: 'numeric',
       hour: 'numeric', minute: '2-digit', hour12: true });
-    statusBadge = ' <span style="color:var(--accent-green);font-size:0.8rem">✓ last run ' + finAt + '</span>';
+    let durStr = '';
+    if (trainingData.startedAt && trainingData.finishedAt) {
+      const durSec = Math.round((new Date(trainingData.finishedAt) - new Date(trainingData.startedAt)) / 1000);
+      durStr = durSec >= 60 ? ' in ' + Math.floor(durSec / 60) + 'm ' + (durSec % 60) + 's' : ' in ' + durSec + 's';
+    }
+    statusBadge = ' <span style="color:var(--accent-green);font-size:0.8rem">✓ last run ' + finAt + durStr + '</span>';
   }
 
   document.getElementById('train-version').innerHTML =

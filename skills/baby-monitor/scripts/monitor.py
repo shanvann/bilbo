@@ -280,6 +280,12 @@ def main():
             "eyeState": shadow_birdeye.get("eyeState"),
             "birdeyeTimings": shadow_birdeye.get("birdeyeTimings"),
         }
+        # Track which model version produced this shadow result
+        training_log = Path(__file__).resolve().parent.parent / "pipeline" / "models" / "training-log.jsonl"
+        if training_log.exists():
+            last_line = training_log.read_text().strip().splitlines()[-1:]
+            if last_line:
+                flat["shadowModelVersion"] = json.loads(last_line[0]).get("version")
         if agreed:
             log.info("shadow: AGREE birdeye=%s prod=%s", birdeye_state, prod_state)
         else:

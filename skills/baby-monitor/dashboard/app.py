@@ -168,6 +168,7 @@ def api_timeline():
                 "eyeStateEdited": e.get("eyeStateEdited", False),
                 "eyeStateCorrectedAt": e.get("eyeStateCorrectedAt"),
                 "detectionMethod": e.get("detectionMethod"),
+                "shadowModelVersion": e.get("shadowModelVersion"),
                 "frame": e.get("frame"),
                 "alerts": e.get("alerts", []),
             })

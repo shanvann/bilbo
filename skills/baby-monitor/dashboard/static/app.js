@@ -299,8 +299,9 @@ function renderViewer() {
 
   // Retrain status indicator
   const retrainEl = document.getElementById('viewer-retrain-status');
-  if (e.eyeStateEdited || e._correctedAt) {
-    const correctedAt = e._correctedAt ? new Date(e._correctedAt) : null;
+  const correctedAtStr = e.eyeStateCorrectedAt || e._correctedAt;
+  if (e.eyeStateEdited || correctedAtStr) {
+    const correctedAt = correctedAtStr ? new Date(correctedAtStr) : null;
     if (lastTrainedAt && correctedAt && correctedAt < lastTrainedAt) {
       retrainEl.textContent = 'retrained';
       retrainEl.className = 'viewer-retrain-status retrained';

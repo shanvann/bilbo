@@ -113,6 +113,17 @@ body {
   font-size: 0.9rem;
   padding: 40px;
 }
+.live-frame-bar {
+  display: flex;
+  justify-content: center;
+  padding: 6px 12px;
+  background: var(--bg-card);
+}
+.live-frame-countdown {
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
 
 .meta-line {
   font-size: 0.8rem;

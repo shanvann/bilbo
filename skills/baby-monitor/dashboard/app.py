@@ -349,32 +349,41 @@ def api_events():
     entries = load_jsonl()
     events = []
     prev = None
+
+    def effective_state(e):
+        """Normalize state: when baby is absent, always 'not_present'."""
+        if not e.get("babyPresent"):
+            return "not_present"
+        return e.get("state", "Unknown")
+
     for e in entries:
         if prev is None:
             prev = e
             continue
-        changed = (
-            e.get("babyPresent") != prev.get("babyPresent")
-            or e.get("state") != prev.get("state")
-        )
-        if changed:
-            # Determine event type
-            if not prev.get("babyPresent") and e.get("babyPresent"):
-                event_type = "Placed in bassinet"
-            elif prev.get("babyPresent") and not e.get("babyPresent"):
-                event_type = "Removed from bassinet"
-            elif e.get("state") == "Asleep" and prev.get("state") != "Asleep":
-                event_type = "Fell asleep"
-            elif e.get("state") == "Awake" and prev.get("state") == "Asleep":
-                event_type = "Woke up"
-            else:
-                event_type = f"{prev.get('state', '?')} → {e.get('state', '?')}"
 
-            events.append({
-                "timestamp": e["timestamp"],
-                "type": event_type,
-                "position": e.get("sleepPosition"),
-            })
+        prev_state = effective_state(prev)
+        curr_state = effective_state(e)
+
+        if prev_state == curr_state:
+            prev = e
+            continue
+
+        # Determine event type
+        if prev_state == "not_present" and curr_state != "not_present":
+            event_type = "Placed in bassinet"
+        elif prev_state != "not_present" and curr_state == "not_present":
+            event_type = "Removed from bassinet"
+        elif curr_state == "Asleep" and prev_state != "Asleep":
+            event_type = "Fell asleep"
+        elif curr_state == "Awake" and prev_state == "Asleep":
+            event_type = "Woke up"
+        else:
+            event_type = f"{prev_state} → {curr_state}"
+
+        events.append({
+            "timestamp": e["timestamp"],
+            "type": event_type,
+        })
         prev = e
 
     # Add durations between consecutive events

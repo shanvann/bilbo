@@ -1,33 +1,58 @@
 ---
 name: baby-monitor
-description: Intelligent baby bassinet monitoring via IP camera. Captures RTSP frames every 4 minutes, analyzes them with OpenAI vision for sleep state, position, and environment conditions. Use when asked about baby status, monitoring logs, safety alerts, or to start/stop/query baby monitoring. Triggers on "baby monitor", "check on baby", "baby status", "is the baby sleeping", "monitor log", "bassinet check".
+description: Intelligent baby bassinet monitoring via IP camera. Captures RTSP frames every minute, analyzes locally with BIRDEYE classifiers (MobileNetV3), falls back to cloud API (gpt-4o) when uncertain. Use when asked about baby status, monitoring logs, safety alerts, model performance, or to start/stop/query baby monitoring. Triggers on "baby monitor", "check on baby", "baby status", "is the baby sleeping", "monitor log", "bassinet check", "birdeye", "retrain".
 ---
 
 # Baby Monitor
 
-Automated baby bassinet monitoring using RTSP camera + OpenAI vision (gpt-4o).
+Automated baby bassinet monitoring: RTSP camera → local ML classifiers → cloud API fallback → Telegram alerts.
 
 ## Architecture
 
 ```
-macOS launchd (every 4 min) → monitor.py (ffmpeg capture + OpenAI vision + JSONL log)
+macOS launchd (every 1 min) → monitor.py
+  → Stage 1: BIRDEYE (two MobileNetV3-Small classifiers, ~40ms)
+    → Classifier 1: fixed bassinet crop → baby present / not_present
+    → Classifier 2: adaptive head crop → eyes_open / eyes_closed / face_not_visible
+    → confident? → log to JSONL, done (~98% of frames)
+    → uncertain/failed? ↓
+  → Stage 2: pixel-diff gate (~10ms, safety net)
+    → empty bassinet? → log as absent, done
+    → changed? ↓
+  → Stage 3: cloud API (gpt-4o, last resort, ~2-5s)
+    → full analysis + returns head position → saved for next tick
+  → log to JSONL
+  → wake confirmation: 2/3 of last 3 entries Awake? → Telegram alert
+  → edge detection: pressed against side? → immediate Telegram alert
 ```
 
-**Important:** The monitoring pipeline runs independently via macOS launchd — NOT via OpenClaw cron. This was changed on 2026-04-01 because Anthropic API outages caused the OpenClaw cron agent to fail, creating data gaps. The current setup has zero dependency on Anthropic or any LLM for monitoring.
+**Important:** The monitoring pipeline runs via macOS launchd — NOT via OpenClaw cron. This avoids dependency on Anthropic or any LLM for monitoring.
 
-### What runs where
-- **Frame capture + vision analysis + logging**: `monitor.py` via launchd (uses OpenAI API directly, no agent wrapper)
-- **Querying/reporting**: Agent reads `data/sleep-log.jsonl` and `data/activity-log.csv` on demand
-- **Alerts**: Currently disabled (vision model misclassifies positions). If re-enabled, monitor.py writes alerts to stdout log; agent can check periodically
+### BIRDEYE (Baby IR-aware Recognition & Detection of EYE-state)
+
+Two MobileNetV3-Small classifiers trained on the cloud API's own historical labels:
+- **Classifier 1** — fixed bassinet-center crop → present / not_present
+- **Classifier 2** — adaptive head-region crop → eyes_open / eyes_closed / face_not_visible
+
+Head position is adaptive: when birdeye falls back to the cloud API, the API returns the head's approximate location in `data/head-state.json`, which birdeye uses to center its crop on the next tick.
+
+| Metric | Value |
+|---|---|
+| Accuracy (vs cloud API ground truth) | 92.2% |
+| Frames handled locally | ~98% |
+| Inference latency | ~40ms on CPU |
+| awake→asleep critical misses | 4% |
 
 ### Related skill
-- `baby-report` — generates activity reports from sleep-log.jsonl (sleep) + activity-log.csv (feeds, pumps, diapers, weight)
+- `baby-report` — generates activity reports including monitor performance (`--section monitor`)
 
 ## Config
 
 - RTSP stream URL + OpenAI key: `~/.openclaw/workspace/.env.baby-monitor`
 - Vision prompt: `references/prompt.md`
-- Launchd plist: `~/Library/LaunchAgents/com.openclaw.baby-monitor.plist`
+- Launchd plist: `~/Library/LaunchAgents/com.openclaw.baby-monitor.plist` (60s interval)
+- Classifier models: `pipeline/models/presence_classifier.pt`, `pipeline/models/eye_state_classifier.pt`
+- Head state: `data/head-state.json`
 
 ## Scheduling (launchd)
 
@@ -37,143 +62,129 @@ launchctl unload ~/Library/LaunchAgents/com.openclaw.baby-monitor.plist  # stop
 launchctl load ~/Library/LaunchAgents/com.openclaw.baby-monitor.plist    # start
 ```
 
-Stdout/stderr logs: `data/cron-stdout.log`, `data/cron-stderr.log`
+Logs: `data/system.log` (rotating, 5MB x 3), `data/cron-stdout.log`, `data/cron-stderr.log`
 
 **Do NOT recreate an OpenClaw cron job for this.** The launchd approach is more reliable.
 
 ## Scripts
 
-`scripts/monitor.py` — single self-contained script. Modes:
+### monitor.py — main pipeline (launchd runs this)
 
 | Command | What it does |
 |---|---|
-| `monitor.py` | Full pipeline: capture → detect → analyze → log |
+| `monitor.py` | Full pipeline: capture → birdeye → pixel-diff → cloud API → log |
 | `monitor.py --capture-only` | Grab a frame, print path, exit |
-| `monitor.py --analyze FILE` | Analyze an existing frame, pretty-print results |
+| `monitor.py --analyze FILE` | Analyze an existing frame via cloud API, pretty-print results |
 | `monitor.py --dry-run` | Full pipeline but skip JSONL write |
 | `monitor.py --last N` | Show last N entries from the JSONL log |
 | `monitor.py --status` | System health: log stats, recent gaps, disk usage |
-| `monitor.py --backtest --quick` | Replay all historical frames against pixel-diff logic |
-| `monitor.py --backtest --count 100` | Backtest last 100 entries only |
-| `monitor.py --backtest --from-date 2026-03-31` | Backtest from a specific date |
+| `monitor.py --backtest --birdeye` | Test BIRDEYE accuracy vs cloud API ground truth |
+| `monitor.py --backtest --quick` | Replay history against pixel-diff logic |
+| `monitor.py --backtest --alerts` | Test wake alert accuracy |
+| `monitor.py --alert-stats` | Show alert precision from user feedback |
+| `monitor.py --feedback ID yes\|no` | Record user feedback for an alert |
 | `monitor.py --verbose` | Print all log messages to stderr |
 
-## Log Format
+### train_classifiers.py — retrain BIRDEYE models
 
-`data/sleep-log.jsonl` — one flat JSON object per line:
+```bash
+# Train both classifiers (~10 min on CPU)
+python scripts/train_classifiers.py \
+  --sleep-log data/sleep-log.jsonl \
+  --frames data/frames/ \
+  --face-crops pipeline/output/bootstrap/face_crops/
 
-```json
-{
-  "timestamp": "2026-03-29T03:49:39Z",
-  "frame": "/path/to/frame.jpg",
-  "captureMode": "NightVision",
-  "cameraTimestamp": "2026-03-28T23:49:31",
-  "babyPresent": true,
-  "sleepPosition": "Back",
-  "objectsInBassinet": "Pacifier",
-  "swaddle": "Full",
-  "headCovering": "No hat",
-  "lighting": "Dark",
-  "state": "Asleep",
-  "bodyPosture": "Relaxed",
-  "pacifierEngaged": false,
-  "bassinetCondition": "Clean",
-  "hazards": "None",
-  "alerts": []
-}
+# Train only one
+python scripts/train_classifiers.py --sleep-log ... --frames ... --model presence
+python scripts/train_classifiers.py --sleep-log ... --frames ... --model eye-state
 ```
 
-### Field reference
+Labels come from the cloud API's annotations in sleep-log.jsonl (no manual labeling needed). `--face-crops` adds manually validated face images to improve awake→asleep accuracy.
+
+## Directory structure
+
+```
+skills/baby-monitor/
+├── scripts/                        # All source code
+│   ├── monitor.py                  # Main pipeline (cron entry point)
+│   ├── train_classifiers.py        # Training script
+│   ├── requirements.txt            # All Python deps
+│   └── lib/
+│       ├── config.py               # Paths, constants, classifier config
+│       ├── classifiers.py          # BIRDEYE — presence + eye state classifiers
+│       ├── local_pipeline.py       # BIRDEYE orchestration and fallback logic
+│       ├── vision.py               # Cloud API (gpt-4o) fallback
+│       ├── capture.py              # ffmpeg RTSP capture
+│       ├── detect.py               # Pixel-diff empty detection
+│       ├── alerts.py               # Wake confirmation, edge alerts, Telegram
+│       ├── storage.py              # JSONL read/write
+│       └── cli.py                  # CLI modes, backtest
+├── pipeline/                       # Data only (gitignored)
+│   ├── models/                     # Trained .pt weights
+│   └── output/                     # Training data, validated face crops
+├── dashboard/                      # Flask web UI
+├── data/                           # Runtime data (gitignored)
+│   ├── sleep-log.jsonl             # Primary log
+│   ├── head-state.json             # Last known head position
+│   ├── frames/                     # Captured JPEG frames (6GB cap, ~7 days)
+│   ├── system.log                  # Pipeline log (rotating)
+│   └── alert-state.json            # Wake alert cooldown
+├── references/
+│   ├── prompt.md                   # Cloud API vision prompt
+│   └── baby-profile.md            # Baby profile
+└── venv/                           # Python 3.12 virtualenv (gitignored)
+```
+
+## Log format
+
+`data/sleep-log.jsonl` — one flat JSON object per line. Key fields:
 
 | Field | Values | Notes |
 |---|---|---|
+| `detectionMethod` | `birdeye`, `pixel-diff`, `vision-api` | Which stage resolved the frame |
+| `modelUsed` | `local/mobilenet+mobilenet`, `openai/gpt-4o`, `n/a` | Model that produced the result |
 | `babyPresent` | `true` / `false` | |
-| `sleepPosition` | Back, Side, Stomach, Unknown | |
-| `state` | Asleep, Drowsy, Awake, Unknown | |
-| `objectsInBassinet` | None, Pacifier, Blanket, Pillow, Toys, Mixed, Unknown | |
-| `swaddle` | None, Partial, Full, Unknown | |
-| `headCovering` | Hat, No hat, Unknown | |
-| `lighting` | Dark, Dim, Moderate, Bright, Unknown | |
-| `bodyPosture` | Relaxed, Tense, Startle reflex, Unknown | |
-| `pacifierEngaged` | `true` / `false` / Unknown | In mouth? |
-| `bassinetCondition` | Clean, Wrinkled, Loose, Unknown | |
-| `hazards` | None, Loose items, Cords nearby, Unknown | Inside bassinet |
-| `captureMode` | Normal, NightVision, Unknown | |
-| `alerts` | list of strings | Pre-computed safety alerts (currently disabled) |
-
-### Pixel-diff empty detection
-
-Before calling OpenAI, the pipeline compares the current frame against the previous frame using ffmpeg pixel-difference on the center 60% crop. If the previous entry was empty and the diff score is below threshold (5), the bassinet is still empty → API is skipped (~33% savings).
-
-Fields added: `detectionMethod` ("pixel-diff" or "openai-vision"), `diffScore` (float).
-
-Reference empty frames stored in `data/references/` (empty_night.jpg, empty_day.jpg — used for calibration, not runtime).
+| `state` | Asleep, Awake, Unknown, not_present | |
+| `presenceConfidence` | 0.0–1.0 | Birdeye Classifier 1 confidence |
+| `eyeConfidence` | 0.0–1.0 | Birdeye Classifier 2 confidence |
+| `eyeState` | eyes_open, eyes_closed, face_not_visible | Birdeye raw eye classification |
+| `headPosition` | `{"x": 0.35, "y": 0.22, "visible": true}` | From cloud API (when called) |
+| `birdeyeTimings` | `{"presence": 0.02, "eye_state": 0.02, "total": 0.05}` | Per-stage timing |
+| `sleepPosition` | Back, Side, Stomach, Unknown | Cloud API only |
+| `alerts` | list of strings | Safety alerts triggered |
 
 ### Active wake alerts
 
-When the baby is detected as "Awake" after being "Asleep", the pipeline triggers a **burst confirmation**:
-1. Normal tick detects Awake → triggers burst
-2. Captures + analyzes 2 more frames at 60s intervals
-3. If 2+ of 3 frames show Awake → confirmed wake → sends Telegram alert
-4. If <2 Awake → suppressed as noise
-5. 30-min cooldown between alerts, reset when baby is removed
+When the baby is detected as "Awake" after being "Asleep", the pipeline confirms by checking the last 3 entries. If 2+ show Awake → sends Telegram alert with inline feedback buttons. 30-min cooldown between alerts, reset when baby is removed.
 
-Alert state stored in `data/alert-state.json`. Telegram credentials in `.env.baby-monitor` (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`).
-
-Each alert includes inline feedback buttons (✅ Yes / ❌ No). When the user taps a button, the callback comes through as a message. Record it with:
 ```bash
-python3 scripts/monitor.py --feedback <alert_id> yes|no
-```
-The alert_id is in the callback_data: `wake_yes:<id>` or `wake_no:<id>`.
-
-Check accuracy stats:
-```bash
-python3 scripts/monitor.py --alert-stats
+python3 scripts/monitor.py --feedback <alert_id> yes|no   # record feedback
+python3 scripts/monitor.py --alert-stats                   # check accuracy
 ```
 
-Feedback is logged in `data/alert-feedback.jsonl`.
+### Workflow for changing detection logic
 
-Burst frames are logged to JSONL with `burstFrame: true`.
-
-**Workflow for changing detection logic:**
-1. Make changes to `monitor.py` (threshold, diff algorithm, crop region, etc.)
-2. Run backtest: `python3 scripts/monitor.py --backtest --quick`
-3. Verify exit code 0 (no false skips) and review savings %
-4. If false skips > 0, inspect the flagged frames — may be OpenAI mislabels (check visually)
-5. Optionally test a date range: `--backtest --quick --from-date YYYY-MM-DD`
-6. Only deploy (let launchd pick up changes) after backtest passes
-7. Monitor `data/cron-stderr.log` for errors after deploy
+1. Make changes to source files
+2. Run backtest: `python3 scripts/monitor.py --backtest --birdeye --count 500`
+3. Check accuracy, confusion matrix, critical miss rate
+4. Reload launchd: `launchctl unload .../plist && launchctl load .../plist`
+5. Monitor `data/cron-stderr.log` for import errors
+6. Check performance: `python3 ../baby-report/scripts/report.py --range 1h --section monitor`
 
 ### Known limitations
-- **Bassinet only** — camera doesn't see sleep in stroller, arms, car seat, etc. Total sleep from camera data is a lower bound.
-- Vision model frequently misclassifies Side vs Stomach position — treat position data as approximate
-- `state: "Unknown"` is common; apply heuristic: if baby is present and position matches previous frame, infer "Asleep"
+- **Bassinet only** — camera doesn't see sleep in stroller, arms, car seat. Sleep totals are a lower bound.
+- BIRDEYE returns "Unknown" fields (position, swaddle, hazards) when it handles the frame locally — only cloud API provides full attribute set
+- Vision model frequently misclassifies Side vs Stomach position
 - Alert rules (stomach position, objects, hazards) are disabled due to false positives
 
 ## Activity Log
 
 `data/activity-log.csv` — manual tracking from parents (feeds, pumps, diapers, sleep, weight). Updated when user sends new CSV exports. Column mapping has quirks for Diaper rows (see baby-report skill).
 
-## Baby Profile
-
-See `references/baby-profile.md` for feeding schedule and habits. Key points:
-- Fed on demand, every 0.5–4 hours (whenever hungry)
-- Removed from bassinet for feeds (~30-60 min)
-
 ## Querying Logs
 
 To answer questions about the baby:
-1. Read `data/sleep-log.jsonl`
-2. Parse JSONL — each line is a flat JSON object, no nesting
-3. Filter directly on fields (e.g. `babyPresent == true`, `state == "Asleep"`)
-4. Apply sleep heuristic: if `state == "Unknown"` and `babyPresent == true` and `sleepPosition` matches previous entry (and isn't "Unknown"), infer "Asleep"
-5. Out-of-bassinet gaps (`babyPresent == false`): baby may be feeding, being changed, held, or sleeping elsewhere (stroller, arms, etc.) — camera only sees the bassinet
-
-**Important limitation:** The camera only monitors the bassinet. Sleep that happens outside the bassinet (stroller, being held, car seat, etc.) is not captured. Total sleep numbers from camera data are therefore a lower bound.
-
-Common queries:
-- **Current status**: Last entry in JSONL
-- **Sleep history**: Filter `babyPresent == true`, check `state` (apply heuristic)
-- **Nap duration**: Consecutive entries where `babyPresent == true`
-- **Feeding gaps**: Out-of-bassinet blocks near scheduled feed times
-- **Activity reports**: Use `baby-report` skill (`scripts/report.py`)
+1. Read `data/sleep-log.jsonl` (each line is a flat JSON object)
+2. Filter on fields (e.g. `babyPresent == true`, `state == "Asleep"`)
+3. Check `detectionMethod` to know which stage resolved each frame
+4. For activity reports, use `baby-report` skill (`--section monitor` for model performance)

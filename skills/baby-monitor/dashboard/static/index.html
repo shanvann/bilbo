@@ -127,29 +127,35 @@
     <section class="card">
       <h2>Model Performance <span class="subtitle" id="perf-period"></span></h2>
       <div class="perf-grid" id="perf-grid">
-        <div class="perf-item" title="Percentage of frames classified locally by birdeye without calling the cloud API. Higher = more cost savings and faster response.">
+        <div class="perf-item">
           <div class="perf-value" id="perf-birdeye-rate">--</div>
           <div class="perf-label">Birdeye Rate</div>
+          <div class="perf-desc">% of frames classified locally</div>
         </div>
-        <div class="perf-item" title="Number of frames that required a cloud API call (GPT-4o) because birdeye was uncertain or unavailable. Each call costs ~$0.01.">
+        <div class="perf-item">
           <div class="perf-value" id="perf-cloud-calls">--</div>
           <div class="perf-label">Cloud API Calls</div>
+          <div class="perf-desc">Frames sent to GPT-4o (~$0.01 each)</div>
         </div>
-        <div class="perf-item" title="Estimated dollar savings from frames handled locally by birdeye + pixel-diff instead of the cloud API, at $0.01 per avoided call.">
+        <div class="perf-item">
           <div class="perf-value" id="perf-cost-saved">--</div>
           <div class="perf-label">Est. Saved</div>
+          <div class="perf-desc">From avoiding cloud API calls</div>
         </div>
-        <div class="perf-item" title="Average time for birdeye to classify a frame locally (both classifiers combined). Typical: 40-100ms on CPU.">
+        <div class="perf-item">
           <div class="perf-value" id="perf-latency">--</div>
           <div class="perf-label">Avg Latency</div>
+          <div class="perf-desc">Birdeye inference time on CPU</div>
         </div>
-        <div class="perf-item" title="Average confidence of the eye state classifier (0-1). Higher means the model is more certain about eyes open/closed. Below 0.65 triggers a cloud API fallback.">
+        <div class="perf-item">
           <div class="perf-value" id="perf-confidence">--</div>
           <div class="perf-label">Eye Confidence</div>
+          <div class="perf-desc">How certain the model is (0-1)</div>
         </div>
-        <div class="perf-item" title="Number of periods longer than 10 minutes with no captured frames. Usually means the camera was offline, network dropped, or the Mac was asleep.">
+        <div class="perf-item">
           <div class="perf-value" id="perf-gaps">--</div>
           <div class="perf-label">Gaps (&gt;10m)</div>
+          <div class="perf-desc">Periods with no captured frames</div>
         </div>
       </div>
       <div class="perf-breakdown" id="perf-breakdown"></div>

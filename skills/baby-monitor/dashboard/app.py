@@ -702,6 +702,12 @@ def api_monitor_stats():
         if (entries[i]["_ts"] - entries[i - 1]["_ts"]).total_seconds() > 600:
             gap_count += 1
 
+    # Spot-check agreement rate
+    spot_checks = [e for e in entries if isinstance(e.get("spotCheck"), dict)]
+    spot_agreed = sum(1 for e in spot_checks if e["spotCheck"].get("agreed"))
+    spot_disagreed = len(spot_checks) - spot_agreed
+    spot_overridden = sum(1 for e in entries if e.get("detectionMethod") == "spot-check")
+
     return jsonify({
         "hours": hours,
         "total": total,
@@ -709,6 +715,7 @@ def api_monitor_stats():
             "birdeye": len(birdeye),
             "cloud_api": len(cloud),
             "pixel_diff": len(pixel_diff),
+            "spot_check": spot_overridden,
         },
         "birdeyeRate": round(len(birdeye) / total, 3) if total else 0,
         "birdeyeStates": dict(birdeye_states),
@@ -725,6 +732,13 @@ def api_monitor_stats():
             "estSaved": round(api_saved * 0.01, 2),
         },
         "gaps": gap_count,
+        "spotCheck": {
+            "total": len(spot_checks),
+            "agreed": spot_agreed,
+            "disagreed": spot_disagreed,
+            "overridden": spot_overridden,
+            "agreementRate": round(spot_agreed / len(spot_checks), 3) if spot_checks else None,
+        },
     })
 
 

@@ -604,6 +604,7 @@ footer {
 }
 .perf-bar-seg.birdeye { background: var(--accent-green); }
 .perf-bar-seg.pixel-diff { background: var(--accent-blue); }
+.perf-bar-seg.spot-check { background: var(--accent-red); }
 .perf-bar-seg.cloud { background: var(--accent-orange); }
 .perf-bar-legend {
   display: flex;

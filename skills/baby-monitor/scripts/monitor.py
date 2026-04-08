@@ -34,7 +34,8 @@ from pathlib import Path
 # or `python3 scripts/monitor.py` from baby-monitor/
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from lib.config import ENV_FILE, MODEL_CHAIN, load_env, log, set_verbose
+import random
+from lib.config import ENV_FILE, MODEL_CHAIN, SPOT_CHECK_RATE, load_env, log, set_verbose
 from lib.capture import capture_frame, enforce_disk_limit
 from lib.detect import detect_empty_bassinet, make_empty_entry
 from lib.vision import analyze_frame, flatten_analysis
@@ -215,7 +216,54 @@ def main():
     flat = try_local_analysis(frame_path)
 
     if flat is not None:
-        log.info("pipeline: birdeye -> %s (cloud API skipped)", flat.get("state"))
+        log.info("pipeline: birdeye -> %s", flat.get("state"))
+
+        # --- Inline spot-check: validate birdeye against cloud API ---
+        if random.random() < SPOT_CHECK_RATE:
+            log.info("spot-check: validating birdeye result against cloud API")
+            try:
+                analysis = analyze_frame(frame_path, api_key, anthropic_key)
+                cloud_flat = flatten_analysis(analysis, str(frame_path))
+
+                cloud_state = cloud_flat.get("state", "Unknown")
+                birdeye_state = flat.get("state", "Unknown")
+
+                # Normalize: treat not-present baby as "not_present"
+                if not cloud_flat.get("babyPresent", False):
+                    cloud_state = "not_present"
+                if not flat.get("babyPresent", False):
+                    birdeye_state = "not_present"
+
+                agreed = birdeye_state.lower() == cloud_state.lower()
+                flat["spotCheck"] = {
+                    "cloudState": cloud_state,
+                    "birdeyeState": birdeye_state,
+                    "agreed": agreed,
+                }
+
+                if agreed:
+                    log.info("spot-check: AGREE birdeye=%s cloud=%s", birdeye_state, cloud_state)
+                else:
+                    log.warning("spot-check: DISAGREE birdeye=%s cloud=%s -> overriding with cloud",
+                                birdeye_state, cloud_state)
+                    # Override birdeye with cloud API result
+                    flat = cloud_flat
+                    flat["spotCheck"] = {
+                        "cloudState": cloud_state,
+                        "birdeyeState": birdeye_state,
+                        "agreed": False,
+                        "overridden": True,
+                    }
+                    flat["detectionMethod"] = "spot-check"
+
+                # Save head position from cloud API
+                head_pos = cloud_flat.get("headPosition")
+                if isinstance(head_pos, dict) and head_pos.get("visible", False):
+                    from lib.classifiers import save_head_state
+                    save_head_state(head_pos["x"], head_pos["y"], source="spot-check")
+
+            except Exception as e:
+                log.warning("spot-check: cloud API failed, keeping birdeye result: %s", e)
     else:
         # --- Stage 2: Pixel-diff gate (cheap check before expensive cloud API) ---
         # Birdeye failed or was uncertain. Before paying for a cloud API call,

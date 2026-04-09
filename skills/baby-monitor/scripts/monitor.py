@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lib.config import ENV_FILE, MODEL_CHAIN, load_env, log, set_verbose
 from lib.capture import capture_frame, enforce_disk_limit
+from lib.db import get_db
 from lib.detect import detect_empty_bassinet, make_empty_entry
 from lib.vision import analyze_frame, flatten_analysis
 from lib.local_pipeline import try_local_analysis
@@ -299,10 +300,12 @@ def main():
 
     # Log to JSONL
     if args.dry_run:
-        log.info("pipeline: dry-run, skipping JSONL write")
+        log.info("pipeline: dry-run, skipping write")
     else:
-        append_entry(entry)
-        log.info("pipeline: logged entry to sleep-log.jsonl at %s", now)
+        append_entry(entry)  # JSONL backup
+        db = get_db()
+        db.insert_entry(entry)  # SQLite primary
+        log.info("pipeline: logged entry at %s", now)
     elapsed = time.monotonic() - t_start
 
     # --- Safety alerts ---

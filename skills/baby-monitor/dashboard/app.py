@@ -554,7 +554,7 @@ def api_retrain():
     monitor_py = str(DATA_DIR.parent / "scripts" / "monitor.py")
     python = str(DATA_DIR.parent / "venv" / "bin" / "python3")
 
-    # Spawn subprocess — it will register its own PID via training_state
+    # Spawn subprocess and track its PID
     proc = subprocess.Popen(
         [python, monitor_py, "--retrain"],
         cwd=str(DATA_DIR.parent),
@@ -562,6 +562,14 @@ def api_retrain():
         stderr=subprocess.PIPE,
     )
     _train_mark_started(proc.pid, trigger)
+
+    # Background thread to reap the child and update state when done
+    def _reap():
+        proc.wait()
+        from lib.training_state import mark_completed
+        mark_completed(proc.returncode)
+
+    threading.Thread(target=_reap, daemon=True).start()
 
     return jsonify({"ok": True, "pid": proc.pid, "trigger": trigger})
 

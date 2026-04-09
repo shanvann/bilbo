@@ -39,12 +39,30 @@ def _write(state: dict):
 
 
 def _pid_alive(pid: int) -> bool:
-    """Check if a process with given PID is still running."""
+    """Check if a process with given PID is still running (not zombie)."""
     try:
         os.kill(pid, 0)
-        return True
     except (OSError, ProcessLookupError):
         return False
+
+    # Check for zombie — kill(0) succeeds on zombies but they're not running
+    try:
+        result = os.waitpid(pid, os.WNOHANG)
+        if result[0] != 0:
+            # Process was reaped — it was a zombie
+            return False
+    except ChildProcessError:
+        # Not our child — check /proc or ps
+        try:
+            import subprocess
+            out = subprocess.check_output(["ps", "-p", str(pid), "-o", "stat="],
+                                          stderr=subprocess.DEVNULL, text=True).strip()
+            if out.startswith("Z"):
+                return False  # zombie
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+
+    return True
 
 
 def is_running() -> bool:

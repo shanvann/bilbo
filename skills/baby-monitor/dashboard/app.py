@@ -5,11 +5,16 @@ import csv
 import json
 import os
 import subprocess
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
+
+# Add scripts/ to path so we can import lib.db
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+from lib.db import get_db
 
 app = Flask(__name__, static_folder="static")
 
@@ -90,7 +95,8 @@ def index():
 
 @app.route("/api/status")
 def api_status():
-    entries = load_jsonl()
+    db = get_db()
+    entries = db.get_recent_entries(50)  # only need recent for status
     if not entries:
         return jsonify({"error": "no data"}), 404
 
@@ -142,10 +148,9 @@ def api_status():
 def api_timeline():
     date_str = request.args.get("date")  # YYYY-MM-DD in ET
     hours = int(request.args.get("hours", 24))
-    entries = load_jsonl()
+    db = get_db()
 
     if date_str:
-        # Show full day in ET: midnight to midnight
         import zoneinfo
         et = zoneinfo.ZoneInfo("America/New_York")
         day_start = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=et)
@@ -156,22 +161,25 @@ def api_timeline():
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         end_cutoff = datetime.now(timezone.utc)
 
+    raw_entries = db.get_entries(
+        start=cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        end=end_cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
     timeline = []
-    for e in entries:
-        ts = parse_ts(e.get("timestamp"))
-        if ts and ts >= cutoff and ts < end_cutoff:
-            timeline.append({
-                "timestamp": e["timestamp"],
-                "babyPresent": e.get("babyPresent"),
-                "state": e.get("state"),
-                "eyeState": e.get("eyeState"),
-                "eyeStateEdited": e.get("eyeStateEdited", False),
-                "eyeStateCorrectedAt": e.get("eyeStateCorrectedAt"),
-                "detectionMethod": e.get("detectionMethod"),
-                "shadowModelVersion": e.get("shadowModelVersion"),
-                "frame": e.get("frame"),
-                "alerts": e.get("alerts", []),
-            })
+    for e in raw_entries:
+        timeline.append({
+            "timestamp": e["timestamp"],
+            "babyPresent": e.get("babyPresent"),
+            "state": e.get("state"),
+            "eyeState": e.get("eyeState"),
+            "eyeStateEdited": e.get("eyeStateEdited", False),
+            "eyeStateCorrectedAt": e.get("eyeStateCorrectedAt"),
+            "detectionMethod": e.get("detectionMethod"),
+            "shadowModelVersion": e.get("shadowModelVersion"),
+            "frame": e.get("frame"),
+            "alerts": e.get("alerts", []),
+        })
 
     # Also include feed events from CSV
     csv_rows = load_csv_rows()
@@ -348,7 +356,8 @@ def api_diapers():
 @app.route("/api/events")
 def api_events():
     """Recent state transitions."""
-    entries = load_jsonl()
+    db = get_db()
+    entries = db.get_entries(hours=72)  # look back 3 days for events
     events = []
     prev = None
 
@@ -416,36 +425,42 @@ def api_update_entry():
     if not ts:
         return jsonify({"error": "timestamp required"}), 400
 
+    db = get_db()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Build update dict
+    updates = {}
+    if new_state:
+        updates["state"] = new_state
+        updates["stateEdited"] = True
+    if new_position:
+        updates["sleepPosition"] = new_position
+        updates["positionEdited"] = True
+    if new_eye_state:
+        updates["eyeState"] = new_eye_state
+        updates["eyeStateEdited"] = True
+        updates["eyeStateCorrectedAt"] = now
+
+    # Update in SQLite
+    if not db.update_entry(ts, updates):
+        return jsonify({"error": "entry not found"}), 404
+
+    # Also update JSONL backup
     lines = SLEEP_LOG.read_text().strip().splitlines()
-    updated = False
     original_entry = None
     new_lines = []
     for line in lines:
         entry = json.loads(line)
         if entry.get("timestamp") == ts:
-            original_entry = json.loads(line)  # snapshot before edit
-            if new_state:
-                entry["state"] = new_state
-                entry["stateEdited"] = True
-            if new_position:
-                entry["sleepPosition"] = new_position
-                entry["positionEdited"] = True
-            if new_eye_state:
-                entry["eyeState"] = new_eye_state
-                entry["eyeStateEdited"] = True
-                entry["eyeStateCorrectedAt"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            updated = True
+            original_entry = json.loads(line)
+            entry.update(updates)
         new_lines.append(json.dumps(entry))
-
-    if not updated:
-        return jsonify({"error": "entry not found"}), 404
-
     SLEEP_LOG.write_text("\n".join(new_lines) + "\n")
 
-    # Log correction for retraining
+    # Log correction to both SQLite and JSONL backup
     if original_entry:
         correction = {
-            "correctedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "correctedAt": now,
             "originalTimestamp": ts,
             "frame": original_entry.get("frame"),
             "originalState": original_entry.get("state"),
@@ -457,6 +472,7 @@ def api_update_entry():
             "detectionMethod": original_entry.get("detectionMethod"),
             "source": "dashboard",
         }
+        db.insert_correction(correction)
         with open(CORRECTIONS_LOG, "a") as f:
             f.write(json.dumps(correction) + "\n")
 
@@ -508,8 +524,12 @@ def api_training_status():
     """Return current training run status + last completed training details."""
     global _train_process
 
-    state = _read_training_state()
-    logs = _get_last_training_logs(2)
+    db = get_db()
+    state = db.get_state("training") or _read_training_state()
+    logs = db.get_last_training_runs(2)
+    # Fall back to file if db has no training runs
+    if not logs:
+        logs = _get_last_training_logs(2)
     last_log = logs[0] if logs else None
     prev_log = logs[1] if len(logs) > 1 else None
 
@@ -528,35 +548,9 @@ def api_training_status():
                 _write_training_state(state)
                 _train_process = None
 
-    # Count pending corrections (made after last training)
-    # Parse timestamps properly — training log uses naive ISO, corrections use Z suffix
-    last_trained_dt = None
-    if last_log and last_log.get("timestamp"):
-        try:
-            ts = last_log["timestamp"]
-            # Handle both naive and Z-suffix formats
-            last_trained_dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
-        except (ValueError, AttributeError):
-            pass
-
-    pending_corrections = 0
-    total_corrections = 0
-    if CORRECTIONS_LOG.exists():
-        for line in CORRECTIONS_LOG.read_text().strip().splitlines():
-            if not line:
-                continue
-            total_corrections += 1
-            c = json.loads(line)
-            corrected_at = c.get("correctedAt", "")
-            if not last_trained_dt:
-                pending_corrections += 1
-            elif corrected_at:
-                try:
-                    c_dt = datetime.fromisoformat(corrected_at.replace("Z", "+00:00")).replace(tzinfo=None)
-                    if c_dt > last_trained_dt:
-                        pending_corrections += 1
-                except (ValueError, AttributeError):
-                    pending_corrections += 1
+    # Pending corrections (via SQLite — fast indexed query)
+    last_trained_ts = last_log.get("timestamp") if last_log else None
+    total_corrections, pending_corrections = db.get_pending_corrections_count(last_trained_ts)
 
     result = {
         # Current run
@@ -666,140 +660,14 @@ def api_retrain_abort():
 
 @app.route("/api/monitor-stats")
 def api_monitor_stats():
-    """Model performance stats for the dashboard, computed from sleep-log.jsonl.
+    """Model performance stats — powered by SQLite.
 
     Query params:
         hours: lookback window (default 24)
     """
-    from collections import Counter
-
     hours = float(request.args.get("hours", 24))
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-
-    entries = []
-    for e in load_jsonl():
-        ts = parse_ts(e.get("timestamp"))
-        if ts and ts >= cutoff:
-            e["_ts"] = ts
-            entries.append(e)
-
-    if not entries:
-        return jsonify({"total": 0})
-
-    total = len(entries)
-    methods = Counter(e.get("detectionMethod", "unknown") for e in entries)
-
-    birdeye = [e for e in entries if e.get("detectionMethod") == "birdeye"]
-    cloud = [e for e in entries if e.get("detectionMethod") in ("vision-api", "openai-vision")]
-    pixel_diff = [e for e in entries if e.get("detectionMethod") == "pixel-diff"]
-
-    # Birdeye confidence + timing stats (from both direct birdeye entries AND shadow data)
-    presence_confs = []
-    eye_confs = []
-    timings = []
-    # From direct birdeye entries (when birdeye was prod)
-    for e in birdeye:
-        if e.get("presenceConfidence") is not None:
-            presence_confs.append(e["presenceConfidence"])
-        if e.get("eyeConfidence") is not None:
-            eye_confs.append(e["eyeConfidence"])
-        bt = e.get("birdeyeTimings")
-        if isinstance(bt, dict) and "total" in bt:
-            timings.append(bt["total"])
-    # From shadow entries (when cloud API is prod, birdeye ran in parallel)
-    for e in entries:
-        shadow = e.get("shadow")
-        if not isinstance(shadow, dict):
-            continue
-        if shadow.get("presenceConfidence") is not None:
-            presence_confs.append(shadow["presenceConfidence"])
-        if shadow.get("eyeConfidence") is not None:
-            eye_confs.append(shadow["eyeConfidence"])
-        bt = shadow.get("birdeyeTimings")
-        if isinstance(bt, dict) and "total" in bt:
-            timings.append(bt["total"])
-
-    def stats(vals):
-        if not vals:
-            return None
-        s = sorted(vals)
-        return {
-            "avg": round(sum(s) / len(s), 3),
-            "min": round(s[0], 3),
-            "max": round(s[-1], 3),
-            "p50": round(s[len(s) // 2], 3),
-        }
-
-    # Birdeye state distribution
-    birdeye_states = Counter()
-    for e in birdeye:
-        if not e.get("babyPresent", False):
-            birdeye_states["not_present"] += 1
-        else:
-            birdeye_states[e.get("state", "Unknown")] += 1
-
-    # Cloud models
-    cloud_models = Counter(e.get("modelUsed", "unknown") for e in cloud)
-
-    # Cost
-    api_saved = len(birdeye) + len(pixel_diff)
-
-    # Gaps > 10 min
-    gap_count = 0
-    for i in range(1, len(entries)):
-        if (entries[i]["_ts"] - entries[i - 1]["_ts"]).total_seconds() > 600:
-            gap_count += 1
-
-    # Shadow birdeye agreement rate
-    # If user corrected the entry via dashboard, use the correction as ground truth
-    # instead of the original cloud API state. This means agreement is measured
-    # against the best known label, not just the raw production output.
-    EYE_TO_STATE = {"eyes_open": "awake", "eyes_closed": "asleep", "face_not_visible": "unknown", "not_in_bassinet": "not_present"}
-    shadow_entries = [e for e in entries if isinstance(e.get("shadow"), dict)]
-    shadow_agreed = 0
-    for e in shadow_entries:
-        birdeye_state = e["shadow"].get("birdeyeState", "Unknown").lower()
-        # Ground truth: dashboard correction > cloud API
-        if e.get("eyeStateEdited") and e.get("eyeState"):
-            ground_truth = EYE_TO_STATE.get(e["eyeState"], "unknown")
-        else:
-            gt = e["shadow"].get("prodState", "Unknown")
-            ground_truth = gt.lower() if gt else "unknown"
-        if birdeye_state == ground_truth:
-            shadow_agreed += 1
-    shadow_disagreed = len(shadow_entries) - shadow_agreed
-
-    return jsonify({
-        "hours": hours,
-        "total": total,
-        "methods": {
-            "birdeye": len(birdeye),
-            "cloud_api": len(cloud),
-            "pixel_diff": len(pixel_diff),
-            "shadow_disagreed": shadow_disagreed,
-        },
-        "birdeyeRate": round(len(birdeye) / total, 3) if total else 0,
-        "birdeyeStates": dict(birdeye_states),
-        "confidence": {
-            "presence": stats(presence_confs),
-            "eye": stats(eye_confs),
-        },
-        "timing": stats(timings),
-        "cloudModels": dict(cloud_models),
-        "cost": {
-            "apiCalls": len(cloud),
-            "apiAvoided": api_saved,
-            "estCost": round(len(cloud) * 0.01, 2),
-            "estSaved": round(api_saved * 0.01, 2),
-        },
-        "gaps": gap_count,
-        "shadow": {
-            "total": len(shadow_entries),
-            "agreed": shadow_agreed,
-            "disagreed": shadow_disagreed,
-            "agreementRate": round(shadow_agreed / len(shadow_entries), 3) if shadow_entries else None,
-        },
-    })
+    db = get_db()
+    return jsonify(db.get_monitor_stats(hours))
 
 
 @app.route("/api/frame")

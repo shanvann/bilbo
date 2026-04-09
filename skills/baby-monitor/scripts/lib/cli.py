@@ -671,36 +671,57 @@ def cmd_retrain():
     """
     import subprocess
 
-    # Check if retraining data exists
-    has_corrections = CORRECTIONS_FILE.exists() and CORRECTIONS_FILE.stat().st_size > 0
-    has_audit = AUDIT_LOG_FILE.exists() and AUDIT_LOG_FILE.stat().st_size > 0
+    # Check for pending corrections/audit data since last training.
+    # Use content timestamps, not file mtime (unreliable across timezones).
+    from datetime import datetime as _dt
 
-    if not has_corrections and not has_audit:
-        print("No corrections or audit data to retrain on. Skipping.")
+    last_trained_dt = None
+    training_log = MODELS_DIR / "training-log.jsonl"
+    if training_log.exists():
+        lines = training_log.read_text().strip().splitlines()
+        if lines:
+            try:
+                ts = json.loads(lines[-1]).get("timestamp", "")
+                last_trained_dt = _dt.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
+            except (ValueError, json.JSONDecodeError):
+                pass
+
+    def count_pending(path):
+        if not path.exists() or path.stat().st_size == 0:
+            return 0, 0
+        total = 0
+        pending = 0
+        for line in path.read_text().strip().splitlines():
+            if not line:
+                continue
+            total += 1
+            if not last_trained_dt:
+                pending += 1
+                continue
+            try:
+                entry = json.loads(line)
+                ts = entry.get("correctedAt") or entry.get("auditTimestamp") or ""
+                if ts:
+                    entry_dt = _dt.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
+                    if entry_dt > last_trained_dt:
+                        pending += 1
+            except (ValueError, json.JSONDecodeError):
+                pending += 1
+        return total, pending
+
+    n_corrections, pending_corrections = count_pending(CORRECTIONS_FILE)
+    n_audit, pending_audit = count_pending(AUDIT_LOG_FILE)
+    total_pending = pending_corrections + pending_audit
+
+    if total_pending == 0:
+        print(f"No new data since last training. Skipping.")
+        print(f"  Corrections: {n_corrections} total, 0 pending")
+        print(f"  Audit: {n_audit} total, 0 pending")
+        print(f"  Last trained: {last_trained_dt}")
         return 0
 
-    # Check if models are newer than the retraining data
-    model_files = list(MODELS_DIR.glob("*.pt"))
-    if model_files:
-        newest_model = max(f.stat().st_mtime for f in model_files)
-        data_mtime = 0
-        if has_corrections:
-            data_mtime = max(data_mtime, CORRECTIONS_FILE.stat().st_mtime)
-        if has_audit:
-            data_mtime = max(data_mtime, AUDIT_LOG_FILE.stat().st_mtime)
-        if newest_model > data_mtime:
-            print("Models are newer than retraining data. No retrain needed.")
-            return 0
-
-    # Count retraining signals
-    n_corrections = 0
-    n_audit = 0
-    if has_corrections:
-        n_corrections = sum(1 for _ in CORRECTIONS_FILE.read_text().strip().splitlines() if _)
-    if has_audit:
-        n_audit = sum(1 for _ in AUDIT_LOG_FILE.read_text().strip().splitlines() if _)
-
-    print(f"Retraining with {n_corrections} corrections + {n_audit} audit disagreements")
+    print(f"Retraining: {pending_corrections} new corrections + {pending_audit} new audit entries")
+    print(f"  (total: {n_corrections} corrections, {n_audit} audit)")
 
     # Build the training command
     train_script = SKILL_DIR / "scripts" / "train_classifiers.py"

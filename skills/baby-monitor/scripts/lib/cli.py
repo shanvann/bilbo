@@ -672,9 +672,14 @@ def cmd_retrain(trigger: str = "cli"):
     import subprocess
     from . import training_state
 
-    if training_state.is_running():
-        print("Training already in progress. Use --list-models to check status.")
-        return 1
+    # Check if another training process is running (not us)
+    state = training_state.get_status()
+    if state.get("status") == "running":
+        running_pid = state.get("pid")
+        my_pid = __import__("os").getpid()
+        if running_pid and running_pid != my_pid:
+            print(f"Training already in progress (pid={running_pid}). Use --list-models to check status.")
+            return 1
 
     # Check for pending corrections/audit data since last training.
     # Use content timestamps, not file mtime (unreliable across timezones).

@@ -633,6 +633,21 @@ function renderTrainingStats() {
     html += '<div class="train-row"><span title="Epoch with best val loss / total epochs before early stopping">Epochs</span><span class="train-val">'
       + metrics.best_epoch + ' / ' + metrics.total_epochs + '</span></div>';
 
+    // Presence classifier stats
+    if (metrics.out_labeled_as_in != null) {
+      html += '<div class="train-row"><span title="Bassinet was empty but model said baby present (false positive)">Out labeled as In</span><span class="train-val">' + metrics.out_labeled_as_in + '</span></div>';
+    }
+    if (metrics.in_labeled_as_out != null) {
+      html += '<div class="train-row"><span title="Baby was present but model said empty (false negative — misses baby)">In labeled as Out</span><span class="train-val">' + metrics.in_labeled_as_out + '</span></div>';
+    }
+    if (metrics.class_split) {
+      const cs = metrics.class_split;
+      html += '<div class="train-row"><span title="How many present vs not_present samples in the validation set">Class split</span><span class="train-val">' + cs.present + ' in / ' + cs.not_present + ' out (' + cs.pct_present + '% present)</span></div>';
+    }
+    if (metrics.total_val_labels != null) {
+      html += '<div class="train-row"><span title="Total validation samples">Total val labels</span><span class="train-val">' + metrics.total_val_labels + '</span></div>';
+    }
+
     if (metrics.awake_asleep_miss_rate != null) {
       const missClass = metrics.awake_asleep_miss_rate > 0.05 ? 'train-crit' : 'train-val';
       html += '<div class="train-row"><span title="CRITICAL: % of truly-awake frames the model predicted as asleep. Must be &lt;5% for safety.">Awake→Asleep misses</span><span class="' + missClass + '">'

@@ -249,7 +249,15 @@ class PresenceDataset(Dataset):
             if not fpath.exists():
                 skipped += 1
                 continue
-            label = 1 if e.get("babyPresent", False) else 0
+            # Eye state correction overrides babyPresent:
+            # "not_in_bassinet" correction → not_present (label 0)
+            # Any other eye correction (eyes_open, eyes_closed, face_not_visible) → present (label 1)
+            if e.get("eyeStateEdited") and e.get("eyeState") == "not_in_bassinet":
+                label = 0
+            elif e.get("eyeStateEdited") and e.get("eyeState") in ("eyes_open", "eyes_closed", "face_not_visible"):
+                label = 1
+            else:
+                label = 1 if e.get("babyPresent", False) else 0
             self.samples.append((fpath, label))
 
         if skipped > 0:
@@ -582,6 +590,28 @@ def train_classifier(
                 "support": tp + fn,
             }
         metrics["per_class"] = per_class
+
+        # Presence classifier: in/out misclassification
+        if "not_present" in class_names and "present" in class_names:
+            np_idx = class_names.index("not_present")
+            p_idx = class_names.index("present")
+            # Out labeled as in (false positive — thinks baby is there when they're not)
+            out_as_in = sum(1 for t, p in zip(val_labels, val_preds) if t == np_idx and p == p_idx)
+            total_out = sum(1 for t in val_labels if t == np_idx)
+            # In labeled as out (false negative — misses the baby)
+            in_as_out = sum(1 for t, p in zip(val_labels, val_preds) if t == p_idx and p == np_idx)
+            total_in = sum(1 for t in val_labels if t == p_idx)
+            metrics["out_labeled_as_in"] = f"{out_as_in}/{total_out}"
+            metrics["in_labeled_as_out"] = f"{in_as_out}/{total_in}"
+            metrics["class_split"] = {
+                "not_present": total_out,
+                "present": total_in,
+                "pct_present": round(total_in / max(total_out + total_in, 1) * 100, 1),
+            }
+            metrics["total_val_labels"] = total_out + total_in
+            log.info("Presence: out→in: %d/%d, in→out: %d/%d, split: %d/%d (%.0f%% present)",
+                     out_as_in, total_out, in_as_out, total_in,
+                     total_in, total_out, metrics["class_split"]["pct_present"])
 
         # Critical metric for eye state classifier: awake→asleep miss rate
         if "eyes_open" in class_names and "eyes_closed" in class_names:

@@ -67,6 +67,7 @@ ALERT_FEEDBACK_FILE = DATA_DIR / "alert-feedback.jsonl"
 HEAD_STATE_FILE = DATA_DIR / "head-state.json"
 CORRECTIONS_FILE = DATA_DIR / "corrections.jsonl"
 AUDIT_LOG_FILE = DATA_DIR / "audit-log.jsonl"
+TRAINING_STATE_FILE = DATA_DIR / "training-state.json"
 
 # Audit settings
 AUDIT_SAMPLE_SIZE = 50  # frames to spot-check per --audit run

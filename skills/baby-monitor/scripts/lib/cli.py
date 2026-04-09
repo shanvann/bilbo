@@ -763,6 +763,19 @@ def cmd_retrain(trigger: str = "cli"):
         print(f"Retrain failed (exit code {result.returncode})", file=sys.stderr)
         return result.returncode
 
+    # Sync new training run to SQLite (train_classifiers.py writes JSONL only)
+    training_log_file = MODELS_DIR / "training-log.jsonl"
+    if training_log_file.exists():
+        from .db import get_db
+        db = get_db()
+        last_line = training_log_file.read_text().strip().splitlines()[-1]
+        run_data = json.loads(last_line)
+        # Check if already in db
+        existing = db.get_last_training_runs(1)
+        if not existing or existing[0].get("version") != run_data.get("version"):
+            db.insert_training_run(run_data)
+            log.info("retrain: synced training run %s to SQLite", run_data.get("version"))
+
     # --- Post-retrain: re-infer corrected frames with new model ---
     print()
     print("Re-inferring corrected frames with new model...")

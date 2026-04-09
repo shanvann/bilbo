@@ -929,18 +929,20 @@ function updateCountdown() {
   const untilRefresh = untilCapture + 5; // ~5s for capture + birdeye + write
 
   if (untilCapture <= 0) {
-    el.textContent = 'Refreshing...';
-    // Auto-refresh once when timer expires (avoid hammering)
+    // Auto-refresh once when timer expires
     if (!refreshTriggered) {
       refreshTriggered = true;
+      el.textContent = 'Refreshing...';
       setTimeout(async () => {
         await loadAll();
+        // Reset countdown from now — don't get stuck if capture was late
+        lastCaptureCheckedAt = Date.now();
+        lastCaptureAgoSec = 0;
         refreshTriggered = false;
-      }, 5000); // wait 5s for capture to complete, then fetch
+      }, 5000);
     }
   } else {
     el.textContent = 'Next frame in ~' + untilRefresh + 's';
-    refreshTriggered = false;
   }
 }
 

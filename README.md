@@ -298,6 +298,77 @@ How to store and query monitoring data efficiently.
 - **JSONL only** — simple, grep-friendly, but O(n) for every query. At 1440 frames/day, the file grows fast.
 - **SQLite + JSONL (chosen)** — indexed queries, atomic writes, SQL aggregation for dashboard stats. JSONL backup preserved for raw access and disaster recovery.
 
+## Database Schema
+
+Primary storage: `data/monitor.db` (SQLite, WAL mode)
+
+### entries
+Main table — one row per captured frame.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | INTEGER PK | Auto-increment |
+| timestamp | TEXT | ISO 8601 UTC (indexed) |
+| frame | TEXT | Path to JPEG file |
+| baby_present | INTEGER | 1=present, 0=absent |
+| state | TEXT | Asleep, Awake, Unknown, not_present |
+| eye_state | TEXT | eyes_open, eyes_closed, face_not_visible, not_in_bassinet |
+| eye_state_edited | INTEGER | 1 if corrected via dashboard (indexed) |
+| eye_state_corrected_at | TEXT | When the correction was made |
+| detection_method | TEXT | birdeye, vision-api, pixel-diff, spot-check (indexed) |
+| model_used | TEXT | openai/gpt-4o, local/mobilenet+mobilenet, n/a |
+| shadow_model_version | TEXT | e.g., v_20260408_201030 |
+| presence_confidence | REAL | Birdeye Classifier 1 confidence (0-1) |
+| eye_confidence | REAL | Birdeye Classifier 2 confidence (0-1) |
+| diff_score | REAL | Pixel-diff score |
+| shadow_birdeye_state | TEXT | What birdeye predicted (shadow) |
+| shadow_prod_state | TEXT | What prod pipeline returned |
+| shadow_agreed | INTEGER | 1=aligned, 0=misaligned, NULL=no shadow |
+| shadow_timings_total | REAL | Birdeye inference time in seconds |
+| data | JSON | Full entry as JSON (all fields) |
+| created_at | TEXT | Row creation timestamp |
+
+### corrections
+Dashboard and audit corrections — training signal.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | INTEGER PK | Auto-increment |
+| corrected_at | TEXT | When correction was made (indexed) |
+| original_timestamp | TEXT | Entry timestamp being corrected |
+| frame | TEXT | Path to frame |
+| original_state | TEXT | State before correction |
+| corrected_state | TEXT | New state (if sleep state changed) |
+| original_eye_state | TEXT | Eye state before correction |
+| corrected_eye_state | TEXT | New eye state (eyes_open, eyes_closed, etc.) |
+| detection_method | TEXT | What produced the original label |
+| source | TEXT | dashboard, audit |
+| used_in_training | TEXT | Model version that consumed this correction |
+
+### training_runs
+One row per training run — model provenance and metrics.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | INTEGER PK | Auto-increment |
+| version | TEXT | e.g., v_20260408_201030 (indexed) |
+| timestamp | TEXT | When training completed |
+| entries_total | INTEGER | Total labeled frames used |
+| label_sources | JSON | {"cloud-api": 530, "correction": 35, "audit": 10} |
+| split | JSON | {"train": 435, "val": 99, "test": 41} |
+| config | JSON | Hyperparameters (epochs, lr, batch_size, etc.) |
+| metrics | JSON | Per-classifier: accuracy, loss, F1, miss rates |
+| models_trained | TEXT | "all", "presence", "eye-state" |
+
+### state
+Key-value store for runtime state.
+
+| Key | Value | Description |
+|-----|-------|-------------|
+| head | {"x": 0.5, "y": 0.3, ...} | Last known head position for birdeye crop |
+| alert | {"lastEdgeAlert": "..."} | Alert cooldown timestamps |
+| training | {"status": "running", "pid": 12345, ...} | Training process state |
+
 ## Workspace Files
 
 | File | Purpose |

@@ -663,13 +663,18 @@ def cmd_rollback(version: str):
     return 0
 
 
-def cmd_retrain():
+def cmd_retrain(trigger: str = "cli"):
     """Retrain classifiers using corrections + audit disagreements as supplemental data.
 
     Only retrains if corrections.jsonl or audit-log.jsonl has new entries since the
     last model file was modified.
     """
     import subprocess
+    from . import training_state
+
+    if training_state.is_running():
+        print("Training already in progress. Use --list-models to check status.")
+        return 1
 
     # Check for pending corrections/audit data since last training.
     # Use content timestamps, not file mtime (unreliable across timezones).
@@ -745,7 +750,9 @@ def cmd_retrain():
     print(f"Running: {' '.join(cmd[-6:])}")
     print()
 
+    training_state.mark_started(trigger)
     result = subprocess.run(cmd, cwd=str(SKILL_DIR))
+    training_state.mark_completed(result.returncode)
 
     if result.returncode != 0:
         print(f"Retrain failed (exit code {result.returncode})", file=sys.stderr)

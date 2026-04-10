@@ -141,7 +141,8 @@ def try_local_analysis(frame_path: Path) -> dict | None:
                  BIRDEYE, presence.confidence, timings["total"])
         return _build_entry("not_present", presence, None, timings)
 
-    # --- Classifier 2: eye state (bassinet crop) ---
+    # --- Classifier 2: eye state (bassinet crop, 2-class) ---
+    from .config import EYE_STATE_CONFIDENCE_THRESHOLD
     # Load head position for recording in entry (not used for cropping)
     from .classifiers import load_head_state
     head_pos = load_head_state()
@@ -157,20 +158,21 @@ def try_local_analysis(frame_path: Path) -> dict | None:
 
     timings["total"] = time.monotonic() - t0
 
+    # Low confidence → fall back to cloud API
+    if eye_result.confidence < EYE_STATE_CONFIDENCE_THRESHOLD:
+        log.info("%s: FALLBACK low_confidence %.3f < %.3f (%.2fs) -> cloud API",
+                 BIRDEYE, eye_result.confidence, EYE_STATE_CONFIDENCE_THRESHOLD,
+                 timings["total"])
+        return None
+
     if eye_result.state == "eyes_open":
         log.info("%s: RESULT Awake conf=%.3f (%.2fs) -> cloud API skipped",
                  BIRDEYE, eye_result.confidence, timings["total"])
         return _build_entry("Awake", presence, eye_result, timings, head_pos)
 
-    if eye_result.state == "eyes_closed":
-        log.info("%s: RESULT Asleep conf=%.3f (%.2fs) -> cloud API skipped",
-                 BIRDEYE, eye_result.confidence, timings["total"])
-        return _build_entry("Asleep", presence, eye_result, timings, head_pos)
-
-    # face_not_visible → fall back to cloud API (which will also update head position)
-    log.info("%s: FALLBACK face_not_visible conf=%.3f (%.2fs) -> cloud API",
+    log.info("%s: RESULT Asleep conf=%.3f (%.2fs) -> cloud API skipped",
              BIRDEYE, eye_result.confidence, timings["total"])
-    return None
+    return _build_entry("Asleep", presence, eye_result, timings, head_pos)
 
 
 # ---------------------------------------------------------------------------

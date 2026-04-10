@@ -718,7 +718,7 @@ def _reinfer_corrections_against_current_model(
     # shadow-dict schema (db.insert_entry, api_timeline, etc.). The agreement
     # computation itself is in eye-state domain — see below.
     EYE_TO_STATE = {"eyes_open": "Awake", "eyes_closed": "Asleep",
-                    "face_not_visible": "Unknown", "not_in_bassinet": "not_present"}
+                    "low_confidence": "Unknown", "not_in_bassinet": "not_present"}
 
     all_lines = JSONL_FILE.read_text().strip().splitlines()
     entries = [json.loads(l) for l in all_lines]
@@ -726,6 +726,9 @@ def _reinfer_corrections_against_current_model(
     agreed_after = 0
     total_reinfer = 0
     correction_class_counts: dict[str, dict[str, int]] = {}
+    # Confusion pairs: (ground_truth, predicted)
+    eye_confusion_pairs: list[tuple[str, str]] = []
+    pres_confusion_pairs: list[tuple[str, str]] = []
     presence_class_counts: dict[str, dict[str, int]] = {
         "not_present": {"correct": 0, "total": 0},
         "present":     {"correct": 0, "total": 0},
@@ -742,12 +745,10 @@ def _reinfer_corrections_against_current_model(
         birdeye_result = try_local_analysis(Path(frame))
 
         # Extract birdeye's raw eye-state prediction. None result means the
-        # pipeline would have fallen back to cloud, which only happens when
-        # the eye-state classifier output face_not_visible (see
-        # local_pipeline.py:163-176). Record it as such — previously these
-        # frames were silently dropped from per-class accounting.
+        # pipeline would have fallen back to cloud (low confidence or
+        # not present). Record as "low_confidence" for accounting.
         if birdeye_result is None:
-            birdeye_eye = "face_not_visible"
+            birdeye_eye = "low_confidence"
             birdeye_present = True  # must have been present, else
                                     # _build_entry("not_present", ...) would
                                     # have been returned (not None)
@@ -756,7 +757,7 @@ def _reinfer_corrections_against_current_model(
             shadow_timings = None
         else:
             birdeye_present = bool(birdeye_result.get("babyPresent", False))
-            birdeye_eye = birdeye_result.get("eyeState") or "face_not_visible"
+            birdeye_eye = birdeye_result.get("eyeState") or "low_confidence"
             shadow_pc = birdeye_result.get("presenceConfidence")
             shadow_ec = birdeye_result.get("eyeConfidence")
             shadow_timings = birdeye_result.get("birdeyeTimings")
@@ -788,13 +789,18 @@ def _reinfer_corrections_against_current_model(
         if agreed:
             bucket["correct"] += 1
 
+        # Confusion pair for eye-state corrections (skip not_in_bassinet — that's presence)
+        if gt_eye in ("eyes_open", "eyes_closed") and birdeye_eye in ("eyes_open", "eyes_closed"):
+            eye_confusion_pairs.append((gt_eye, birdeye_eye))
+
         # Presence-level tally — independent of eye-state correctness. A frame
         # where birdeye got the presence right but the eye state wrong still
         # counts as correct here.
         pres_truth = "not_present" if gt_eye == "not_in_bassinet" else "present"
-        pres_correct = (birdeye_present is False) if pres_truth == "not_present" else birdeye_present
+        pres_pred = "present" if birdeye_present else "not_present"
+        pres_confusion_pairs.append((pres_truth, pres_pred))
         presence_class_counts[pres_truth]["total"] += 1
-        if pres_correct:
+        if pres_truth == pres_pred:
             presence_class_counts[pres_truth]["correct"] += 1
 
         # Update the entry's shadow sub-dict. Schema matches the pre-existing
@@ -824,7 +830,7 @@ def _reinfer_corrections_against_current_model(
     if updated > 0:
         JSONL_FILE.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
 
-    return total_reinfer, agreed_after, correction_class_counts, presence_class_counts
+    return total_reinfer, agreed_after, correction_class_counts, presence_class_counts, eye_confusion_pairs, pres_confusion_pairs
 
 
 def cmd_eval_corrections() -> int:
@@ -850,7 +856,7 @@ def cmd_eval_corrections() -> int:
     print(f"Deployed model: {deployed_version}")
     print()
 
-    total_reinfer, agreed_after, correction_class_counts, presence_class_counts = (
+    total_reinfer, agreed_after, correction_class_counts, presence_class_counts, eye_confusion_pairs, pres_confusion_pairs = (
         _reinfer_corrections_against_current_model(deployed_version)
     )
 
@@ -863,7 +869,7 @@ def cmd_eval_corrections() -> int:
     print(f"Overall eye-state agreement: {agreed_after}/{total_reinfer} ({pct}%)")
     print()
     print("Eye-state per-class:")
-    for cls in ("eyes_open", "eyes_closed", "face_not_visible", "not_in_bassinet"):
+    for cls in ("eyes_open", "eyes_closed", "low_confidence", "not_in_bassinet"):
         counts = correction_class_counts.get(cls)
         if not counts or counts["total"] == 0:
             continue
@@ -884,12 +890,26 @@ def cmd_eval_corrections() -> int:
     db = get_db()
     pres_correct = sum(c["correct"] for c in presence_class_counts.values())
     pres_total = sum(c["total"] for c in presence_class_counts.values())
+
+    # Build confusion matrices from pairs
+    def _build_cm(pairs, classes):
+        cm = {t: {p: 0 for p in classes} for t in classes}
+        for t, p in pairs:
+            if t in cm and p in cm[t]:
+                cm[t][p] += 1
+        return cm
+
+    eye_corr_cm = _build_cm(eye_confusion_pairs, ["eyes_open", "eyes_closed"])
+    pres_corr_cm = _build_cm(pres_confusion_pairs, ["not_present", "present"])
+
     correction_data = {
         "by_class": correction_class_counts,
         "total": {"correct": agreed_after, "total": total_reinfer},
+        "eye_confusion": eye_corr_cm,
         "presence": {
             "by_class": presence_class_counts,
             "total": {"correct": pres_correct, "total": pres_total},
+            "confusion": pres_corr_cm,
         },
     }
     updated = db.update_training_run_metrics(
@@ -1032,7 +1052,7 @@ def cmd_retrain(trigger: str = "cli", force: bool = False):
     print()
     print("Re-inferring corrected frames with new model...")
 
-    total_reinfer, agreed_after, correction_class_counts, presence_class_counts = (
+    total_reinfer, agreed_after, correction_class_counts, presence_class_counts, eye_confusion_pairs, pres_confusion_pairs = (
         _reinfer_corrections_against_current_model(model_version)
     )
 
@@ -1048,12 +1068,22 @@ def cmd_retrain(trigger: str = "cli", force: bool = False):
             pres_correct = sum(c["correct"] for c in presence_class_counts.values())
             pres_total = sum(c["total"] for c in presence_class_counts.values())
             metrics = run_data.setdefault("metrics", {}) or {}
+
+            def _build_cm(pairs, classes):
+                cm = {t: {p: 0 for p in classes} for t in classes}
+                for t, p in pairs:
+                    if t in cm and p in cm[t]:
+                        cm[t][p] += 1
+                return cm
+
             metrics["correction_agreement"] = {
                 "by_class": correction_class_counts,
                 "total": {"correct": agreed_after, "total": total_reinfer},
+                "eye_confusion": _build_cm(eye_confusion_pairs, ["eyes_open", "eyes_closed"]),
                 "presence": {
                     "by_class": presence_class_counts,
                     "total": {"correct": pres_correct, "total": pres_total},
+                    "confusion": _build_cm(pres_confusion_pairs, ["not_present", "present"]),
                 },
             }
             run_data["metrics"] = metrics

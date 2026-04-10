@@ -388,7 +388,7 @@ function renderViewer() {
   document.getElementById('viewer-time').textContent = timeText;
 
   // Model prediction label
-  const eyeState = e.eyeState || (!e.babyPresent ? 'not_in_bassinet' : e.state === 'Awake' ? 'eyes_open' : e.state === 'Asleep' ? 'eyes_closed' : 'face_not_visible');
+  const eyeState = e.eyeState || (!e.babyPresent ? 'not_in_bassinet' : e.state === 'Awake' ? 'eyes_open' : 'eyes_closed');
   const labelMap = { eyes_open: 'Eyes Open', eyes_closed: 'Eyes Closed', face_not_visible: 'Face Not Visible', not_in_bassinet: 'Not In Bassinet' };
   const modelLabel = document.getElementById('viewer-model-label');
   modelLabel.textContent = 'Cloud: ' + (labelMap[eyeState] || eyeState);
@@ -407,16 +407,25 @@ function renderViewer() {
     presenceEl.style.display = 'none';
     presenceEl.classList.remove('disagree');
   }
+  const EYE_CONF_THRESHOLD = 0.7; // must match EYE_STATE_CONFIDENCE_THRESHOLD in config.py
   if (e.shadowEyeState != null) {
-    eyeEl.textContent = 'BIRDEYE eyes: ' + (labelMap[e.shadowEyeState] || e.shadowEyeState) + fmtConf(e.shadowEyeConfidence);
+    const lowConf = e.shadowEyeConfidence != null && e.shadowEyeConfidence < EYE_CONF_THRESHOLD;
+    let eyeText = 'BIRDEYE eyes: ' + (labelMap[e.shadowEyeState] || e.shadowEyeState) + fmtConf(e.shadowEyeConfidence);
+    if (lowConf) eyeText += ' ⚠ low conf → cloud fallback';
+    eyeEl.textContent = eyeText;
     eyeEl.style.display = '';
     const agreedEye = e.shadowEyeState === eyeState;
-    eyeEl.classList.toggle('disagree', !agreedEye);
+    eyeEl.classList.toggle('disagree', !agreedEye || lowConf);
   } else if (e.shadowBirdeyeState === 'not_present') {
     // Eye classifier skipped (no baby present)
     eyeEl.textContent = 'BIRDEYE eyes: — (skipped)';
     eyeEl.style.display = '';
     eyeEl.classList.remove('disagree');
+  } else if (e.shadowBirdeyeState != null) {
+    // Present but no eye state = low confidence fallback
+    eyeEl.textContent = 'BIRDEYE eyes: — (low confidence → cloud fallback)';
+    eyeEl.style.display = '';
+    eyeEl.classList.add('disagree');
   } else {
     eyeEl.style.display = 'none';
     eyeEl.classList.remove('disagree');
@@ -642,35 +651,54 @@ function renderClassifiers() {
   renderClassifierColumn('classifier-presence', 'presence');
   renderClassifierColumn('classifier-eye', 'eye_state');
 
-  // Version + status badge in header
-  const versionEl = document.getElementById('train-version');
-  if (versionEl && trainingData && trainingData.lastMetrics) {
-    const trainedAt = trainingData.lastTrained
-      ? new Date(trainingData.lastTrained).toLocaleString('en-US', {
-          timeZone: 'America/New_York', month: 'short', day: 'numeric',
-          hour: 'numeric', minute: '2-digit', hour12: true })
-      : '?';
+  // Meta line: model version, deployed version, training status, rollback
+  const metaEl = document.getElementById('classifiers-meta');
+  if (metaEl) {
+    let tags = [];
 
-    let statusBadge = '';
-    if (trainingData.running) {
-      statusBadge = ' <span style="color:var(--accent-blue);font-size:0.8rem">⟳ training now</span>';
-    } else if (trainingData.runStatus === 'aborted') {
-      statusBadge = ' <span style="color:var(--accent-red);font-size:0.8rem">✕ aborted</span>';
-    } else if (trainingData.runStatus === 'failed') {
-      statusBadge = ' <span style="color:var(--accent-red);font-size:0.8rem">✕ failed</span>';
-    } else if (trainingData.runStatus === 'completed' && trainingData.finishedAt) {
-      const finAt = new Date(trainingData.finishedAt).toLocaleString('en-US', {
-        timeZone: 'America/New_York', month: 'short', day: 'numeric',
-        hour: 'numeric', minute: '2-digit', hour12: true });
-      let durStr = '';
-      if (trainingData.startedAt && trainingData.finishedAt) {
-        const durSec = Math.round((new Date(trainingData.finishedAt) - new Date(trainingData.startedAt)) / 1000);
-        durStr = durSec >= 60 ? ' in ' + Math.floor(durSec / 60) + 'm ' + (durSec % 60) + 's' : ' in ' + durSec + 's';
-      }
-      statusBadge = ' <span style="color:var(--accent-green);font-size:0.8rem">✓ last run ' + finAt + durStr + '</span>';
+    // Deployed version (from safety data)
+    if (safetyData && safetyData.deployedVersion) {
+      tags.push('<span class="meta-tag">deployed: ' + safetyData.deployedVersion + '</span>');
     }
 
-    versionEl.innerHTML = '— ' + (trainingData.version || '?') + ' trained ' + trainedAt + statusBadge;
+    // Rollback warning
+    if (safetyData && safetyData.rolledBack) {
+      tags.push('<span class="meta-tag meta-warn">rolled back from ' + safetyData.latestTrainedVersion + '</span>');
+    }
+
+    // Training info
+    if (trainingData && trainingData.lastMetrics) {
+      const trainedAt = trainingData.lastTrained
+        ? new Date(trainingData.lastTrained).toLocaleString('en-US', {
+            timeZone: 'America/New_York', month: 'short', day: 'numeric',
+            hour: 'numeric', minute: '2-digit', hour12: true })
+        : '?';
+      tags.push('<span class="meta-tag">trained: ' + trainedAt + '</span>');
+
+      // Pending corrections
+      const pending = trainingData.pendingCorrections || 0;
+      if (pending > 0) {
+        tags.push('<span class="meta-tag meta-warn">' + pending + ' corrections pending</span>');
+      }
+    }
+
+    // Run status
+    if (trainingData) {
+      if (trainingData.running) {
+        let elapsed = '';
+        if (trainingData.startedAt) {
+          const sec = Math.round((Date.now() - new Date(trainingData.startedAt).getTime()) / 1000);
+          elapsed = sec >= 60 ? ' (' + Math.floor(sec / 60) + 'm ' + (sec % 60) + 's)' : ' (' + sec + 's)';
+        }
+        tags.push('<span class="meta-tag" style="color:var(--accent-blue)">training' + elapsed + '</span>');
+      } else if (trainingData.runStatus === 'failed') {
+        tags.push('<span class="meta-tag meta-warn">last run failed</span>');
+      } else if (trainingData.runStatus === 'aborted') {
+        tags.push('<span class="meta-tag meta-warn">last run aborted</span>');
+      }
+    }
+
+    metaEl.innerHTML = tags.join('');
   }
 }
 
@@ -727,7 +755,7 @@ function renderClassifierColumn(elId, type) {
   if (!el) return;
 
   const isPresence = type === 'presence';
-  const classes = isPresence ? ['not_present', 'present'] : ['eyes_open', 'eyes_closed', 'face_not_visible'];
+  const classes = isPresence ? ['not_present', 'present'] : ['eyes_open', 'eyes_closed'];
   let html = '';
 
   // --- Production metrics from safety stats ---
@@ -735,22 +763,33 @@ function renderClassifierColumn(elId, type) {
 
   if (safety) {
     const cloud = safety.vsCloud || {};
+    const corr = safety.vsCorrections || {};
     const macroF1 = cloud.macroF1;
     const accuracy = cloud.accuracy;
     const macroThresh = isPresence ? [0.90, 0.97] : [0.60, 0.85];
     const accThresh = isPresence ? [0.90, 0.97] : [0.75, 0.90];
+    const hasCorrData = corr.total > 0;
 
+    html += '<div class="safety-source-label">Production (shadow)</div>';
     html += '<div class="safety-headline">';
-    if (isPresence) {
-      html += '<div class="safety-headline-row" title="Overall fraction of frames where birdeye and cloud API agree on present vs not_present."><span class="safety-headline-label">Accuracy</span>';
-      html += '<span class="safety-headline-value ' + _safetyClass(accuracy, accThresh) + '">' + (accuracy != null ? Math.round(accuracy * 100) + '%' : '--') + '</span></div>';
-      html += '<div class="safety-headline-row" title="Macro-averaged F1 across {not_present, present}. Equal weight per class."><span class="safety-headline-label">Macro F1</span>';
-      html += '<span class="safety-headline-value ' + _safetyClass(macroF1, macroThresh) + '">' + (macroF1 != null ? (macroF1 * 100).toFixed(0) + '%' : '--') + '</span></div>';
-    } else {
-      html += '<div class="safety-headline-row" title="Macro-averaged F1 across {eyes_open, eyes_closed, face_not_visible}. Equal weight per class — not fooled by class imbalance."><span class="safety-headline-label">Macro F1</span>';
-      html += '<span class="safety-headline-value ' + _safetyClass(macroF1, macroThresh) + '">' + (macroF1 != null ? (macroF1 * 100).toFixed(0) + '%' : '--') + '</span></div>';
-      html += '<div class="safety-headline-row" title="Overall fraction of frames where birdeye eye-state prediction matches cloud API. Biased toward majority class."><span class="safety-headline-label">Accuracy</span>';
-      html += '<span class="safety-headline-value ' + _safetyClass(accuracy, accThresh) + '">' + (accuracy != null ? Math.round(accuracy * 100) + '%' : '--') + '</span></div>';
+    // Row 1: Macro F1 (cloud) + Macro Recall (corrections)
+    const f1Label = isPresence ? 'Macro F1' : 'Macro F1';
+    html += '<div class="safety-headline-row" title="Macro-averaged F1 from shadow comparison vs cloud API"><span class="safety-headline-label">' + f1Label + ' <span style="color:#556;font-weight:400">(vs cloud)</span></span>';
+    html += '<span class="safety-headline-value ' + _safetyClass(macroF1, macroThresh) + '">' + (macroF1 != null ? (macroF1 * 100).toFixed(0) + '%' : '--') + '</span></div>';
+    if (hasCorrData) {
+      const corrMetric = corr.macroF1 != null ? corr.macroF1 : corr.macroRecall;
+      const corrLabel = corr.macroF1 != null ? 'Macro F1' : 'Macro Recall';
+      if (corrMetric != null) {
+        html += '<div class="safety-headline-row" title="' + corrLabel + ' against human-corrected labels (ground truth)"><span class="safety-headline-label">' + corrLabel + ' <span style="color:#556;font-weight:400">(vs corrections)</span></span>';
+        html += '<span class="safety-headline-value ' + _safetyClass(corrMetric, macroThresh) + '">' + Math.round(corrMetric * 100) + '% <span style="font-size:0.7rem;color:var(--text-dim)">(' + corr.total + ' labels)</span></span></div>';
+      }
+    }
+    // Row 2: Accuracy (cloud)
+    html += '<div class="safety-headline-row" title="Overall accuracy vs cloud API"><span class="safety-headline-label">Accuracy <span style="color:#556;font-weight:400">(vs cloud)</span></span>';
+    html += '<span class="safety-headline-value ' + _safetyClass(accuracy, accThresh) + '">' + (accuracy != null ? Math.round(accuracy * 100) + '%' : '--') + '</span></div>';
+    if (hasCorrData) {
+      html += '<div class="safety-headline-row" title="Overall accuracy against human-corrected labels (ground truth)"><span class="safety-headline-label">Accuracy <span style="color:#556;font-weight:400">(vs corrections)</span></span>';
+      html += '<span class="safety-headline-value ' + _safetyClass(corr.accuracy, accThresh) + '">' + Math.round(corr.accuracy * 100) + '% <span style="font-size:0.7rem;color:var(--text-dim)">(' + corr.total + ' labels)</span></span></div>';
     }
     html += '</div>';
 
@@ -758,16 +797,14 @@ function renderClassifierColumn(elId, type) {
     html += _renderConfusion(cloud, classes);
     html += _renderPerClass(cloud, classes);
 
-    html += '<div class="safety-source-label">vs Corrections</div>';
-    if (safety.vsCorrections && safety.vsCorrections.total > 0) {
-      const c = safety.vsCorrections;
-      const corrThresh = isPresence ? [0.90, 0.97] : [0.75, 0.90];
-      html += '<div class="safety-headline-row" style="margin-bottom:4px">';
-      html += '<span class="safety-headline-label">Accuracy</span>';
-      html += '<span class="safety-headline-value ' + _safetyClass(c.accuracy, corrThresh) + '">'
-        + Math.round(c.accuracy * 100) + '% (' + c.total + ' samples)</span>';
-      html += '</div>';
-      html += _renderCorrectionsByClass(c.byClass, classes);
+    html += '<div class="safety-source-label">vs Corrections (ground truth)</div>';
+    if (hasCorrData && corr.confusion) {
+      // Full confusion matrix available — same format as vsCloud
+      html += _renderConfusion(corr, classes);
+      html += _renderPerClass(corr, classes);
+    } else if (hasCorrData) {
+      // Legacy: only per-class correct/total
+      html += _renderCorrectionsByClass(corr.byClass, classes);
     } else {
       html += '<div class="safety-empty">No corrections data yet.</div>';
     }
@@ -807,26 +844,6 @@ function renderClassifierColumn(elId, type) {
       + metrics.best_val_loss
       + delta(metrics.best_val_loss, pm.best_val_loss, '', false)
       + '</span></div>';
-
-    if (metrics.awake_asleep_miss_rate != null) {
-      const missClass = metrics.awake_asleep_miss_rate > 0.05 ? 'train-crit' : 'train-val';
-      html += '<div class="train-row"><span title="CRITICAL: % of truly-awake frames predicted as asleep. Must be &lt;5%.">Awake→Asleep misses</span><span class="' + missClass + '">'
-        + metrics.awake_asleep_misses + ' (' + (metrics.awake_asleep_miss_rate * 100).toFixed(0) + '%)'
-        + delta(metrics.awake_asleep_miss_rate, pm.awake_asleep_miss_rate, '%', false)
-        + '</span></div>';
-    }
-    if (metrics.asleep_awake_false_alarm_rate != null) {
-      html += '<div class="train-row"><span title="% of truly-asleep frames predicted as awake. Causes unnecessary alerts but not dangerous.">Asleep→Awake false alarms</span><span class="train-val">'
-        + metrics.asleep_awake_false_alarms + ' (' + (metrics.asleep_awake_false_alarm_rate * 100).toFixed(0) + '%)'
-        + delta(metrics.asleep_awake_false_alarm_rate, pm.asleep_awake_false_alarm_rate, '%', false)
-        + '</span></div>';
-    }
-    if (metrics.out_labeled_as_in != null) {
-      html += '<div class="train-row"><span title="False positive: model said present but baby was out">Out→In</span><span class="train-val">' + metrics.out_labeled_as_in + '</span></div>';
-    }
-    if (metrics.in_labeled_as_out != null) {
-      html += '<div class="train-row"><span title="False negative: model missed baby">In→Out</span><span class="train-val">' + metrics.in_labeled_as_out + '</span></div>';
-    }
 
     if (metrics.per_class) {
       html += '<div style="margin-top:4px;font-size:0.72rem;color:var(--text-dim)">Per-class P / R / F1:</div>';
@@ -1006,26 +1023,34 @@ async function loadMonitorStats() {
     const rangeLabel = {'0.167':'10m','0.5':'30m','1':'1h','12':'12h','24':'24h','168':'1w'}[hours] || hours+'h';
     document.getElementById('perf-period').textContent = '(' + rangeLabel + ', ' + d.total + ' frames)';
 
-    // Prod cost
-    document.getElementById('perf-cloud-cost').textContent = d.cost
-      ? '$' + d.cost.estCost.toFixed(2) + ' (' + d.cost.apiCalls + ' calls)'
-      : '--';
+    // Prod cost + estimated monthly
+    if (d.cost) {
+      const hoursNum = parseFloat(hours);
+      const monthlyEst = hoursNum > 0 ? (d.cost.estCost / hoursNum * 730).toFixed(0) : '?';
+      document.getElementById('perf-cloud-cost').innerHTML =
+        '$' + d.cost.estCost.toFixed(2) + ' (' + d.cost.apiCalls + ' calls)' +
+        '<div style="font-size:0.65rem;color:var(--text-dim);margin-top:2px">~$' + monthlyEst + '/mo est</div>';
+    } else {
+      document.getElementById('perf-cloud-cost').textContent = '--';
+    }
 
-    // Shadow latency
-    document.getElementById('perf-latency').textContent =
-      d.timing ? Math.round(d.timing.avg * 1000) + 'ms' : '--';
+    // Shadow latency (avg + p99)
+    if (d.timing) {
+      document.getElementById('perf-latency').innerHTML =
+        Math.round(d.timing.avg * 1000) + 'ms avg' +
+        (d.timing.p99 != null ? '<div style="font-size:0.65rem;color:var(--text-dim);margin-top:2px">p99: ' + Math.round(d.timing.p99 * 1000) + 'ms</div>' : '');
+    } else {
+      document.getElementById('perf-latency').textContent = '--';
+    }
 
     // Gaps
     document.getElementById('perf-gaps').textContent = d.gaps != null ? d.gaps : '--';
 
-    // Breakdown bar: prod pipeline (pixel-diff + cloud) with shadow overlay
+    // Breakdown bar: production pipeline only
     const breakdown = document.getElementById('perf-breakdown');
     if (d.total > 0) {
       const cPct = Math.round((d.methods.cloud_api || 0) / d.total * 100);
       const pPct = Math.round((d.methods.pixel_diff || 0) / d.total * 100);
-      const shadowTotal = d.shadow ? d.shadow.total : 0;
-      const agPct = d.shadow && shadowTotal > 0 ? Math.round(d.shadow.agreed / shadowTotal * 100) : 0;
-      const dgPct = d.shadow && shadowTotal > 0 ? Math.round(d.shadow.disagreed / shadowTotal * 100) : 0;
 
       breakdown.innerHTML =
         '<div style="margin-bottom:6px;font-size:0.75rem;color:var(--text-dim)">Production pipeline</div>' +
@@ -1033,18 +1058,9 @@ async function loadMonitorStats() {
           (pPct > 0 ? '<div class="perf-bar-seg pixel-diff" style="width:' + pPct + '%" title="Pixel-diff ' + pPct + '%">' + (pPct > 5 ? pPct + '%' : '') + '</div>' : '') +
           (cPct > 0 ? '<div class="perf-bar-seg cloud" style="width:' + cPct + '%" title="Cloud API ' + cPct + '%">' + (cPct > 5 ? cPct + '%' : '') + '</div>' : '') +
         '</div>' +
-        (shadowTotal > 0 ?
-          '<div style="margin:8px 0 6px;font-size:0.75rem;color:var(--text-dim)">Shadow birdeye (' + shadowTotal + ' frames compared)</div>' +
-          '<div class="perf-bar">' +
-            '<div class="perf-bar-seg birdeye" style="width:' + agPct + '%" title="Aligned ' + agPct + '%">' + (agPct > 5 ? agPct + '% aligned' : '') + '</div>' +
-            '<div class="perf-bar-seg spot-check" style="width:' + dgPct + '%" title="Misaligned ' + dgPct + '%">' + (dgPct > 3 ? dgPct + '%' : '') + '</div>' +
-          '</div>'
-          : '') +
         '<div class="perf-bar-legend">' +
           '<span><span class="legend-dot" style="background:var(--accent-blue)"></span> Pixel-diff</span>' +
           '<span><span class="legend-dot" style="background:var(--accent-orange)"></span> Cloud API</span>' +
-          (shadowTotal > 0 ? '<span><span class="legend-dot" style="background:var(--accent-green)"></span> Aligned</span>' : '') +
-          (shadowTotal > 0 ? '<span><span class="legend-dot" style="background:var(--accent-red)"></span> Misaligned</span>' : '') +
         '</div>';
     }
   } catch (e) {
@@ -1102,7 +1118,6 @@ const SAFETY_CLASS_LABELS = {
   awake: 'Awake',
   eyes_open: 'eyes_open',
   eyes_closed: 'eyes_closed',
-  face_not_visible: 'face_not_visible',
 };
 
 function _safetyClass(value, thresholds) {
@@ -1194,18 +1209,9 @@ async function loadSafetyStats() {
     const res = await fetch('/api/safety-stats?hours=' + hours);
     safetyData = await res.json();
 
-    const rangeLabel = hours === '24' ? '24h' : '7d';
+    const rangeLabel = {'6':'6h','12':'12h','24':'24h','168':'7d'}[hours] || hours+'h';
     const total = safetyData.shadowTotal || 0;
     document.getElementById('safety-period').textContent = '(' + rangeLabel + ', ' + total + ' shadow frames)';
-    document.getElementById('safety-deployed').textContent = safetyData.deployedVersion ? '— ' + safetyData.deployedVersion : '';
-
-    const rollbackBadge = document.getElementById('safety-rollback-badge');
-    if (safetyData.rolledBack) {
-      rollbackBadge.textContent = '⚠ rolled back from ' + safetyData.latestTrainedVersion;
-      rollbackBadge.style.display = '';
-    } else {
-      rollbackBadge.style.display = 'none';
-    }
 
     renderClassifiers();
   } catch (e) {

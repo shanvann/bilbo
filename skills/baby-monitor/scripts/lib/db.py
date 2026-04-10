@@ -315,11 +315,13 @@ def get_monitor_stats(hours: float = 24) -> dict:
         if not vals:
             return None
         s = sorted(vals)
+        n = len(s)
         return {
-            "avg": round(sum(s) / len(s), 3),
+            "avg": round(sum(s) / n, 3),
             "min": round(s[0], 3),
             "max": round(s[-1], 3),
-            "p50": round(s[len(s) // 2], 3),
+            "p50": round(s[n // 2], 3),
+            "p99": round(s[min(n - 1, int(n * 0.99))], 3),
         }
 
     # Gaps > 10 min
@@ -537,16 +539,12 @@ def get_safety_stats(hours: float = 168) -> dict:
     # writes. Lowercase everything before comparing.
     #
     # The eye-state panel is reported in raw eye-state domain (eyes_open /
-    # eyes_closed / face_not_visible), NOT in derived Awake/Asleep. Map
-    # historical state-domain values via STATE_TO_EYE below. Awake/Asleep
-    # is a higher-level concept that requires more logic than a single
-    # frame's eye state and is being decoupled from the raw classifier
-    # metrics.
+    # eyes_closed), NOT in derived Awake/Asleep. Map historical state-domain
+    # values via STATE_TO_EYE below. Unknown/Drowsy are excluded — they're
+    # ambiguous and the 2-class classifier doesn't emit them.
     STATE_TO_EYE = {
         "asleep": "eyes_closed",
         "awake": "eyes_open",
-        "unknown": "face_not_visible",
-        "drowsy": "face_not_visible",
     }
 
     presence_pairs: list[tuple[str, str]] = []
@@ -568,16 +566,13 @@ def get_safety_stats(hours: float = 168) -> dict:
             "present" if bird_present else "not_present",
         ))
 
-        # Eye-state confusion: only over frames where both sides are
-        # present. Map state-domain labels to eye-state domain — note that
-        # birdeye historically never emits face_not_visible in the shadow
-        # column because that branch falls back to the cloud API
-        # (local_pipeline.py:173-176), so the prediction column of this
-        # 3x3 confusion will always be empty in the face_not_visible row.
+        # Eye-state confusion: only over frames where both sides have a
+        # definitive eye state (Awake or Asleep). Unknown/Drowsy are skipped.
         if bird_present and prod_present:
-            prod_eye = STATE_TO_EYE.get(prod, "face_not_visible")
-            bird_eye = STATE_TO_EYE.get(bird_lower, "face_not_visible")
-            eye_pairs.append((prod_eye, bird_eye))
+            prod_eye = STATE_TO_EYE.get(prod)
+            bird_eye = STATE_TO_EYE.get(bird_lower)
+            if prod_eye and bird_eye:
+                eye_pairs.append((prod_eye, bird_eye))
 
     def build_panel(pairs: list[tuple[str, str]], classes: list[str]) -> dict:
         """Build a confusion + per-class P/R/F1 + macro-F1 panel."""
@@ -615,7 +610,7 @@ def get_safety_stats(hours: float = 168) -> dict:
     presence_vs_cloud = build_panel(presence_pairs, ["not_present", "present"])
     eye_vs_cloud = build_panel(
         eye_pairs,
-        ["eyes_open", "eyes_closed", "face_not_visible"],
+        ["eyes_open", "eyes_closed"],
     )
 
     # ----- Corrections-side: read from the *deployed* training run -----
@@ -669,33 +664,72 @@ def get_safety_stats(hours: float = 168) -> dict:
         # conflated these and under-reported presence accuracy by ~25%.
         pres_data = corr_data.get("presence")
         if pres_data:
-            pres_by_class = pres_data.get("by_class", {})
-            pres_total_info = pres_data.get("total", {"correct": 0, "total": 0})
-            pres_total = pres_total_info.get("total", 0) or 0
-            pres_correct = pres_total_info.get("correct", 0) or 0
-            presence_vs_corrections = {
-                "byClass": {
+            pres_cm = pres_data.get("confusion")
+            if pres_cm:
+                # Full confusion matrix — use build_panel for consistent format
+                pres_classes = ["not_present", "present"]
+                pres_cm_pairs = []
+                for t in pres_classes:
+                    row = pres_cm.get(t, {})
+                    for p in pres_classes:
+                        count = row.get(p, 0)
+                        pres_cm_pairs.extend([(t, p)] * count)
+                presence_vs_corrections = build_panel(pres_cm_pairs, pres_classes)
+            else:
+                # Legacy: only by_class correct/total
+                pres_by_class = pres_data.get("by_class", {})
+                pres_total_info = pres_data.get("total", {"correct": 0, "total": 0})
+                pres_total = pres_total_info.get("total", 0) or 0
+                pres_correct = pres_total_info.get("correct", 0) or 0
+                pres_byclass = {
                     "not_present": dict(pres_by_class.get("not_present", {"correct": 0, "total": 0})),
                     "present":     dict(pres_by_class.get("present",     {"correct": 0, "total": 0})),
-                },
-                "accuracy": round(pres_correct / pres_total, 3) if pres_total > 0 else 0.0,
-                "total": pres_total,
-            }
+                }
+                pres_recalls = []
+                for c in ("not_present", "present"):
+                    v = pres_byclass.get(c, {})
+                    if v.get("total", 0) > 0:
+                        pres_recalls.append(v["correct"] / v["total"])
+                presence_vs_corrections = {
+                    "byClass": pres_byclass,
+                    "accuracy": round(pres_correct / pres_total, 3) if pres_total > 0 else 0.0,
+                    "macroRecall": round(sum(pres_recalls) / len(pres_recalls), 3) if pres_recalls else 0.0,
+                    "total": pres_total,
+                }
         # If the training run predates the presence sub-key (correction_agreement
         # from before 2026-04-09), leave presence_vs_corrections as None —
         # re-run `monitor.py --eval-corrections` to populate it.
 
-        # Eye state: the three eye-state classes (drops not_in_bassinet, which
-        # is purely a presence-side label).
-        eye_classes = ("eyes_open", "eyes_closed", "face_not_visible")
-        eye_byclass = {c: dict(by_class.get(c, {"correct": 0, "total": 0})) for c in eye_classes}
-        eye_correct = sum(c["correct"] for c in eye_byclass.values())
-        eye_total = sum(c["total"] for c in eye_byclass.values())
-        eye_vs_corrections = {
-            "byClass": eye_byclass,
-            "accuracy": round(eye_correct / eye_total, 3) if eye_total > 0 else 0.0,
-            "total": eye_total,
-        }
+        # Eye state: 2-class (drops not_in_bassinet).
+        # Use the confusion matrix if available (populated by --eval-corrections
+        # after 2026-04-10), otherwise fall back to by_class correct/total.
+        eye_classes_list = ["eyes_open", "eyes_closed"]
+        eye_cm = corr_data.get("eye_confusion")
+        if eye_cm:
+            # Full confusion matrix available — use build_panel for consistent format
+            eye_cm_pairs = []
+            for t in eye_classes_list:
+                row = eye_cm.get(t, {})
+                for p in eye_classes_list:
+                    count = row.get(p, 0)
+                    eye_cm_pairs.extend([(t, p)] * count)
+            eye_vs_corrections = build_panel(eye_cm_pairs, eye_classes_list)
+        else:
+            # Legacy: only by_class correct/total, no confusion matrix
+            eye_byclass = {c: dict(by_class.get(c, {"correct": 0, "total": 0})) for c in eye_classes_list}
+            eye_correct = sum(c["correct"] for c in eye_byclass.values())
+            eye_total = sum(c["total"] for c in eye_byclass.values())
+            eye_recalls = []
+            for c in eye_classes_list:
+                v = eye_byclass.get(c, {})
+                if v.get("total", 0) > 0:
+                    eye_recalls.append(v["correct"] / v["total"])
+            eye_vs_corrections = {
+                "byClass": eye_byclass,
+                "accuracy": round(eye_correct / eye_total, 3) if eye_total > 0 else 0.0,
+                "macroRecall": round(sum(eye_recalls) / len(eye_recalls), 3) if eye_recalls else 0.0,
+                "total": eye_total,
+            }
 
     return {
         "hours": hours,

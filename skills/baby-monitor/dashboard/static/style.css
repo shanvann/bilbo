@@ -787,6 +787,25 @@ footer {
   box-shadow: 0 0 6px rgba(74, 158, 255, 0.3);
 }
 
+/* Classifiers meta line */
+.classifiers-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin: -8px 0 12px 0;
+  line-height: 1.5;
+}
+.classifiers-meta .meta-tag {
+  background: rgba(42, 58, 92, 0.3);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.classifiers-meta .meta-warn {
+  color: var(--accent-orange);
+}
+
 /* Section description */
 .section-desc {
   color: #778;

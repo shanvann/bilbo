@@ -85,6 +85,8 @@ SHADOW_PROMOTION_THRESHOLD = 0.95  # 95% agreement to promote birdeye to prod
 BASSINET_CROP = {"x": 0.15, "y": 0.10, "w": 0.70, "h": 0.80}
 # Head crop size as fraction of frame dimensions (square crop around head center)
 HEAD_CROP_SIZE = 0.30
+# Eye-state classifier confidence threshold — below this, fall back to cloud API
+EYE_STATE_CONFIDENCE_THRESHOLD = 0.7
 # Default head position (center-upper area of bassinet) when no state file exists
 DEFAULT_HEAD_POS = {"x": 0.50, "y": 0.35}
 # Classifier model paths — load from "latest" symlink if it exists, else top-level

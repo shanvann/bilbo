@@ -200,22 +200,22 @@ class BabyPresenceClassifier:
 # Classifier 2: Eye state
 # ---------------------------------------------------------------------------
 
-EYE_STATE_CLASSES = ["eyes_open", "eyes_closed", "face_not_visible"]
+EYE_STATE_CLASSES = ["eyes_open", "eyes_closed"]
 
 
 @dataclass
 class EyeStateResult:
-    state: str          # eyes_open | eyes_closed | face_not_visible
+    state: str          # eyes_open | eyes_closed
     confidence: float
     probabilities: dict
 
 
 class EyeStateClassifier:
-    """MobileNetV3-Small: bassinet crop → eyes_open / eyes_closed / face_not_visible."""
+    """MobileNetV3-Small: bassinet crop → eyes_open / eyes_closed."""
 
     def __init__(self, model_path: Path, device: str = "cpu"):
         self.device = device
-        self.model = _build_mobilenet(num_classes=3)
+        self.model = _build_mobilenet(num_classes=2)
 
         if model_path.exists():
             state = torch.load(model_path, map_location=device, weights_only=True)

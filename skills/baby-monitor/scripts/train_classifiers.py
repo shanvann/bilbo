@@ -111,7 +111,7 @@ def load_sleep_log(path: Path, corrections_path: Path = None, audit_path: Path =
         log.info("Loaded %d audit labels from %s", len(audit_labels), audit_path.name)
 
     # Map eye state labels to sleep state for the training pipeline
-    EYE_TO_STATE = {"eyes_open": "Awake", "eyes_closed": "Asleep", "face_not_visible": "Unknown", "not_in_bassinet": "not_present"}
+    EYE_TO_STATE = {"eyes_open": "Awake", "eyes_closed": "Asleep", "not_in_bassinet": "not_present"}
 
     entries = []
     for line in path.read_text().strip().splitlines():
@@ -144,7 +144,7 @@ def load_sleep_log(path: Path, corrections_path: Path = None, audit_path: Path =
 
         # Entries with eyeStateEdited flag (dashboard eye corrections already applied to JSONL)
         if e.get("eyeStateEdited"):
-            eye = e.get("eyeState", "face_not_visible")
+            eye = e.get("eyeState", "")
             e["state"] = EYE_TO_STATE.get(eye, "Unknown")
             e["_label_source"] = "eye-correction"
             entries.append(e)
@@ -253,10 +253,10 @@ class PresenceDataset(Dataset):
                 continue
             # Eye state correction overrides babyPresent:
             # "not_in_bassinet" correction → not_present (label 0)
-            # Any other eye correction (eyes_open, eyes_closed, face_not_visible) → present (label 1)
+            # Any other eye correction (eyes_open, eyes_closed) → present (label 1)
             if e.get("eyeStateEdited") and e.get("eyeState") == "not_in_bassinet":
                 label = 0
-            elif e.get("eyeStateEdited") and e.get("eyeState") in ("eyes_open", "eyes_closed", "face_not_visible"):
+            elif e.get("eyeStateEdited") and e.get("eyeState") in ("eyes_open", "eyes_closed"):
                 label = 1
             else:
                 label = 1 if e.get("babyPresent", False) else 0
@@ -279,7 +279,7 @@ class PresenceDataset(Dataset):
 
 
 class EyeStateDataset(Dataset):
-    """Bassinet crop → eyes_open / eyes_closed / face_not_visible.
+    """Bassinet crop → eyes_open / eyes_closed (2-class).
 
     Uses the fixed bassinet-center crop (crop_bassinet) instead of the
     head-position-dependent crop.  This avoids the ~80% of frames where
@@ -289,15 +289,13 @@ class EyeStateDataset(Dataset):
     Labels derived from cloud API state:
         Awake → eyes_open (0)
         Asleep → eyes_closed (1)
-        Unknown/Drowsy (with babyPresent) → face_not_visible (2)
+        Unknown/Drowsy → skipped (ambiguous, not useful for training)
     """
 
-    CLASS_NAMES = ["eyes_open", "eyes_closed", "face_not_visible"]
+    CLASS_NAMES = ["eyes_open", "eyes_closed"]
     STATE_MAP = {
         "Awake": 0,      # eyes_open
         "Asleep": 1,     # eyes_closed
-        "Unknown": 2,    # face_not_visible
-        "Drowsy": 2,     # face_not_visible
     }
 
     def __init__(self, entries: list[dict], frames_dir: Path, transform=None):
@@ -317,7 +315,9 @@ class EyeStateDataset(Dataset):
                 continue
 
             state = e.get("state", "Unknown")
-            label = self.STATE_MAP.get(state, 2)  # default to face_not_visible
+            label = self.STATE_MAP.get(state)
+            if label is None:
+                continue  # skip Unknown/Drowsy — ambiguous for 2-class
 
             self.samples.append((fpath, label))
 
@@ -340,12 +340,12 @@ class EyeStateDataset(Dataset):
 class FaceCropDataset(Dataset):
     """Pre-cropped face images from directory structure.
 
-    Expects: base_dir/{eyes_open,eyes_closed,eyes_unclear}/*.jpg
-    Maps: eyes_open→0, eyes_closed→1, eyes_unclear→2 (face_not_visible)
-    These are manually validated crops — no head-region extraction needed.
+    Expects: base_dir/{eyes_open,eyes_closed}/*.jpg
+    Maps: eyes_open→0, eyes_closed→1
+    eyes_unclear is skipped (ambiguous for 2-class classifier).
     """
 
-    CLASS_MAP = {"eyes_open": 0, "eyes_closed": 1, "eyes_unclear": 2}
+    CLASS_MAP = {"eyes_open": 0, "eyes_closed": 1}
 
     def __init__(self, base_dir: Path, transform=None):
         self.samples = []
@@ -778,7 +778,7 @@ def main():
     # --- Eye state classifier ---
     if args.model in ("all", "eye-state"):
         log.info("=" * 60)
-        log.info("Training EYE STATE classifier (eyes_open / eyes_closed / face_not_visible)")
+        log.info("Training EYE STATE classifier (eyes_open / eyes_closed)")
         log.info("=" * 60)
 
         eye_train_ds = EyeStateDataset(train_entries, frames_dir, get_train_transform(EYE_STATE_INPUT_SIZE))

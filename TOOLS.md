@@ -38,3 +38,8 @@ Skills are shared. Your setup is yours. Keeping them apart means you can update 
 ---
 
 Add whatever helps you do your job. This is your cheat sheet.
+
+### Claude Code (Local)
+- **Path:** `/Users/shanit/.local/bin/claude`
+- **Usage (non-interactive):** `claude --print --permission-mode bypassPermissions "PROMPT"`
+- **Notes:** The standard ACP harness is not compatible. Use `exec` for direct calls.

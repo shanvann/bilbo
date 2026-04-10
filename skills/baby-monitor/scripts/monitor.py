@@ -125,7 +125,7 @@ def main():
         return cmd_audit(sample_size=args.sample)
 
     if args.retrain:
-        return cmd_retrain()
+        return cmd_retrain(force=args.force)
 
     if args.list_models:
         return cmd_list_models()

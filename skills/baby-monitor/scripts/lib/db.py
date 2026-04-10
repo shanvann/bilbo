@@ -94,7 +94,10 @@ def init_db():
             split JSON,
             config JSON,
             metrics JSON,
-            models_trained TEXT
+            models_trained TEXT,
+            duration_seconds REAL,
+            started_at TEXT,
+            finished_at TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_training_version ON training_runs(version);
@@ -105,6 +108,18 @@ def init_db():
             updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );
     """)
+
+    # Idempotent migrations for existing DBs (added 2026-04-09: training timing)
+    for col, decl in (
+        ("duration_seconds", "REAL"),
+        ("started_at", "TEXT"),
+        ("finished_at", "TEXT"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE training_runs ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
     conn.commit()
 
 
@@ -415,8 +430,9 @@ def insert_training_run(run: dict):
     conn.execute("""
         INSERT INTO training_runs (
             version, timestamp, entries_total, label_sources,
-            split, config, metrics, models_trained
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            split, config, metrics, models_trained,
+            duration_seconds, started_at, finished_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         run.get("version"),
         run.get("timestamp"),
@@ -426,6 +442,9 @@ def insert_training_run(run: dict):
         json.dumps(run.get("config")),
         json.dumps(run.get("metrics")),
         run.get("models_trained"),
+        run.get("duration_seconds"),
+        run.get("started_at"),
+        run.get("finished_at"),
     ))
     conn.commit()
 
@@ -435,7 +454,8 @@ def get_last_training_runs(n: int = 2) -> list[dict]:
     conn = get_connection()
     rows = conn.execute("""
         SELECT version, timestamp, entries_total, label_sources,
-               split, config, metrics, models_trained
+               split, config, metrics, models_trained,
+               duration_seconds, started_at, finished_at
         FROM training_runs ORDER BY timestamp DESC LIMIT ?
     """, (n,)).fetchall()
     result = []
@@ -449,8 +469,41 @@ def get_last_training_runs(n: int = 2) -> list[dict]:
             "config": json.loads(row["config"]) if row["config"] else None,
             "metrics": json.loads(row["metrics"]) if row["metrics"] else None,
             "models_trained": row["models_trained"],
+            "duration_seconds": row["duration_seconds"],
+            "started_at": row["started_at"],
+            "finished_at": row["finished_at"],
         })
     return result
+
+
+def get_training_duration_stats() -> dict:
+    """Aggregate training-run duration across all recorded runs.
+
+    Returns {"count": N, "avg_seconds": float|None, "p99_seconds": float|None}.
+    Only rows with a non-null duration_seconds are considered.
+    """
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT duration_seconds FROM training_runs "
+        "WHERE duration_seconds IS NOT NULL"
+    ).fetchall()
+    values = [row["duration_seconds"] for row in rows]
+    if not values:
+        return {"count": 0, "avg_seconds": None, "p99_seconds": None}
+
+    avg = sum(values) / len(values)
+
+    # Linear-interpolation percentile (numpy default).
+    s = sorted(values)
+    if len(s) == 1:
+        p99 = s[0]
+    else:
+        k = (len(s) - 1) * 0.99
+        lo = int(k)
+        hi = min(lo + 1, len(s) - 1)
+        p99 = s[lo] + (s[hi] - s[lo]) * (k - lo) if hi > lo else s[lo]
+
+    return {"count": len(values), "avg_seconds": avg, "p99_seconds": p99}
 
 
 # ---------------------------------------------------------------------------
@@ -584,6 +637,7 @@ class MonitorDB:
     # Training
     insert_training_run = staticmethod(insert_training_run)
     get_last_training_runs = staticmethod(get_last_training_runs)
+    get_training_duration_stats = staticmethod(get_training_duration_stats)
 
     # State
     get_state = staticmethod(get_state)

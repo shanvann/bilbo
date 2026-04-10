@@ -115,6 +115,7 @@ launchctl load ~/Library/LaunchAgents/com.openclaw.baby-monitor-retrain.plist   
 monitor.py                           # full pipeline (cron runs this)
 monitor.py --dry-run                 # test without writing
 monitor.py --retrain                 # retrain with pending corrections
+monitor.py --retrain --force         # retrain even if no new corrections (e.g. after code changes)
 monitor.py --audit --sample 50       # spot-check birdeye vs cloud API
 monitor.py --list-models             # show model versions + metrics
 monitor.py --rollback VERSION        # revert to previous model
@@ -359,6 +360,9 @@ One row per training run — model provenance and metrics.
 | config | JSON | Hyperparameters (epochs, lr, batch_size, etc.) |
 | metrics | JSON | Per-classifier: accuracy, loss, F1, miss rates |
 | models_trained | TEXT | "all", "presence", "eye-state" |
+| duration_seconds | REAL | Wall-clock training duration (NULL for runs before 2026-04-09) |
+| started_at | TEXT | When training began (ISO 8601 UTC) |
+| finished_at | TEXT | When training completed (ISO 8601 UTC) |
 
 ### state
 Key-value store for runtime state.

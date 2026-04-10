@@ -663,7 +663,7 @@ def cmd_rollback(version: str):
     return 0
 
 
-def cmd_retrain(trigger: str = "cli"):
+def cmd_retrain(trigger: str = "cli", force: bool = False):
     """Retrain classifiers using corrections + audit disagreements as supplemental data.
 
     Only retrains if corrections.jsonl or audit-log.jsonl has new entries since the
@@ -723,15 +723,20 @@ def cmd_retrain(trigger: str = "cli"):
     n_audit, pending_audit = count_pending(AUDIT_LOG_FILE)
     total_pending = pending_corrections + pending_audit
 
-    if total_pending == 0:
+    if total_pending == 0 and not force:
         print(f"No new data since last training. Skipping.")
         print(f"  Corrections: {n_corrections} total, 0 pending")
         print(f"  Audit: {n_audit} total, 0 pending")
         print(f"  Last trained: {last_trained_dt}")
+        print(f"  (use --force to retrain anyway)")
         return 0
 
-    print(f"Retraining: {pending_corrections} new corrections + {pending_audit} new audit entries")
-    print(f"  (total: {n_corrections} corrections, {n_audit} audit)")
+    if force and total_pending == 0:
+        print(f"Forced retrain (no new data — running on existing dataset).")
+        print(f"  (total: {n_corrections} corrections, {n_audit} audit)")
+    else:
+        print(f"Retraining: {pending_corrections} new corrections + {pending_audit} new audit entries")
+        print(f"  (total: {n_corrections} corrections, {n_audit} audit)")
 
     # Build the training command
     train_script = SKILL_DIR / "scripts" / "train_classifiers.py"
@@ -940,6 +945,9 @@ examples:
                       help="spot-check birdeye decisions against cloud API")
     mode.add_argument("--retrain", action="store_true",
                       help="retrain classifiers with corrections + audit data")
+    p.add_argument("--force", action="store_true",
+                   help="(retrain) bypass the 'no new data since last training' guard "
+                        "— useful when training code or hyperparameters changed")
     mode.add_argument("--list-models", action="store_true",
                       help="list available model versions")
     mode.add_argument("--rollback", metavar="VERSION",

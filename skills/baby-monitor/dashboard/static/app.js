@@ -312,49 +312,198 @@ function showBlockDetail(seg, durStr) {
   panel.scrollIntoView({ behavior: 'smooth' });
 }
 
-const HEAD_CROP_FRAC = 0.30; // must match HEAD_CROP_SIZE in config.py
+// ---------------------------------------------------------------------------
+// Face bbox overlay + drag-to-draw correction
+// ---------------------------------------------------------------------------
 
-function drawHeadOverlay(img, overlay, headPos) {
-  // Skip if no data, not visible, or bogus (0,0) default from prompt
-  if (!headPos || typeof headPos.x !== 'number' || typeof headPos.y !== 'number'
-      || headPos.visible === false || (headPos.x === 0 && headPos.y === 0)) {
+// BASSINET_CROP must match config.py for coordinate mapping
+const BASSINET_CROP = { x: 0.15, y: 0.10, w: 0.70, h: 0.80 };
+
+function _getImageLayout(img) {
+  // Compute object-fit:contain scaling and offset
+  const natW = img.naturalWidth, natH = img.naturalHeight;
+  const dispW = img.clientWidth, dispH = img.clientHeight;
+  if (!natW || !natH || !dispW || !dispH) return null;
+  const scale = Math.min(dispW / natW, dispH / natH);
+  return {
+    scale, natW, natH,
+    renderedW: natW * scale, renderedH: natH * scale,
+    offsetX: (dispW - natW * scale) / 2,
+    offsetY: (dispH - natH * scale) / 2,
+  };
+}
+
+function _faceBboxToPixels(bbox, layout) {
+  // Convert normalized faceBbox (relative to bassinet crop) to rendered pixel coords.
+  // faceBbox is {x1,y1,x2,y2} as fractions of the bassinet crop.
+  // The full image includes non-bassinet areas, so we map:
+  //   image_x = BASSINET_CROP.x + bbox.x1 * BASSINET_CROP.w
+  const bc = BASSINET_CROP;
+  const imgX1 = (bc.x + bbox.x1 * bc.w) * layout.natW;
+  const imgY1 = (bc.y + bbox.y1 * bc.h) * layout.natH;
+  const imgX2 = (bc.x + bbox.x2 * bc.w) * layout.natW;
+  const imgY2 = (bc.y + bbox.y2 * bc.h) * layout.natH;
+  return {
+    left: layout.offsetX + imgX1 * layout.scale,
+    top: layout.offsetY + imgY1 * layout.scale,
+    width: (imgX2 - imgX1) * layout.scale,
+    height: (imgY2 - imgY1) * layout.scale,
+  };
+}
+
+function drawFaceOverlay(img, overlay, entry) {
+  const bbox = entry.faceBboxCorrected || entry.faceBbox;
+  if (!bbox || bbox.x1 == null) {
     overlay.style.display = 'none';
     return;
   }
-  // The image may be scaled to fit via object-fit:contain.
-  // We need the actual rendered size and offset within the container.
-  const natW = img.naturalWidth;
-  const natH = img.naturalHeight;
-  const dispW = img.clientWidth;
-  const dispH = img.clientHeight;
-  if (!natW || !natH || !dispW || !dispH) { overlay.style.display = 'none'; return; }
+  const layout = _getImageLayout(img);
+  if (!layout) { overlay.style.display = 'none'; return; }
 
-  // object-fit:contain scaling
-  const scale = Math.min(dispW / natW, dispH / natH);
-  const renderedW = natW * scale;
-  const renderedH = natH * scale;
-  const offsetX = (dispW - renderedW) / 2;
-  const offsetY = (dispH - renderedH) / 2;
+  const px = _faceBboxToPixels(bbox, layout);
+  const isCorrected = !!entry.faceBboxCorrected;
 
-  // Head crop is a square: side = HEAD_CROP_FRAC * max(natW, natH)
-  const side = HEAD_CROP_FRAC * Math.max(natW, natH);
-  const half = side / 2;
-
-  // Clamp to frame bounds (matching crop_head_region logic)
-  const cx = headPos.x * natW;
-  const cy = headPos.y * natH;
-  const x1 = Math.max(0, cx - half);
-  const y1 = Math.max(0, cy - half);
-  const x2 = Math.min(natW, cx + half);
-  const y2 = Math.min(natH, cy + half);
-
-  // Convert to rendered pixel coordinates
   overlay.style.display = 'block';
-  overlay.style.left = (offsetX + x1 * scale) + 'px';
-  overlay.style.top = (offsetY + y1 * scale) + 'px';
-  overlay.style.width = ((x2 - x1) * scale) + 'px';
-  overlay.style.height = ((y2 - y1) * scale) + 'px';
+  overlay.style.left = px.left + 'px';
+  overlay.style.top = px.top + 'px';
+  overlay.style.width = px.width + 'px';
+  overlay.style.height = px.height + 'px';
+  overlay.className = 'face-overlay' + (isCorrected ? ' corrected' : '');
+  overlay.innerHTML = '<span class="face-overlay-label">' + (isCorrected ? 'corrected' : 'auto') + '</span>';
 }
+
+// Drag-to-draw state
+let _drawing = false;
+let _drawStart = null;
+
+function _initDragToDraw() {
+  const container = document.getElementById('viewer-frame-container');
+  const drawRect = document.getElementById('viewer-draw-rect');
+  const img = document.getElementById('viewer-img');
+
+  container.addEventListener('mousedown', (ev) => {
+    if (ev.target !== img && ev.target !== container) return;
+    ev.preventDefault();
+    const rect = container.getBoundingClientRect();
+    _drawing = true;
+    _drawStart = { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+    drawRect.style.display = 'block';
+    drawRect.style.left = _drawStart.x + 'px';
+    drawRect.style.top = _drawStart.y + 'px';
+    drawRect.style.width = '0px';
+    drawRect.style.height = '0px';
+  });
+
+  container.addEventListener('mousemove', (ev) => {
+    if (!_drawing) return;
+    const rect = container.getBoundingClientRect();
+    const cx = ev.clientX - rect.left;
+    const cy = ev.clientY - rect.top;
+    const x = Math.min(_drawStart.x, cx);
+    const y = Math.min(_drawStart.y, cy);
+    const w = Math.abs(cx - _drawStart.x);
+    const h = Math.abs(cy - _drawStart.y);
+    drawRect.style.left = x + 'px';
+    drawRect.style.top = y + 'px';
+    drawRect.style.width = w + 'px';
+    drawRect.style.height = h + 'px';
+  });
+
+  container.addEventListener('mouseup', async (ev) => {
+    if (!_drawing) return;
+    _drawing = false;
+    drawRect.style.display = 'none';
+
+    const rect = container.getBoundingClientRect();
+    const cx = ev.clientX - rect.left;
+    const cy = ev.clientY - rect.top;
+
+    // Min size check (at least 10px)
+    if (Math.abs(cx - _drawStart.x) < 10 || Math.abs(cy - _drawStart.y) < 10) return;
+
+    const layout = _getImageLayout(img);
+    if (!layout) return;
+
+    // Convert rendered pixel coords back to normalized face bbox (relative to bassinet crop)
+    const bc = BASSINET_CROP;
+    const px1 = Math.min(_drawStart.x, cx);
+    const py1 = Math.min(_drawStart.y, cy);
+    const px2 = Math.max(_drawStart.x, cx);
+    const py2 = Math.max(_drawStart.y, cy);
+
+    // Rendered pixels → full image normalized coords
+    const imgNx1 = (px1 - layout.offsetX) / layout.scale / layout.natW;
+    const imgNy1 = (py1 - layout.offsetY) / layout.scale / layout.natH;
+    const imgNx2 = (px2 - layout.offsetX) / layout.scale / layout.natW;
+    const imgNy2 = (py2 - layout.offsetY) / layout.scale / layout.natH;
+
+    // Full image normalized → bassinet crop normalized
+    const bx1 = Math.max(0, Math.min(1, (imgNx1 - bc.x) / bc.w));
+    const by1 = Math.max(0, Math.min(1, (imgNy1 - bc.y) / bc.h));
+    const bx2 = Math.max(0, Math.min(1, (imgNx2 - bc.x) / bc.w));
+    const by2 = Math.max(0, Math.min(1, (imgNy2 - bc.y) / bc.h));
+
+    const faceBbox = {
+      x1: Math.round(bx1 * 10000) / 10000,
+      y1: Math.round(by1 * 10000) / 10000,
+      x2: Math.round(bx2 * 10000) / 10000,
+      y2: Math.round(by2 * 10000) / 10000,
+    };
+
+    // Save to backend
+    const e = viewerEntries[viewerIndex];
+    if (!e) return;
+    const saved = document.getElementById('viewer-saved');
+    saved.textContent = 'saving face...';
+    try {
+      const res = await fetch('/api/update-entry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ timestamp: e.timestamp, faceBbox: faceBbox }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        e.faceBboxCorrected = faceBbox;
+        saved.textContent = 'face saved';
+        saved.style.color = '#4caf50';
+        setTimeout(() => { saved.textContent = ''; renderViewer(); }, 800);
+      } else {
+        saved.textContent = 'error';
+        saved.style.color = '#ff5252';
+      }
+    } catch (err) {
+      saved.textContent = 'error';
+      saved.style.color = '#ff5252';
+    }
+  });
+}
+
+// Clear face button
+document.getElementById('viewer-clear-face').addEventListener('click', async () => {
+  const e = viewerEntries[viewerIndex];
+  if (!e) return;
+  const saved = document.getElementById('viewer-saved');
+  saved.textContent = 'clearing...';
+  try {
+    const res = await fetch('/api/update-entry', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ timestamp: e.timestamp, faceBbox: false }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      e.faceBboxCorrected = null;
+      saved.textContent = 'cleared';
+      saved.style.color = '#4a9eff';
+      setTimeout(() => { saved.textContent = ''; renderViewer(); }, 800);
+    }
+  } catch (err) {
+    saved.textContent = 'error';
+    saved.style.color = '#ff5252';
+  }
+});
+
+_initDragToDraw();
 
 function renderViewer() {
   if (viewerEntries.length === 0) return;
@@ -362,16 +511,15 @@ function renderViewer() {
 
   // Image
   const img = document.getElementById('viewer-img');
-  const headOverlay = document.getElementById('viewer-head-overlay');
+  const faceOverlay = document.getElementById('viewer-face-overlay');
   if (e.frame) {
     img.src = frameUrl(e.frame);
     img.style.display = 'block';
     img.onclick = () => showFrameModal(e.frame);
-    // Draw head crop overlay once image loads
-    img.onload = function() { drawHeadOverlay(img, headOverlay, e.headPosition); };
+    img.onload = function() { drawFaceOverlay(img, faceOverlay, e); };
   } else {
     img.style.display = 'none';
-    headOverlay.style.display = 'none';
+    faceOverlay.style.display = 'none';
   }
 
   // Counter

@@ -38,6 +38,7 @@ log = logging.getLogger("monitor")
 # Lazy-loaded singletons
 _presence_clf = None
 _eye_state_clf = None
+_face_detector = None
 _available = None  # None = not yet checked
 
 BIRDEYE = "birdeye"
@@ -73,11 +74,11 @@ def _check_available() -> bool:
 # ---------------------------------------------------------------------------
 
 def _get_classifiers():
-    global _presence_clf, _eye_state_clf
-    if _presence_clf is not None and _eye_state_clf is not None:
-        return _presence_clf, _eye_state_clf
+    global _presence_clf, _eye_state_clf, _face_detector
+    if _presence_clf is not None and _eye_state_clf is not None and _face_detector is not None:
+        return _presence_clf, _eye_state_clf, _face_detector
 
-    from .classifiers import BabyPresenceClassifier, EyeStateClassifier
+    from .classifiers import BabyPresenceClassifier, EyeStateClassifier, FaceDetector
 
     device = "cpu"
     presence_path = PRESENCE_MODEL
@@ -88,9 +89,10 @@ def _get_classifiers():
 
     _presence_clf = BabyPresenceClassifier(presence_path, device)
     _eye_state_clf = EyeStateClassifier(eye_path, device)
+    _face_detector = FaceDetector()
 
     log.info("%s: classifiers loaded in %.2fs", BIRDEYE, time.monotonic() - t0)
-    return _presence_clf, _eye_state_clf
+    return _presence_clf, _eye_state_clf, _face_detector
 
 
 # ---------------------------------------------------------------------------
@@ -98,21 +100,22 @@ def _get_classifiers():
 # ---------------------------------------------------------------------------
 
 def try_local_analysis(frame_path: Path) -> dict | None:
-    """Run the two-classifier pipeline on a captured frame.
+    """Run the three-stage pipeline on a captured frame.
 
-    Returns a flat entry dict when confident (present/not_present/awake/asleep),
-    or None to trigger cloud API fallback.
+    Stages: presence → face detection → eye state.
+    Returns a flat entry dict when confident, or None to trigger cloud API fallback.
     """
     if not _check_available():
         return None
 
     try:
-        presence_clf, eye_clf = _get_classifiers()
+        presence_clf, eye_clf, face_detector = _get_classifiers()
     except Exception as e:
         log.error("%s: classifier load failed: %s", BIRDEYE, e)
         return None
 
-    from .classifiers import crop_bassinet
+    from .classifiers import crop_bassinet, crop_face
+    from .config import EYE_STATE_CONFIDENCE_THRESHOLD
     import cv2
 
     timings = {}
@@ -125,7 +128,7 @@ def try_local_analysis(frame_path: Path) -> dict | None:
         return None
     timings["load"] = time.monotonic() - t0
 
-    # --- Classifier 1: baby presence ---
+    # --- Stage 1: baby presence (bassinet crop) ---
     t1 = time.monotonic()
     bassinet_crop = crop_bassinet(frame)
     presence = presence_clf.classify(bassinet_crop)
@@ -141,18 +144,28 @@ def try_local_analysis(frame_path: Path) -> dict | None:
                  BIRDEYE, presence.confidence, timings["total"])
         return _build_entry("not_present", presence, None, timings)
 
-    # --- Classifier 2: eye state (bassinet crop, 2-class) ---
-    from .config import EYE_STATE_CONFIDENCE_THRESHOLD
-    # Load head position for recording in entry (not used for cropping)
-    from .classifiers import load_head_state
-    head_pos = load_head_state()
+    # --- Stage 2: face detection (on bassinet crop) ---
+    t_face = time.monotonic()
+    face_result = face_detector.detect(bassinet_crop)
+    timings["face_detect"] = time.monotonic() - t_face
 
+    if face_result is None:
+        timings["total"] = time.monotonic() - t0
+        log.info("%s: FALLBACK no_face_detected (%.2fs) -> cloud API",
+                 BIRDEYE, timings["total"])
+        return None
+
+    log.info("%s: face_detect %.3fs  conf=%.3f bbox=%s",
+             BIRDEYE, timings["face_detect"], face_result.confidence,
+             face_result.normalized_bbox)
+
+    # --- Stage 3: eye state (face crop, 2-class) ---
     t2 = time.monotonic()
-    bass_crop = crop_bassinet(frame)
-    eye_result = eye_clf.classify(bass_crop)
+    face_crop = crop_face(bassinet_crop, face_result.bbox)
+    eye_result = eye_clf.classify(face_crop)
     timings["eye_state"] = time.monotonic() - t2
 
-    log.info("%s: eye_state %.3fs  state=%s conf=%.3f probs=%s (bassinet crop)",
+    log.info("%s: eye_state %.3fs  state=%s conf=%.3f probs=%s (face crop)",
              BIRDEYE, timings["eye_state"], eye_result.state, eye_result.confidence,
              eye_result.probabilities)
 
@@ -165,21 +178,20 @@ def try_local_analysis(frame_path: Path) -> dict | None:
                  timings["total"])
         return None
 
-    if eye_result.state == "eyes_open":
-        log.info("%s: RESULT Awake conf=%.3f (%.2fs) -> cloud API skipped",
-                 BIRDEYE, eye_result.confidence, timings["total"])
-        return _build_entry("Awake", presence, eye_result, timings, head_pos)
-
-    log.info("%s: RESULT Asleep conf=%.3f (%.2fs) -> cloud API skipped",
-             BIRDEYE, eye_result.confidence, timings["total"])
-    return _build_entry("Asleep", presence, eye_result, timings, head_pos)
+    state = "Awake" if eye_result.state == "eyes_open" else "Asleep"
+    log.info("%s: RESULT %s conf=%.3f (%.2fs) -> cloud API skipped",
+             BIRDEYE, state, eye_result.confidence, timings["total"])
+    return _build_entry(state, presence, eye_result, timings,
+                        face_bbox=face_result.normalized_bbox,
+                        face_confidence=face_result.confidence)
 
 
 # ---------------------------------------------------------------------------
 # Entry builder
 # ---------------------------------------------------------------------------
 
-def _build_entry(state, presence, eye_result, timings, head_pos=None):
+def _build_entry(state, presence, eye_result, timings,
+                  face_bbox=None, face_confidence=None):
     """Build a flat entry dict compatible with the existing sleep-log schema."""
     baby_present = state != "not_present"
 
@@ -187,7 +199,7 @@ def _build_entry(state, presence, eye_result, timings, head_pos=None):
         "babyPresent": baby_present,
         "state": state,
         "detectionMethod": BIRDEYE,
-        "modelUsed": "local/mobilenet+mobilenet",
+        "modelUsed": "local/mobilenet+yunet+mobilenet",
         # Fields birdeye doesn't produce
         "sleepPosition": "Unknown",
         "objectsInBassinet": "Unknown",
@@ -211,8 +223,10 @@ def _build_entry(state, presence, eye_result, timings, head_pos=None):
         entry["eyeState"] = eye_result.state
         entry["eyeConfidence"] = round(eye_result.confidence, 3)
 
-    if head_pos is not None:
-        entry["headPosition"] = {"x": round(head_pos["x"], 4), "y": round(head_pos["y"], 4)}
+    # Face detection metadata
+    if face_bbox is not None:
+        entry["faceBbox"] = face_bbox
+        entry["faceConfidence"] = round(face_confidence, 3)
 
     entry["birdeyeTimings"] = {k: round(v, 3) for k, v in timings.items()}
 

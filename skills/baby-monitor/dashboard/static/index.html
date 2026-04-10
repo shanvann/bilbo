@@ -101,9 +101,10 @@
         <span id="block-label-status" class="viewer-saved"></span>
       </div>
       <div id="block-detail-viewer" class="block-viewer">
-        <div class="viewer-frame" style="position:relative">
+        <div class="viewer-frame" id="viewer-frame-container" style="position:relative">
           <img id="viewer-img" class="viewer-img" alt="Frame">
-          <div id="viewer-head-overlay" class="head-overlay" style="display:none"></div>
+          <div id="viewer-face-overlay" class="face-overlay" style="display:none"></div>
+          <div id="viewer-draw-rect" class="face-overlay drawing" style="display:none"></div>
         </div>
         <div class="viewer-controls">
           <div class="viewer-nav">
@@ -123,6 +124,7 @@
               <option value="not_in_bassinet">Not In Bassinet</option>
             </select>
             <button id="viewer-confirm" class="viewer-btn" style="padding:6px 10px;font-size:0.8rem">Confirm</button>
+            <button id="viewer-clear-face" class="viewer-btn" style="padding:6px 10px;font-size:0.8rem" title="Clear corrected face box">Clear Face</button>
             <span id="viewer-saved" class="viewer-saved"></span>
             <span id="viewer-retrain-status" class="viewer-retrain-status"></span>
           </div>

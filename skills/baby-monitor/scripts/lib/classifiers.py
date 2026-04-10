@@ -1,16 +1,16 @@
-"""Birdeye classifiers: baby presence + eye state (MobileNetV3-Small).
+"""Birdeye classifiers: baby presence + face detection + eye state.
 
-Two lightweight classifiers that replace the 3-model YOLO cascade:
-
-  Classifier 1 — BabyPresenceClassifier
+  Classifier 1 — BabyPresenceClassifier (MobileNetV3-Small)
     Input:  fixed bassinet-center crop (from BASSINET_CROP config)
     Output: present / not_present
 
-  Classifier 2 — EyeStateClassifier
-    Input:  head-region crop (centered on last known head position)
-    Output: eyes_open / eyes_closed / face_not_visible
+  Face detector — FaceDetector (YuNet ONNX)
+    Input:  bassinet crop (after presence=True)
+    Output: face bounding box or None
 
-Both use MobileNetV3-Small (~2.5M params, ~60ms per frame on CPU).
+  Classifier 2 — EyeStateClassifier (MobileNetV3-Small)
+    Input:  face crop (tight crop around detected face)
+    Output: eyes_open / eyes_closed
 """
 
 import json
@@ -28,6 +28,10 @@ from torchvision import models, transforms
 from .config import (
     BASSINET_CROP,
     DEFAULT_HEAD_POS,
+    FACE_CROP_PADDING,
+    FACE_DETECT_MODEL,
+    FACE_DETECT_NMS_THRESHOLD,
+    FACE_DETECT_SCORE_THRESHOLD,
     HEAD_CROP_SIZE,
     HEAD_STATE_FILE,
 )
@@ -245,3 +249,101 @@ class EyeStateClassifier:
             confidence=pred_conf,
             probabilities=prob_dict,
         )
+
+
+# ---------------------------------------------------------------------------
+# Face detector (YuNet)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FaceDetectResult:
+    bbox: tuple  # (x1, y1, x2, y2) in bassinet crop pixel coordinates
+    confidence: float
+    normalized_bbox: dict  # {x1, y1, x2, y2} as fractions 0-1 of bassinet crop
+
+
+class FaceDetector:
+    """YuNet face detector — finds the baby's face in the bassinet crop."""
+
+    _INPUT_SIZE = (320, 320)
+
+    def __init__(self, model_path: Path = FACE_DETECT_MODEL):
+        if not model_path.exists():
+            raise FileNotFoundError(f"YuNet model not found: {model_path}")
+        self._detector = cv2.FaceDetectorYN.create(
+            str(model_path),
+            "",
+            self._INPUT_SIZE,
+            FACE_DETECT_SCORE_THRESHOLD,
+            FACE_DETECT_NMS_THRESHOLD,
+        )
+        log.info("birdeye: face detector loaded from %s", model_path)
+
+    def detect(self, bassinet_crop: np.ndarray) -> FaceDetectResult | None:
+        """Detect the highest-confidence face in the bassinet crop.
+
+        Returns FaceDetectResult or None if no face above threshold.
+        """
+        h, w = bassinet_crop.shape[:2]
+
+        # YuNet expects a specific input size
+        self._detector.setInputSize((w, h))
+        _, faces = self._detector.detect(bassinet_crop)
+
+        if faces is None or len(faces) == 0:
+            return None
+
+        # Pick highest confidence face
+        best = max(faces, key=lambda f: f[14])  # index 14 = confidence
+        conf = float(best[14])
+
+        if conf < FACE_DETECT_SCORE_THRESHOLD:
+            return None
+
+        # YuNet returns (x, y, w, h, ..., confidence) — convert to (x1, y1, x2, y2)
+        fx, fy, fw, fh = int(best[0]), int(best[1]), int(best[2]), int(best[3])
+        x1, y1 = max(0, fx), max(0, fy)
+        x2, y2 = min(w, fx + fw), min(h, fy + fh)
+
+        # Reject tiny false positives (face should be at least 5% of crop in each dimension)
+        if (x2 - x1) < w * 0.05 or (y2 - y1) < h * 0.05:
+            return None
+
+        return FaceDetectResult(
+            bbox=(x1, y1, x2, y2),
+            confidence=conf,
+            normalized_bbox={
+                "x1": round(x1 / w, 4),
+                "y1": round(y1 / h, 4),
+                "x2": round(x2 / w, 4),
+                "y2": round(y2 / h, 4),
+            },
+        )
+
+
+def crop_face(bassinet_crop: np.ndarray, bbox: tuple,
+              padding: float = FACE_CROP_PADDING) -> np.ndarray:
+    """Extract a padded face crop from the bassinet crop.
+
+    bbox: (x1, y1, x2, y2) in pixel coordinates.
+    padding: fraction to expand on each side (0.3 = 30%).
+    """
+    h, w = bassinet_crop.shape[:2]
+    x1, y1, x2, y2 = bbox
+    bw, bh = x2 - x1, y2 - y1
+
+    # Expand by padding
+    pad_x = int(bw * padding)
+    pad_y = int(bh * padding)
+    x1 = max(0, x1 - pad_x)
+    y1 = max(0, y1 - pad_y)
+    x2 = min(w, x2 + pad_x)
+    y2 = min(h, y2 + pad_y)
+
+    crop = bassinet_crop[y1:y2, x1:x2].copy()
+
+    # Ensure non-empty
+    if crop.size == 0:
+        return bassinet_crop
+
+    return crop

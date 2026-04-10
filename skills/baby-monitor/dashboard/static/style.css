@@ -776,8 +776,8 @@ footer {
   padding: 6px 0;
 }
 
-/* Head position overlay on viewer frame */
-.head-overlay {
+/* Face detection overlay on viewer frame */
+.face-overlay {
   position: absolute;
   border: 2px solid rgba(74, 158, 255, 0.8);
   background: rgba(74, 158, 255, 0.08);
@@ -786,6 +786,28 @@ footer {
   z-index: 1;
   box-shadow: 0 0 6px rgba(74, 158, 255, 0.3);
 }
+.face-overlay.corrected {
+  border-color: rgba(76, 175, 80, 0.9);
+  background: rgba(76, 175, 80, 0.08);
+  box-shadow: 0 0 6px rgba(76, 175, 80, 0.3);
+}
+.face-overlay.drawing {
+  border: 2px dashed rgba(255, 152, 0, 0.8);
+  background: rgba(255, 152, 0, 0.08);
+  pointer-events: none;
+}
+.face-overlay-label {
+  position: absolute;
+  top: -16px;
+  left: 0;
+  font-size: 0.6rem;
+  padding: 1px 4px;
+  border-radius: 2px;
+  color: #fff;
+}
+.face-overlay .face-overlay-label { background: rgba(74, 158, 255, 0.7); }
+.face-overlay.corrected .face-overlay-label { background: rgba(76, 175, 80, 0.7); }
+.viewer-frame { cursor: crosshair; }
 
 /* Classifiers meta line */
 .classifiers-meta {

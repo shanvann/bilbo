@@ -279,12 +279,11 @@ class PresenceDataset(Dataset):
 
 
 class EyeStateDataset(Dataset):
-    """Bassinet crop → eyes_open / eyes_closed (2-class).
+    """Face crop → eyes_open / eyes_closed (2-class).
 
-    Uses the fixed bassinet-center crop (crop_bassinet) instead of the
-    head-position-dependent crop.  This avoids the ~80% of frames where
-    headPosition is missing or coarse, giving the classifier a consistent
-    input region that always contains the baby when present.
+    Uses YuNet face detection on the bassinet crop to produce a tight face
+    crop for the eye-state classifier. Entries with a corrected face bbox
+    (from the dashboard) use that instead of auto-detection.
 
     Labels derived from cloud API state:
         Awake → eyes_open (0)
@@ -298,39 +297,77 @@ class EyeStateDataset(Dataset):
         "Asleep": 1,     # eyes_closed
     }
 
-    def __init__(self, entries: list[dict], frames_dir: Path, transform=None):
-        self.samples = []
+    def __init__(self, entries: list[dict], frames_dir: Path, transform=None,
+                 face_detector=None):
+        from lib.classifiers import FaceDetector, crop_face as _crop_face
+        self.samples = []  # (fpath, label, bbox_or_none)
         self.transform = transform
-        skipped = 0
+        self._crop_face = _crop_face
+
+        if face_detector is None:
+            face_detector = FaceDetector()
+
+        skipped_missing = 0
+        skipped_no_face = 0
+        used_corrected = 0
+        used_detected = 0
 
         for e in entries:
-            # Only baby-present frames
             if not e.get("babyPresent", False):
-                continue
-
-            fname = Path(e.get("frame", "")).name
-            fpath = frames_dir / fname
-            if not fpath.exists():
-                skipped += 1
                 continue
 
             state = e.get("state", "Unknown")
             label = self.STATE_MAP.get(state)
             if label is None:
-                continue  # skip Unknown/Drowsy — ambiguous for 2-class
+                continue
 
-            self.samples.append((fpath, label))
+            fname = Path(e.get("frame", "")).name
+            fpath = frames_dir / fname
+            if not fpath.exists():
+                skipped_missing += 1
+                continue
 
-        if skipped > 0:
-            log.info("EyeStateDataset: skipped %d entries (missing frames)", skipped)
+            # Priority 1: corrected face bbox from dashboard
+            corrected_bbox = e.get("faceBboxCorrected")
+            if corrected_bbox and all(k in corrected_bbox for k in ("x1", "y1", "x2", "y2")):
+                self.samples.append((fpath, label, corrected_bbox))
+                used_corrected += 1
+                continue
+
+            # Priority 2: auto-detect face
+            frame = cv2.imread(str(fpath))
+            if frame is None:
+                skipped_missing += 1
+                continue
+            bass = crop_bassinet(frame)
+            result = face_detector.detect(bass)
+            if result is not None:
+                self.samples.append((fpath, label, result.normalized_bbox))
+                used_detected += 1
+            else:
+                skipped_no_face += 1
+
+        log.info("EyeStateDataset: %d samples (detected=%d, corrected=%d), "
+                 "skipped %d missing frames, %d no face detected",
+                 len(self.samples), used_detected, used_corrected,
+                 skipped_missing, skipped_no_face)
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        path, label = self.samples[idx]
+        path, label, norm_bbox = self.samples[idx]
         frame = cv2.imread(str(path))
-        crop = crop_bassinet(frame)
+        bass = crop_bassinet(frame)
+        h, w = bass.shape[:2]
+
+        # Convert normalized bbox to pixel coords
+        x1 = int(norm_bbox["x1"] * w)
+        y1 = int(norm_bbox["y1"] * h)
+        x2 = int(norm_bbox["x2"] * w)
+        y2 = int(norm_bbox["y2"] * h)
+
+        crop = self._crop_face(bass, (x1, y1, x2, y2))
         rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
         if self.transform:
             rgb = self.transform(rgb)

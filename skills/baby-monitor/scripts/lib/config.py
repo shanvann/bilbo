@@ -87,6 +87,11 @@ BASSINET_CROP = {"x": 0.15, "y": 0.10, "w": 0.70, "h": 0.80}
 HEAD_CROP_SIZE = 0.30
 # Eye-state classifier confidence threshold — below this, fall back to cloud API
 EYE_STATE_CONFIDENCE_THRESHOLD = 0.7
+# Face detector (YuNet) config
+FACE_DETECT_MODEL = MODELS_DIR / "face_detection_yunet_2023mar.onnx"
+FACE_DETECT_SCORE_THRESHOLD = 0.5
+FACE_DETECT_NMS_THRESHOLD = 0.3
+FACE_CROP_PADDING = 0.3  # expand detected bbox by 30% on each side for context
 # Default head position (center-upper area of bassinet) when no state file exists
 DEFAULT_HEAD_POS = {"x": 0.50, "y": 0.35}
 # Classifier model paths — load from "latest" symlink if it exists, else top-level

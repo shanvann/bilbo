@@ -183,6 +183,9 @@ def api_timeline():
             "shadowPresenceConfidence": shadow.get("presenceConfidence"),
             "shadowEyeConfidence": shadow.get("eyeConfidence"),
             "headPosition": e.get("headPosition"),
+            "faceBbox": e.get("faceBbox"),
+            "faceConfidence": e.get("faceConfidence"),
+            "faceBboxCorrected": e.get("faceBboxCorrected"),
             "frame": e.get("frame"),
             "alerts": e.get("alerts", []),
         })
@@ -427,6 +430,7 @@ def api_update_entry():
     new_state = data.get("state")
     new_position = data.get("position")
     new_eye_state = data.get("eyeState")
+    new_face_bbox = data.get("faceBbox")  # {x1, y1, x2, y2} normalized or null to clear
 
     if not ts:
         return jsonify({"error": "timestamp required"}), 400
@@ -446,6 +450,9 @@ def api_update_entry():
         updates["eyeState"] = new_eye_state
         updates["eyeStateEdited"] = True
         updates["eyeStateCorrectedAt"] = now
+    if new_face_bbox is not None:
+        # null clears the correction, dict sets it
+        updates["faceBboxCorrected"] = new_face_bbox if new_face_bbox else None
 
     # Update in SQLite
     if not db.update_entry(ts, updates):

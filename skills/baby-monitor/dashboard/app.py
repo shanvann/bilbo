@@ -168,6 +168,7 @@ def api_timeline():
 
     timeline = []
     for e in raw_entries:
+        shadow = e.get("shadow") or {}
         timeline.append({
             "timestamp": e["timestamp"],
             "babyPresent": e.get("babyPresent"),
@@ -177,6 +178,10 @@ def api_timeline():
             "eyeStateCorrectedAt": e.get("eyeStateCorrectedAt"),
             "detectionMethod": e.get("detectionMethod"),
             "shadowModelVersion": e.get("shadowModelVersion"),
+            "shadowBirdeyeState": shadow.get("birdeyeState"),
+            "shadowEyeState": shadow.get("eyeState"),
+            "shadowPresenceConfidence": shadow.get("presenceConfidence"),
+            "shadowEyeConfidence": shadow.get("eyeConfidence"),
             "frame": e.get("frame"),
             "alerts": e.get("alerts", []),
         })
@@ -518,6 +523,7 @@ def api_training_status():
 
     last_trained_ts = last_log.get("timestamp") if last_log else None
     total_corrections, pending_corrections = db.get_pending_corrections_count(last_trained_ts)
+    duration_stats = db.get_training_duration_stats()
 
     return jsonify({
         "running": state.get("status") == "running",
@@ -532,10 +538,12 @@ def api_training_status():
         "lastMetrics": last_log.get("metrics") if last_log else None,
         "lastLabelSources": last_log.get("label_sources") if last_log else None,
         "lastEntriesTotal": last_log.get("entries_total") if last_log else None,
+        "lastDurationSeconds": last_log.get("duration_seconds") if last_log else None,
         "prevVersion": prev_log.get("version") if prev_log else None,
         "prevMetrics": prev_log.get("metrics") if prev_log else None,
         "pendingCorrections": pending_corrections,
         "totalCorrections": total_corrections,
+        "trainingDurationStats": duration_stats,
     })
 
 
@@ -611,4 +619,10 @@ def api_frame():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5555, debug=True)
+    # debug=False on purpose. The werkzeug debugger crashes on Python 3.14
+    # (sysconfig.get_paths() raises AttributeError: 'installed_base'), turning
+    # any uncaught exception into an opaque HTTP 500. The dev-server reloader
+    # also doubles file-descriptor usage, contributing to EMFILE crashes after
+    # long uptimes (we hit one on 2026-04-09). Production stays on the dev
+    # server for simplicity but without the debugger and reloader.
+    app.run(host="0.0.0.0", port=5555, debug=False)

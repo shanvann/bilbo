@@ -558,6 +558,19 @@ footer {
   padding: 4px 8px;
   border-radius: 4px;
 }
+.viewer-birdeye-label {
+  font-size: 0.85rem;
+  color: var(--text);
+  background: rgba(76, 175, 80, 0.15);
+  border: 1px solid rgba(76, 175, 80, 0.35);
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.viewer-birdeye-label.disagree {
+  color: var(--accent-orange);
+  background: rgba(255, 152, 0, 0.15);
+  border-color: rgba(255, 152, 0, 0.45);
+}
 .viewer-saved {
   font-size: 0.85rem;
   color: var(--accent-blue);

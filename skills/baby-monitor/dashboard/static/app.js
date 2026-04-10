@@ -29,6 +29,16 @@ function formatDateTimeET(isoStr) {
   });
 }
 
+function formatSeconds(sec) {
+  if (sec == null || isNaN(sec)) return '—';
+  if (sec < 60) return sec.toFixed(1) + 's';
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  if (m < 60) return m + 'm ' + s + 's';
+  const h = Math.floor(m / 60);
+  return h + 'h ' + (m % 60) + 'm';
+}
+
 function frameUrl(framePath) {
   if (!framePath) return null;
   return '/api/frame?path=' + encodeURIComponent(framePath);
@@ -332,7 +342,36 @@ function renderViewer() {
   const eyeState = e.eyeState || (!e.babyPresent ? 'not_in_bassinet' : e.state === 'Awake' ? 'eyes_open' : e.state === 'Asleep' ? 'eyes_closed' : 'face_not_visible');
   const labelMap = { eyes_open: 'Eyes Open', eyes_closed: 'Eyes Closed', face_not_visible: 'Face Not Visible', not_in_bassinet: 'Not In Bassinet' };
   const modelLabel = document.getElementById('viewer-model-label');
-  modelLabel.textContent = 'Model: ' + (labelMap[eyeState] || eyeState);
+  modelLabel.textContent = 'Cloud: ' + (labelMap[eyeState] || eyeState);
+
+  // BIRDEYE shadow classifier labels (presence + eye state)
+  const presenceEl = document.getElementById('viewer-birdeye-presence');
+  const eyeEl = document.getElementById('viewer-birdeye-eye');
+  const fmtConf = (c) => (c == null ? '' : ' (' + Math.round(c * 100) + '%)');
+  if (e.shadowBirdeyeState != null) {
+    const presence = e.shadowBirdeyeState === 'not_present' ? 'not_present' : 'present';
+    presenceEl.textContent = 'BIRDEYE presence: ' + presence + fmtConf(e.shadowPresenceConfidence);
+    presenceEl.style.display = '';
+    const agreedPresence = (presence === 'present') === !!e.babyPresent;
+    presenceEl.classList.toggle('disagree', !agreedPresence);
+  } else {
+    presenceEl.style.display = 'none';
+    presenceEl.classList.remove('disagree');
+  }
+  if (e.shadowEyeState != null) {
+    eyeEl.textContent = 'BIRDEYE eyes: ' + (labelMap[e.shadowEyeState] || e.shadowEyeState) + fmtConf(e.shadowEyeConfidence);
+    eyeEl.style.display = '';
+    const agreedEye = e.shadowEyeState === eyeState;
+    eyeEl.classList.toggle('disagree', !agreedEye);
+  } else if (e.shadowBirdeyeState === 'not_present') {
+    // Eye classifier skipped (no baby present)
+    eyeEl.textContent = 'BIRDEYE eyes: — (skipped)';
+    eyeEl.style.display = '';
+    eyeEl.classList.remove('disagree');
+  } else {
+    eyeEl.style.display = 'none';
+    eyeEl.classList.remove('disagree');
+  }
 
   // Eye state dropdown
   const stateSelect = document.getElementById('viewer-state');
@@ -593,10 +632,28 @@ function renderTrainingStats() {
   const pendingRow = '<div class="train-row"><span title="Corrections made since last training — will be included in the next retrain">Pending changes</span><span class="train-val" style="color:' + pendingColor + '">' + pending + '</span></div>' +
     '<div class="train-row"><span title="Corrections already used in previous training runs">Previous changes</span><span class="train-val">' + trained + '</span></div>';
 
+  // Run timing: last run + avg/p99 across all recorded runs
+  const durStats = trainingData.trainingDurationStats || {};
+  const lastDurSec = trainingData.lastDurationSeconds;
+  const runCount = durStats.count || 0;
+  const lastRow = lastDurSec != null
+    ? '<div class="train-row"><span title="Wall-clock duration of the most recent training run">Last run</span><span class="train-val">' + formatSeconds(lastDurSec) + '</span></div>'
+    : '';
+  const avgRow = durStats.avg_seconds != null
+    ? '<div class="train-row"><span title="Average wall-clock duration across ' + runCount + ' recorded training runs">Avg training time</span><span class="train-val">' + formatSeconds(durStats.avg_seconds) + '</span></div>'
+    : '';
+  const p99Row = durStats.p99_seconds != null
+    ? '<div class="train-row"><span title="99th-percentile training duration across ' + runCount + ' recorded training runs (linear interpolation)">p99 training time</span><span class="train-val">' + formatSeconds(durStats.p99_seconds) + '</span></div>'
+    : '';
+  const timingHeader = (lastRow || avgRow || p99Row)
+    ? '<div style="margin:8px 0 2px;font-size:0.7rem;color:#445" title="Wall-clock duration of train_classifiers.py runs">Run timing:</div>'
+    : '';
+
   dataEl.innerHTML =
     '<div class="train-row"><span title="How often birdeye matches ground truth on live production frames">Live alignment</span><span class="train-val" style="color:' + alignColor + '">' + liveAlignment + '</span></div>' +
     pendingRow +
     prevInfo +
+    timingHeader + lastRow + avgRow + p99Row +
     '<div style="margin:8px 0 2px;font-size:0.7rem;color:#445" title="Data used in the last training run">Training data:</div>' +
     '<div class="train-row"><span title="Total labeled frames fed to the trainer">Total entries</span><span class="train-val">' + total + '</span></div>' +
     srcRows;
@@ -625,12 +682,19 @@ function renderTrainingStats() {
       + delta(metrics.val_accuracy, pm.val_accuracy, '%', true)
       + '</span></div>';
 
-    html += '<div class="train-row"><span title="Cross-entropy loss on validation set. Lower = more confident correct predictions">Val loss</span><span class="train-val">'
+    html += '<div class="train-row"><span title="Cross-entropy loss on validation set (with class weights). Tracked but not used for best-model selection.">Val loss</span><span class="train-val">'
       + metrics.best_val_loss
       + delta(metrics.best_val_loss, pm.best_val_loss, '', false)
       + '</span></div>';
 
-    html += '<div class="train-row"><span title="Epoch with best val loss / total epochs before early stopping">Epochs</span><span class="train-val">'
+    if (metrics.best_macro_f1 != null) {
+      html += '<div class="train-row"><span title="Macro-averaged F1 across all classes (equal weight per class). Best-model selection criterion — picks the epoch with the highest value.">Macro F1</span><span class="train-val">'
+        + (metrics.best_macro_f1 * 100).toFixed(1) + '%'
+        + delta(metrics.best_macro_f1, pm.best_macro_f1, '%', true)
+        + '</span></div>';
+    }
+
+    html += '<div class="train-row"><span title="Epoch with best macro-F1 / total epochs before early stopping">Epochs</span><span class="train-val">'
       + metrics.best_epoch + ' / ' + metrics.total_epochs + '</span></div>';
 
     // Presence classifier stats

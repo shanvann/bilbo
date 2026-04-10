@@ -39,11 +39,13 @@ Splitting:
 
 import argparse
 import json
+import copy
 import logging
+import random
 import sys
 import time
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -435,6 +437,27 @@ def build_model(num_classes: int):
     return model
 
 
+def _macro_f1(val_preds: list[int], val_labels: list[int], num_classes: int) -> float:
+    """Macro-averaged F1 across all classes (equal weight per class).
+
+    Used as the best-model selection criterion during training so we don't
+    pick a checkpoint that just predicts the majority class — val_loss alone
+    is biased toward majority-class accuracy under heavy class imbalance.
+    """
+    f1s = []
+    for cls_idx in range(num_classes):
+        tp = sum(1 for t, p in zip(val_labels, val_preds) if t == cls_idx and p == cls_idx)
+        fp = sum(1 for t, p in zip(val_labels, val_preds) if t != cls_idx and p == cls_idx)
+        fn = sum(1 for t, p in zip(val_labels, val_preds) if t == cls_idx and p != cls_idx)
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        if precision + recall > 0:
+            f1s.append(2 * precision * recall / (precision + recall))
+        else:
+            f1s.append(0.0)
+    return sum(f1s) / len(f1s) if f1s else 0.0
+
+
 # ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
@@ -477,8 +500,19 @@ def train_classifier(
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
-    best_val_loss = float("inf")
+    # Best-model selection: macro-averaged F1 (equal weight per class), NOT
+    # val_loss. Under heavy class imbalance the weighted CE loss can be lowest
+    # for a near-mode-collapsed checkpoint, while macro-F1 directly rewards
+    # learning every class. See v_20260409_171207 for the failure mode this
+    # avoids: best_val_loss picked an epoch whose deployed weights had
+    # awake→asleep miss rate = 18/18 (100%).
+    best_macro_f1 = -1.0
+    best_val_loss = float("inf")  # tracked for reporting only
+    best_val_acc = 0.0             # tracked for reporting only
     best_state = None
+    best_val_preds: list[int] = []
+    best_val_labels: list[int] = []
+    best_epoch = 0
     patience_counter = 0
 
     for epoch in range(1, epochs + 1):
@@ -507,8 +541,8 @@ def train_classifier(
         val_loss = 0.0
         val_correct = 0
         val_total = 0
-        val_preds = []
-        val_labels = []
+        val_preds: list[int] = []
+        val_labels: list[int] = []
 
         with torch.no_grad():
             for inputs, targets in val_loader:
@@ -525,34 +559,56 @@ def train_classifier(
         val_avg = val_loss / max(val_total, 1)
         train_acc = train_correct / max(train_total, 1)
         val_acc = val_correct / max(val_total, 1)
+        macro_f1 = _macro_f1(val_preds, val_labels, num_classes)
 
-        log.info("Epoch %d/%d — train_loss=%.4f train_acc=%.3f val_loss=%.4f val_acc=%.3f",
-                 epoch, epochs, train_avg, train_acc, val_avg, val_acc)
+        log.info("Epoch %d/%d — train_loss=%.4f train_acc=%.3f "
+                 "val_loss=%.4f val_acc=%.3f macro_f1=%.3f",
+                 epoch, epochs, train_avg, train_acc, val_avg, val_acc, macro_f1)
 
-        if val_avg < best_val_loss:
+        if macro_f1 > best_macro_f1:
+            best_macro_f1 = macro_f1
             best_val_loss = val_avg
-            best_state = model.state_dict().copy()
+            best_val_acc = val_acc
+            # NOTE: deepcopy is REQUIRED. state_dict().copy() is a shallow
+            # copy whose tensor values are references to the live
+            # Parameter.data — subsequent optimizer.step() calls would
+            # silently mutate the saved snapshot in place. Earlier model
+            # versions (e.g. v_20260409_171207) shipped with this bug and
+            # ended up deploying the LAST epoch's weights regardless of
+            # which epoch was nominally "best".
+            best_state = copy.deepcopy(model.state_dict())
+            best_val_preds = list(val_preds)
+            best_val_labels = list(val_labels)
+            best_epoch = epoch
             patience_counter = 0
-            log.info("  → new best model saved (val_loss=%.4f)", val_avg)
+            log.info("  → new best model saved (macro_f1=%.3f, val_loss=%.4f, val_acc=%.3f)",
+                     macro_f1, val_avg, val_acc)
         else:
             patience_counter += 1
             if patience_counter >= patience:
-                log.info("Early stopping at epoch %d", epoch)
+                log.info("Early stopping at epoch %d (best epoch %d, macro_f1=%.3f)",
+                         epoch, best_epoch, best_macro_f1)
                 break
 
     # Save best model
     if best_state is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(best_state, output_path)
-        log.info("Best model saved to %s", output_path)
+        log.info("Best model saved to %s (epoch %d)", output_path, best_epoch)
+
+    # All post-loop metrics describe the SAVED best model, not whichever
+    # epoch happened to run last. Swap in the snapshot we took above.
+    val_preds = best_val_preds
+    val_labels = best_val_labels
 
     # --- Compute final metrics on best model ---
     metrics = {
-        "best_epoch": epoch - patience_counter,
+        "best_epoch": best_epoch,
         "total_epochs": epoch,
         "best_val_loss": round(best_val_loss, 4),
-        "val_accuracy": round(val_correct / max(val_total, 1), 4),
-        "val_total": val_total,
+        "best_macro_f1": round(best_macro_f1, 4),
+        "val_accuracy": round(best_val_acc, 4),
+        "val_total": len(val_labels),
         "train_total": len(train_ds),
     }
 
@@ -660,6 +716,18 @@ def main():
     parser.add_argument("--patience", type=int, default=10)
     args = parser.parse_args()
 
+    # Deterministic training: same seed → same model init, same WeightedRandomSampler
+    # draw order, same Python/numpy randomness. Required for clean baseline-vs-fix
+    # comparisons (the time-block split is already deterministic, but model init
+    # and the sampler are not). CPU-only, so no cudnn determinism flags needed.
+    SEED = 42
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+
+    run_started_at = datetime.now(timezone.utc)
+    run_started_monotonic = time.monotonic()
+
     sleep_log_path = Path(args.sleep_log)
     frames_dir = Path(args.frames)
     output_dir = Path(args.output)
@@ -723,17 +791,46 @@ def main():
 
         log.info("Eye state: train=%d, val=%d", len(train_ds), len(val_ds))
 
-        # Weight eyes_open higher to penalize awake→asleep errors
+        # Inverse-frequency class weights, computed from the actual training set.
+        # This is the recipe that produced v_20260409_181021 — our best eye-state
+        # model so far (macro_f1 = 0.564, awake→asleep miss rate = 50%).
+        # Earlier exploration tried sampler-only rebalancing (class_weights=None)
+        # combined with a headPos filter, which produced a much worse model
+        # (v_20260409_191248: macro_f1 = 0.310, miss rate 94%) because the
+        # filter dropped almost all training data. Keep this recipe until we
+        # have a better-grounded experiment.
+        # Formula: weight[i] = total / (num_classes * count[i]); same as
+        # sklearn class_weight="balanced". Floor count at 1 (div-by-zero
+        # guard) and floor weight at 1.0 (don't downweight majority).
+        eye_class_counts = Counter(s[1] for s in train_ds.samples)
+        eye_total = sum(eye_class_counts.values())
+        eye_num_classes = len(EyeStateDataset.CLASS_NAMES)
+        eye_class_weights = [
+            eye_total / (eye_num_classes * max(eye_class_counts.get(i, 0), 1))
+            for i in range(eye_num_classes)
+        ]
+        eye_class_weights = [max(w, 1.0) for w in eye_class_weights]
+        log.info(
+            "Eye state: train class distribution: %s",
+            {EyeStateDataset.CLASS_NAMES[i]: eye_class_counts.get(i, 0)
+             for i in range(eye_num_classes)},
+        )
+        log.info(
+            "Eye state: inverse-frequency class weights: %s",
+            {EyeStateDataset.CLASS_NAMES[i]: round(eye_class_weights[i], 2)
+             for i in range(eye_num_classes)},
+        )
+
         eye_metrics = train_classifier(
             train_ds, val_ds,
-            num_classes=3,
+            num_classes=eye_num_classes,
             class_names=EyeStateDataset.CLASS_NAMES,
             output_path=output_dir / "eye_state_classifier.pt",
             epochs=args.epochs,
             batch_size=args.batch_size,
             lr=args.lr,
             patience=args.patience,
-            class_weights=[2.0, 1.0, 1.0],  # penalize missing eyes_open
+            class_weights=eye_class_weights,
         )
     else:
         eye_metrics = None
@@ -771,9 +868,14 @@ def main():
 
     # Log training run to training-log.jsonl
     training_log = output_dir / "training-log.jsonl"
+    run_finished_at = datetime.now(timezone.utc)
+    duration_seconds = round(time.monotonic() - run_started_monotonic, 2)
     log_entry = {
         "version": version_id,
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": run_finished_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "started_at": run_started_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "finished_at": run_finished_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "duration_seconds": duration_seconds,
         "entries_total": len(entries),
         "label_sources": dict(source_counts),
         "split": {

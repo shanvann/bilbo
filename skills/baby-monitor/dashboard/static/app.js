@@ -267,6 +267,7 @@ async function loadTimeline() {
 let viewerEntries = [];
 let viewerIndex = 0;
 let trainingData = null; // shared training state from API
+let safetyData = null;   // shared safety stats from API
 let allBlocks = [];      // all merged timeline blocks (for block prev/next)
 let currentBlockIndex = -1;
 
@@ -311,18 +312,66 @@ function showBlockDetail(seg, durStr) {
   panel.scrollIntoView({ behavior: 'smooth' });
 }
 
+const HEAD_CROP_FRAC = 0.30; // must match HEAD_CROP_SIZE in config.py
+
+function drawHeadOverlay(img, overlay, headPos) {
+  // Skip if no data, not visible, or bogus (0,0) default from prompt
+  if (!headPos || typeof headPos.x !== 'number' || typeof headPos.y !== 'number'
+      || headPos.visible === false || (headPos.x === 0 && headPos.y === 0)) {
+    overlay.style.display = 'none';
+    return;
+  }
+  // The image may be scaled to fit via object-fit:contain.
+  // We need the actual rendered size and offset within the container.
+  const natW = img.naturalWidth;
+  const natH = img.naturalHeight;
+  const dispW = img.clientWidth;
+  const dispH = img.clientHeight;
+  if (!natW || !natH || !dispW || !dispH) { overlay.style.display = 'none'; return; }
+
+  // object-fit:contain scaling
+  const scale = Math.min(dispW / natW, dispH / natH);
+  const renderedW = natW * scale;
+  const renderedH = natH * scale;
+  const offsetX = (dispW - renderedW) / 2;
+  const offsetY = (dispH - renderedH) / 2;
+
+  // Head crop is a square: side = HEAD_CROP_FRAC * max(natW, natH)
+  const side = HEAD_CROP_FRAC * Math.max(natW, natH);
+  const half = side / 2;
+
+  // Clamp to frame bounds (matching crop_head_region logic)
+  const cx = headPos.x * natW;
+  const cy = headPos.y * natH;
+  const x1 = Math.max(0, cx - half);
+  const y1 = Math.max(0, cy - half);
+  const x2 = Math.min(natW, cx + half);
+  const y2 = Math.min(natH, cy + half);
+
+  // Convert to rendered pixel coordinates
+  overlay.style.display = 'block';
+  overlay.style.left = (offsetX + x1 * scale) + 'px';
+  overlay.style.top = (offsetY + y1 * scale) + 'px';
+  overlay.style.width = ((x2 - x1) * scale) + 'px';
+  overlay.style.height = ((y2 - y1) * scale) + 'px';
+}
+
 function renderViewer() {
   if (viewerEntries.length === 0) return;
   const e = viewerEntries[viewerIndex];
 
   // Image
   const img = document.getElementById('viewer-img');
+  const headOverlay = document.getElementById('viewer-head-overlay');
   if (e.frame) {
     img.src = frameUrl(e.frame);
     img.style.display = 'block';
     img.onclick = () => showFrameModal(e.frame);
+    // Draw head crop overlay once image loads
+    img.onload = function() { drawHeadOverlay(img, headOverlay, e.headPosition); };
   } else {
     img.style.display = 'none';
+    headOverlay.style.display = 'none';
   }
 
   // Counter
@@ -425,11 +474,10 @@ document.addEventListener('keydown', (ev) => {
   }
 });
 
-// Eye state change from viewer
-document.getElementById('viewer-state').addEventListener('change', async (ev) => {
+// Save eye state label for current frame
+async function saveEyeState(newEyeState) {
   const e = viewerEntries[viewerIndex];
   if (!e) return;
-  const newEyeState = ev.target.value;
   const saved = document.getElementById('viewer-saved');
   saved.textContent = 'saving...';
 
@@ -456,6 +504,16 @@ document.getElementById('viewer-state').addEventListener('change', async (ev) =>
     saved.style.color = '#ff5252';
     console.error('Update error:', err);
   }
+}
+
+// Eye state change from dropdown
+document.getElementById('viewer-state').addEventListener('change', (ev) => {
+  saveEyeState(ev.target.value);
+});
+
+// Confirm button — saves current dropdown value even if unchanged
+document.getElementById('viewer-confirm').addEventListener('click', () => {
+  saveEyeState(document.getElementById('viewer-state').value);
 });
 
 document.getElementById('block-detail-close').addEventListener('click', () => {
@@ -566,129 +624,177 @@ function updateTimelineStats(entries) {
 
 
 // ---------------------------------------------------------------------------
-// Training stats (populated from trainingData after loadTrainingStatus)
+// BIRDEYE Classifiers: combined production + training validation view
 // ---------------------------------------------------------------------------
-function renderTrainingStats() {
-  const section = document.getElementById('training-stats');
+
+function delta(curr, prev, suffix, higherIsBetter) {
+  if (prev == null || curr == null) return '';
+  const diff = curr - prev;
+  if (Math.abs(diff) < 0.001) return '';
+  const sign = diff > 0 ? '+' : '';
+  const good = higherIsBetter ? diff > 0 : diff < 0;
+  const color = good ? 'var(--accent-green)' : 'var(--accent-red)';
+  return ' <span style="font-size:0.7rem;color:' + color + '">' + sign + (diff * 100).toFixed(1) + suffix + '</span>';
+}
+
+function renderClassifiers() {
+  renderDataColumn();
+  renderClassifierColumn('classifier-presence', 'presence');
+  renderClassifierColumn('classifier-eye', 'eye_state');
+
+  // Version + status badge in header
+  const versionEl = document.getElementById('train-version');
+  if (versionEl && trainingData && trainingData.lastMetrics) {
+    const trainedAt = trainingData.lastTrained
+      ? new Date(trainingData.lastTrained).toLocaleString('en-US', {
+          timeZone: 'America/New_York', month: 'short', day: 'numeric',
+          hour: 'numeric', minute: '2-digit', hour12: true })
+      : '?';
+
+    let statusBadge = '';
+    if (trainingData.running) {
+      statusBadge = ' <span style="color:var(--accent-blue);font-size:0.8rem">⟳ training now</span>';
+    } else if (trainingData.runStatus === 'aborted') {
+      statusBadge = ' <span style="color:var(--accent-red);font-size:0.8rem">✕ aborted</span>';
+    } else if (trainingData.runStatus === 'failed') {
+      statusBadge = ' <span style="color:var(--accent-red);font-size:0.8rem">✕ failed</span>';
+    } else if (trainingData.runStatus === 'completed' && trainingData.finishedAt) {
+      const finAt = new Date(trainingData.finishedAt).toLocaleString('en-US', {
+        timeZone: 'America/New_York', month: 'short', day: 'numeric',
+        hour: 'numeric', minute: '2-digit', hour12: true });
+      let durStr = '';
+      if (trainingData.startedAt && trainingData.finishedAt) {
+        const durSec = Math.round((new Date(trainingData.finishedAt) - new Date(trainingData.startedAt)) / 1000);
+        durStr = durSec >= 60 ? ' in ' + Math.floor(durSec / 60) + 'm ' + (durSec % 60) + 's' : ' in ' + durSec + 's';
+      }
+      statusBadge = ' <span style="color:var(--accent-green);font-size:0.8rem">✓ last run ' + finAt + durStr + '</span>';
+    }
+
+    versionEl.innerHTML = '— ' + (trainingData.version || '?') + ' trained ' + trainedAt + statusBadge;
+  }
+}
+
+function renderDataColumn() {
+  const dataEl = document.getElementById('train-data');
   if (!trainingData || !trainingData.lastMetrics) {
-    section.style.display = 'none';
+    dataEl.innerHTML = '<div class="safety-empty">No training data yet.</div>';
     return;
   }
-  section.style.display = '';
 
-  const m = trainingData.lastMetrics;
   const sources = trainingData.lastLabelSources || {};
   const total = trainingData.lastEntriesTotal || 0;
-
-  // Version + trained time + run status
-  const trainedAt = trainingData.lastTrained
-    ? new Date(trainingData.lastTrained).toLocaleString('en-US', {
-        timeZone: 'America/New_York', month: 'short', day: 'numeric',
-        hour: 'numeric', minute: '2-digit', hour12: true })
-    : '?';
-
-  let statusBadge = '';
-  if (trainingData.running) {
-    statusBadge = ' <span style="color:var(--accent-blue);font-size:0.8rem">⟳ training now</span>';
-  } else if (trainingData.runStatus === 'aborted') {
-    statusBadge = ' <span style="color:var(--accent-red);font-size:0.8rem">✕ aborted</span>';
-  } else if (trainingData.runStatus === 'failed') {
-    statusBadge = ' <span style="color:var(--accent-red);font-size:0.8rem">✕ failed</span>';
-  } else if (trainingData.runStatus === 'completed' && trainingData.finishedAt) {
-    const finAt = new Date(trainingData.finishedAt).toLocaleString('en-US', {
-      timeZone: 'America/New_York', month: 'short', day: 'numeric',
-      hour: 'numeric', minute: '2-digit', hour12: true });
-    let durStr = '';
-    if (trainingData.startedAt && trainingData.finishedAt) {
-      const durSec = Math.round((new Date(trainingData.finishedAt) - new Date(trainingData.startedAt)) / 1000);
-      durStr = durSec >= 60 ? ' in ' + Math.floor(durSec / 60) + 'm ' + (durSec % 60) + 's' : ' in ' + durSec + 's';
-    }
-    statusBadge = ' <span style="color:var(--accent-green);font-size:0.8rem">✓ last run ' + finAt + durStr + '</span>';
-  }
-
-  document.getElementById('train-version').innerHTML =
-    (trainingData.version || '?') + ' — trained ' + trainedAt + statusBadge;
-
-  // Data column
-  const dataEl = document.getElementById('train-data');
-  const srcRows = Object.entries(sources).map(([k,v]) =>
-    '<div class="train-row"><span>' + k + '</span><span class="train-val">' + v + '</span></div>'
-  ).join('');
-
-  // Live alignment from the perf-agreement element
-  const liveAlignment = document.getElementById('perf-agreement').textContent;
-  const alignColor = document.getElementById('perf-agreement').style.color || 'var(--text)';
-
-  let prevInfo = '';
-  if (trainingData.prevVersion) {
-    prevInfo = '<div class="train-row"><span title="Previous model for delta comparison">Previous model</span><span class="train-val">' + trainingData.prevVersion + '</span></div>';
-  }
-
-  // Corrections counts
   const pending = trainingData.pendingCorrections || 0;
   const totalCorr = trainingData.totalCorrections || 0;
   const trained = totalCorr - pending;
   const pendingColor = pending > 0 ? 'var(--accent-orange)' : 'var(--text-dim)';
-  const pendingRow = '<div class="train-row"><span title="Corrections made since last training — will be included in the next retrain">Pending changes</span><span class="train-val" style="color:' + pendingColor + '">' + pending + '</span></div>' +
-    '<div class="train-row"><span title="Corrections already used in previous training runs">Previous changes</span><span class="train-val">' + trained + '</span></div>';
 
-  // Run timing: last run + avg/p99 across all recorded runs
-  const durStats = trainingData.trainingDurationStats || {};
-  const lastDurSec = trainingData.lastDurationSeconds;
-  const runCount = durStats.count || 0;
-  const lastRow = lastDurSec != null
-    ? '<div class="train-row"><span title="Wall-clock duration of the most recent training run">Last run</span><span class="train-val">' + formatSeconds(lastDurSec) + '</span></div>'
-    : '';
-  const avgRow = durStats.avg_seconds != null
-    ? '<div class="train-row"><span title="Average wall-clock duration across ' + runCount + ' recorded training runs">Avg training time</span><span class="train-val">' + formatSeconds(durStats.avg_seconds) + '</span></div>'
-    : '';
-  const p99Row = durStats.p99_seconds != null
-    ? '<div class="train-row"><span title="99th-percentile training duration across ' + runCount + ' recorded training runs (linear interpolation)">p99 training time</span><span class="train-val">' + formatSeconds(durStats.p99_seconds) + '</span></div>'
-    : '';
-  const timingHeader = (lastRow || avgRow || p99Row)
-    ? '<div style="margin:8px 0 2px;font-size:0.7rem;color:#445" title="Wall-clock duration of train_classifiers.py runs">Run timing:</div>'
-    : '';
+  let html = '';
+  html += '<div class="train-row"><span title="Corrections made since last training — included in next retrain">Pending corrections</span><span class="train-val" style="color:' + pendingColor + '">' + pending + '</span></div>';
+  html += '<div class="train-row"><span title="Corrections already used in previous training runs">Trained corrections</span><span class="train-val">' + trained + '</span></div>';
 
-  dataEl.innerHTML =
-    '<div class="train-row"><span title="How often birdeye matches ground truth on live production frames">Live alignment</span><span class="train-val" style="color:' + alignColor + '">' + liveAlignment + '</span></div>' +
-    pendingRow +
-    prevInfo +
-    timingHeader + lastRow + avgRow + p99Row +
-    '<div style="margin:8px 0 2px;font-size:0.7rem;color:#445" title="Data used in the last training run">Training data:</div>' +
-    '<div class="train-row"><span title="Total labeled frames fed to the trainer">Total entries</span><span class="train-val">' + total + '</span></div>' +
-    srcRows;
-
-  // Delta helper: show change from previous training
-  function delta(curr, prev, suffix, higherIsBetter) {
-    if (prev == null || curr == null) return '';
-    const diff = curr - prev;
-    if (Math.abs(diff) < 0.001) return '';
-    const sign = diff > 0 ? '+' : '';
-    const good = higherIsBetter ? diff > 0 : diff < 0;
-    const color = good ? 'var(--accent-green)' : 'var(--accent-red)';
-    return ' <span style="font-size:0.7rem;color:' + color + '">' + sign + (diff * 100).toFixed(1) + suffix + '</span>';
+  if (trainingData.prevVersion) {
+    html += '<div class="train-row"><span title="Previous model for delta comparison">Previous model</span><span class="train-val">' + trainingData.prevVersion + '</span></div>';
   }
 
-  const prev = trainingData.prevMetrics || {};
+  // Run timing
+  const durStats = trainingData.trainingDurationStats || {};
+  const lastDurSec = trainingData.lastDurationSeconds;
+  if (lastDurSec != null || durStats.avg_seconds != null) {
+    html += '<div style="margin:8px 0 2px;font-size:0.7rem;color:#445">Run timing:</div>';
+    if (lastDurSec != null)
+      html += '<div class="train-row"><span>Last run</span><span class="train-val">' + formatSeconds(lastDurSec) + '</span></div>';
+    if (durStats.avg_seconds != null)
+      html += '<div class="train-row"><span>Avg (' + (durStats.count || 0) + ' runs)</span><span class="train-val">' + formatSeconds(durStats.avg_seconds) + '</span></div>';
+    if (durStats.p99_seconds != null)
+      html += '<div class="train-row"><span>p99</span><span class="train-val">' + formatSeconds(durStats.p99_seconds) + '</span></div>';
+  }
 
-  // Helper to render per-class metrics with definitions and deltas
-  function renderClassifier(el, metrics, prevMetrics) {
-    if (!metrics) { el.innerHTML = 'No data'; return; }
+  // Training data sources
+  const srcRows = Object.entries(sources).map(([k,v]) =>
+    '<div class="train-row"><span>' + k + '</span><span class="train-val">' + v + '</span></div>'
+  ).join('');
+  if (total > 0) {
+    html += '<div style="margin:8px 0 2px;font-size:0.7rem;color:#445">Training data:</div>';
+    html += '<div class="train-row"><span>Total entries</span><span class="train-val">' + total + '</span></div>';
+    html += srcRows;
+  }
+
+  dataEl.innerHTML = html;
+}
+
+function renderClassifierColumn(elId, type) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+
+  const isPresence = type === 'presence';
+  const classes = isPresence ? ['not_present', 'present'] : ['eyes_open', 'eyes_closed', 'face_not_visible'];
+  let html = '';
+
+  // --- Production metrics from safety stats ---
+  const safety = safetyData ? (isPresence ? safetyData.presence : safetyData.eyeState) : null;
+
+  if (safety) {
+    const cloud = safety.vsCloud || {};
+    const macroF1 = cloud.macroF1;
+    const accuracy = cloud.accuracy;
+    const macroThresh = isPresence ? [0.90, 0.97] : [0.60, 0.85];
+    const accThresh = isPresence ? [0.90, 0.97] : [0.75, 0.90];
+
+    html += '<div class="safety-headline">';
+    if (isPresence) {
+      html += '<div class="safety-headline-row" title="Overall fraction of frames where birdeye and cloud API agree on present vs not_present."><span class="safety-headline-label">Accuracy</span>';
+      html += '<span class="safety-headline-value ' + _safetyClass(accuracy, accThresh) + '">' + (accuracy != null ? Math.round(accuracy * 100) + '%' : '--') + '</span></div>';
+      html += '<div class="safety-headline-row" title="Macro-averaged F1 across {not_present, present}. Equal weight per class."><span class="safety-headline-label">Macro F1</span>';
+      html += '<span class="safety-headline-value ' + _safetyClass(macroF1, macroThresh) + '">' + (macroF1 != null ? (macroF1 * 100).toFixed(0) + '%' : '--') + '</span></div>';
+    } else {
+      html += '<div class="safety-headline-row" title="Macro-averaged F1 across {eyes_open, eyes_closed, face_not_visible}. Equal weight per class — not fooled by class imbalance."><span class="safety-headline-label">Macro F1</span>';
+      html += '<span class="safety-headline-value ' + _safetyClass(macroF1, macroThresh) + '">' + (macroF1 != null ? (macroF1 * 100).toFixed(0) + '%' : '--') + '</span></div>';
+      html += '<div class="safety-headline-row" title="Overall fraction of frames where birdeye eye-state prediction matches cloud API. Biased toward majority class."><span class="safety-headline-label">Accuracy</span>';
+      html += '<span class="safety-headline-value ' + _safetyClass(accuracy, accThresh) + '">' + (accuracy != null ? Math.round(accuracy * 100) + '%' : '--') + '</span></div>';
+    }
+    html += '</div>';
+
+    html += '<div class="safety-source-label">vs Cloud API</div>';
+    html += _renderConfusion(cloud, classes);
+    html += _renderPerClass(cloud, classes);
+
+    html += '<div class="safety-source-label">vs Corrections</div>';
+    if (safety.vsCorrections && safety.vsCorrections.total > 0) {
+      const c = safety.vsCorrections;
+      const corrThresh = isPresence ? [0.90, 0.97] : [0.75, 0.90];
+      html += '<div class="safety-headline-row" style="margin-bottom:4px">';
+      html += '<span class="safety-headline-label">Accuracy</span>';
+      html += '<span class="safety-headline-value ' + _safetyClass(c.accuracy, corrThresh) + '">'
+        + Math.round(c.accuracy * 100) + '% (' + c.total + ' samples)</span>';
+      html += '</div>';
+      html += _renderCorrectionsByClass(c.byClass, classes);
+    } else {
+      html += '<div class="safety-empty">No corrections data yet.</div>';
+    }
+  } else {
+    html += '<div class="safety-empty">Loading production metrics...</div>';
+  }
+
+  // --- Training validation metrics ---
+  const metrics = trainingData && trainingData.lastMetrics
+    ? (isPresence ? trainingData.lastMetrics.presence : trainingData.lastMetrics.eye_state)
+    : null;
+  const prevMetrics = trainingData && trainingData.prevMetrics
+    ? (isPresence ? trainingData.prevMetrics.presence : trainingData.prevMetrics.eye_state)
+    : null;
+
+  if (metrics) {
     const pm = prevMetrics || {};
-    let html = '';
+    html += '<div class="safety-source-label" style="margin-top:14px">Training Validation</div>';
+    html += '<div class="train-details">';
 
-    html += '<div class="train-row"><span title="% of validation samples correctly classified during training">Train accuracy</span><span class="train-val">'
+    html += '<div class="train-row"><span title="% of validation samples correctly classified during training">Val accuracy</span><span class="train-val">'
       + (metrics.val_accuracy * 100).toFixed(1) + '%'
       + delta(metrics.val_accuracy, pm.val_accuracy, '%', true)
       + '</span></div>';
 
-    html += '<div class="train-row"><span title="Cross-entropy loss on validation set (with class weights). Tracked but not used for best-model selection.">Val loss</span><span class="train-val">'
-      + metrics.best_val_loss
-      + delta(metrics.best_val_loss, pm.best_val_loss, '', false)
-      + '</span></div>';
-
     if (metrics.best_macro_f1 != null) {
-      html += '<div class="train-row"><span title="Macro-averaged F1 across all classes (equal weight per class). Best-model selection criterion — picks the epoch with the highest value.">Macro F1</span><span class="train-val">'
+      html += '<div class="train-row"><span title="Macro-averaged F1 on validation set. Best-model selection criterion.">Macro F1</span><span class="train-val">'
         + (metrics.best_macro_f1 * 100).toFixed(1) + '%'
         + delta(metrics.best_macro_f1, pm.best_macro_f1, '%', true)
         + '</span></div>';
@@ -697,38 +803,33 @@ function renderTrainingStats() {
     html += '<div class="train-row"><span title="Epoch with best macro-F1 / total epochs before early stopping">Epochs</span><span class="train-val">'
       + metrics.best_epoch + ' / ' + metrics.total_epochs + '</span></div>';
 
-    // Presence classifier stats
-    if (metrics.out_labeled_as_in != null) {
-      html += '<div class="train-row"><span title="Bassinet was empty but model said baby present (false positive)">Out labeled as In</span><span class="train-val">' + metrics.out_labeled_as_in + '</span></div>';
-    }
-    if (metrics.in_labeled_as_out != null) {
-      html += '<div class="train-row"><span title="Baby was present but model said empty (false negative — misses baby)">In labeled as Out</span><span class="train-val">' + metrics.in_labeled_as_out + '</span></div>';
-    }
-    if (metrics.class_split) {
-      const cs = metrics.class_split;
-      html += '<div class="train-row"><span title="How many present vs not_present samples in the validation set">Class split</span><span class="train-val">' + cs.present + ' in / ' + cs.not_present + ' out (' + cs.pct_present + '% present)</span></div>';
-    }
-    if (metrics.total_val_labels != null) {
-      html += '<div class="train-row"><span title="Total validation samples">Total val labels</span><span class="train-val">' + metrics.total_val_labels + '</span></div>';
-    }
+    html += '<div class="train-row"><span title="Cross-entropy loss on validation set (tracked, not used for selection)">Val loss</span><span class="train-val">'
+      + metrics.best_val_loss
+      + delta(metrics.best_val_loss, pm.best_val_loss, '', false)
+      + '</span></div>';
 
     if (metrics.awake_asleep_miss_rate != null) {
       const missClass = metrics.awake_asleep_miss_rate > 0.05 ? 'train-crit' : 'train-val';
-      html += '<div class="train-row"><span title="CRITICAL: % of truly-awake frames the model predicted as asleep. Must be &lt;5% for safety.">Awake→Asleep misses</span><span class="' + missClass + '">'
+      html += '<div class="train-row"><span title="CRITICAL: % of truly-awake frames predicted as asleep. Must be &lt;5%.">Awake→Asleep misses</span><span class="' + missClass + '">'
         + metrics.awake_asleep_misses + ' (' + (metrics.awake_asleep_miss_rate * 100).toFixed(0) + '%)'
         + delta(metrics.awake_asleep_miss_rate, pm.awake_asleep_miss_rate, '%', false)
         + '</span></div>';
     }
-
     if (metrics.asleep_awake_false_alarm_rate != null) {
-      html += '<div class="train-row"><span title="% of truly-asleep frames the model predicted as awake. Causes unnecessary alerts but not dangerous.">Asleep→Awake false alarms</span><span class="train-val">'
+      html += '<div class="train-row"><span title="% of truly-asleep frames predicted as awake. Causes unnecessary alerts but not dangerous.">Asleep→Awake false alarms</span><span class="train-val">'
         + metrics.asleep_awake_false_alarms + ' (' + (metrics.asleep_awake_false_alarm_rate * 100).toFixed(0) + '%)'
         + delta(metrics.asleep_awake_false_alarm_rate, pm.asleep_awake_false_alarm_rate, '%', false)
         + '</span></div>';
     }
+    if (metrics.out_labeled_as_in != null) {
+      html += '<div class="train-row"><span title="False positive: model said present but baby was out">Out→In</span><span class="train-val">' + metrics.out_labeled_as_in + '</span></div>';
+    }
+    if (metrics.in_labeled_as_out != null) {
+      html += '<div class="train-row"><span title="False negative: model missed baby">In→Out</span><span class="train-val">' + metrics.in_labeled_as_out + '</span></div>';
+    }
 
     if (metrics.per_class) {
-      html += '<div style="margin-top:6px;font-size:0.75rem;color:var(--text-dim)" title="P=precision (of predicted X, how many were truly X), R=recall (of truly X, how many were found), F1=harmonic mean">Per-class P / R / F1:</div>';
+      html += '<div style="margin-top:4px;font-size:0.72rem;color:var(--text-dim)">Per-class P / R / F1:</div>';
       for (const [cls, s] of Object.entries(metrics.per_class)) {
         const ps = pm.per_class && pm.per_class[cls];
         html += '<div class="train-row"><span>' + cls + ' <span style="color:#556">(' + s.support + ')</span></span><span class="train-val">'
@@ -737,11 +838,11 @@ function renderTrainingStats() {
           + '</span></div>';
       }
     }
-    el.innerHTML = html;
+
+    html += '</div>';
   }
 
-  renderClassifier(document.getElementById('train-presence'), m.presence, prev.presence);
-  renderClassifier(document.getElementById('train-eye'), m.eye_state, prev.eye_state);
+  el.innerHTML = html;
 }
 
 // ---------------------------------------------------------------------------
@@ -846,7 +947,7 @@ async function loadTrainingStatus() {
       }
     }
 
-    renderTrainingStats();
+    renderClassifiers();
     return data;
   } catch (e) {
     console.error('Training status error:', e);
@@ -905,17 +1006,6 @@ async function loadMonitorStats() {
     const rangeLabel = {'0.167':'10m','0.5':'30m','1':'1h','12':'12h','24':'24h','168':'1w'}[hours] || hours+'h';
     document.getElementById('perf-period').textContent = '(' + rangeLabel + ', ' + d.total + ' frames)';
 
-    // Alignment (the key metric — birdeye vs ground truth)
-    const agEl = document.getElementById('perf-agreement');
-    if (d.shadow && d.shadow.total > 0) {
-      const pct = Math.round(d.shadow.agreementRate * 100);
-      agEl.textContent = pct + '% (' + d.shadow.agreed + '/' + d.shadow.total + ')';
-      agEl.style.color = pct >= 95 ? 'var(--accent-green)' : pct >= 80 ? 'var(--accent-orange)' : 'var(--accent-red)';
-    } else {
-      agEl.textContent = 'No data';
-      agEl.style.color = '';
-    }
-
     // Prod cost
     document.getElementById('perf-cloud-cost').textContent = d.cost
       ? '$' + d.cost.estCost.toFixed(2) + ' (' + d.cost.apiCalls + ' calls)'
@@ -924,13 +1014,6 @@ async function loadMonitorStats() {
     // Shadow latency
     document.getElementById('perf-latency').textContent =
       d.timing ? Math.round(d.timing.avg * 1000) + 'ms' : '--';
-
-    // (Misaligned and Eye Confidence tiles removed — replaced by the
-    // Safety panel which shows per-class confusion + safety metrics.)
-
-    // Corrections pending
-    document.getElementById('perf-corrections').textContent =
-      trainingData ? trainingData.pendingCorrections : '--';
 
     // Gaps
     document.getElementById('perf-gaps').textContent = d.gaps != null ? d.gaps : '--';
@@ -1105,116 +1188,26 @@ function _renderCorrectionsByClass(byClass, classOrder) {
   return html;
 }
 
-function renderEyeStateColumn(eyeState) {
-  const cls = ['eyes_open', 'eyes_closed', 'face_not_visible'];
-  const correctionsCls = ['eyes_open', 'eyes_closed', 'face_not_visible'];
-
-  // Headline: macro F1 + accuracy (raw classifier quality — no derived
-  // Awake/Asleep concept, which requires more logic and is decoupled).
-  const cloud = eyeState.vsCloud || {};
-  const macroF1 = cloud.macroF1;
-  const accuracy = cloud.accuracy;
-
-  const macroClass = _safetyClass(macroF1, [0.60, 0.85]);
-  const accClass = _safetyClass(accuracy, [0.75, 0.90]);
-
-  let html = '<h3>Eye State</h3>';
-  html += '<div class="safety-headline">';
-  html += '<div class="safety-headline-row" title="Macro-averaged F1 across {eyes_open, eyes_closed, face_not_visible}. Equal weight per class — doesn\'t get fooled by class imbalance.">';
-  html +=   '<span class="safety-headline-label">Macro F1</span>';
-  html +=   '<span class="safety-headline-value ' + macroClass + '">' + (macroF1 != null ? (macroF1 * 100).toFixed(0) + '%' : '--') + '</span>';
-  html += '</div>';
-  html += '<div class="safety-headline-row" title="Overall fraction of frames where birdeye\'s eye-state prediction matches the cloud API. Biased toward the majority class — see Macro F1 and the per-class breakdown below.">';
-  html +=   '<span class="safety-headline-label">Accuracy</span>';
-  html +=   '<span class="safety-headline-value ' + accClass + '">' + (accuracy != null ? Math.round(accuracy * 100) + '%' : '--') + '</span>';
-  html += '</div>';
-  html += '</div>';
-
-  // Vs cloud
-  html += '<div class="safety-source-label">vs Cloud API</div>';
-  html += _renderConfusion(eyeState.vsCloud, cls);
-  html += _renderPerClass(eyeState.vsCloud, cls);
-
-  // Vs corrections
-  html += '<div class="safety-source-label">vs Corrections</div>';
-  if (eyeState.vsCorrections && eyeState.vsCorrections.total > 0) {
-    const c = eyeState.vsCorrections;
-    html += '<div class="safety-headline-row" style="margin-bottom:4px">';
-    html +=   '<span class="safety-headline-label">Accuracy</span>';
-    html +=   '<span class="safety-headline-value ' + _safetyClass(c.accuracy, [0.75, 0.90]) + '">'
-            + Math.round(c.accuracy * 100) + '% (' + c.total + ' samples)</span>';
-    html += '</div>';
-    html += _renderCorrectionsByClass(c.byClass, correctionsCls);
-  } else {
-    html += '<div class="safety-empty">No data yet — populates on next retrain.</div>';
-  }
-  return html;
-}
-
-function renderPresenceColumn(presence) {
-  const cls = ['not_present', 'present'];
-  const correctionsCls = ['not_present', 'present'];
-
-  const acc = presence.vsCloud ? presence.vsCloud.accuracy : null;
-  const macroF1 = presence.vsCloud ? presence.vsCloud.macroF1 : null;
-
-  const accClass = _safetyClass(acc, [0.90, 0.97]);
-  const macroClass = _safetyClass(macroF1, [0.90, 0.97]);
-
-  let html = '<h3>Presence</h3>';
-  html += '<div class="safety-headline">';
-  html += '<div class="safety-headline-row" title="Overall fraction of frames where birdeye and cloud API agree on present vs not_present.">';
-  html +=   '<span class="safety-headline-label">Accuracy</span>';
-  html +=   '<span class="safety-headline-value ' + accClass + '">' + (acc != null ? Math.round(acc * 100) + '%' : '--') + '</span>';
-  html += '</div>';
-  html += '<div class="safety-headline-row" title="Macro-averaged F1 across {not_present, present}. Equal weight per class.">';
-  html +=   '<span class="safety-headline-label">Macro F1</span>';
-  html +=   '<span class="safety-headline-value ' + macroClass + '">' + (macroF1 != null ? (macroF1 * 100).toFixed(0) + '%' : '--') + '</span>';
-  html += '</div>';
-  html += '</div>';
-
-  // Vs cloud
-  html += '<div class="safety-source-label">vs Cloud API</div>';
-  html += _renderConfusion(presence.vsCloud, cls);
-  html += _renderPerClass(presence.vsCloud, cls);
-
-  // Vs corrections
-  html += '<div class="safety-source-label">vs Corrections</div>';
-  if (presence.vsCorrections && presence.vsCorrections.total > 0) {
-    const c = presence.vsCorrections;
-    html += '<div class="safety-headline-row" style="margin-bottom:4px">';
-    html +=   '<span class="safety-headline-label">Accuracy</span>';
-    html +=   '<span class="safety-headline-value ' + _safetyClass(c.accuracy, [0.90, 0.97]) + '">'
-            + Math.round(c.accuracy * 100) + '% (' + c.total + ' samples)</span>';
-    html += '</div>';
-    html += _renderCorrectionsByClass(c.byClass, correctionsCls);
-  } else {
-    html += '<div class="safety-empty">No data yet — populates on next retrain.</div>';
-  }
-  return html;
-}
-
 async function loadSafetyStats() {
   try {
     const hours = document.getElementById('safety-range').value;
     const res = await fetch('/api/safety-stats?hours=' + hours);
-    const d = await res.json();
+    safetyData = await res.json();
 
     const rangeLabel = hours === '24' ? '24h' : '7d';
-    const total = d.shadowTotal || 0;
+    const total = safetyData.shadowTotal || 0;
     document.getElementById('safety-period').textContent = '(' + rangeLabel + ', ' + total + ' shadow frames)';
-    document.getElementById('safety-deployed').textContent = d.deployedVersion ? '— ' + d.deployedVersion : '';
+    document.getElementById('safety-deployed').textContent = safetyData.deployedVersion ? '— ' + safetyData.deployedVersion : '';
 
     const rollbackBadge = document.getElementById('safety-rollback-badge');
-    if (d.rolledBack) {
-      rollbackBadge.textContent = '⚠ rolled back from ' + d.latestTrainedVersion;
+    if (safetyData.rolledBack) {
+      rollbackBadge.textContent = '⚠ rolled back from ' + safetyData.latestTrainedVersion;
       rollbackBadge.style.display = '';
     } else {
       rollbackBadge.style.display = 'none';
     }
 
-    document.getElementById('safety-eye').innerHTML = renderEyeStateColumn(d.eyeState || {});
-    document.getElementById('safety-presence').innerHTML = renderPresenceColumn(d.presence || {});
+    renderClassifiers();
   } catch (e) {
     console.error('Safety stats error:', e);
   }

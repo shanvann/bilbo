@@ -160,18 +160,17 @@ Live at `http://localhost:5555`. Runs as a persistent launchd service.
    - Per-frame: detection method, model version, eye state label, retrain status badge
    - Block-level label override (apply to all frames at once)
    - Pending retrain count per block
-5. **Model Performance** — selectable time range (10m to 1 week):
-   - Alignment rate (shadow birdeye vs ground truth)
-   - Misaligned count, prod cost, shadow latency, eye confidence
-   - Pending corrections count, monitoring gaps
+5. **BIRDEYE Classifiers** — combined production + training view (24h/7d):
+   - Three columns: Data & Training | Presence | Eye State
+   - Per-classifier: production headlines (Macro F1, Accuracy from shadow)
+   - Confusion matrices vs Cloud API, per-class P/R/F1
+   - vs Corrections accuracy
+   - Training validation: val accuracy, macro F1, epochs, val loss, error rates, per-class with deltas
+   - Corrections tracking, training data sources, run timing
+   - Model version, rollback badge, retrain button + abort
+6. **Pipeline** — selectable time range (10m to 1 week):
+   - Prod cost, shadow latency, monitoring gaps
    - Stacked bars: production pipeline + shadow alignment
-6. **Training Stats** — last training run details:
-   - Live alignment, pending/previous corrections, training data sources
-   - Per-classifier: train accuracy, val loss, epochs, per-class P/R/F1
-   - Presence: in-labeled-as-out, out-labeled-as-in, class split
-   - Eye state: awake→asleep miss rate, asleep→awake false alarms
-   - Deltas from previous model (green/red)
-   - Retrain button + abort, training duration, status
 7. **Recent Events** — state transitions (placed/removed/fell asleep/woke up), selectable count
 
 **Training APIs:**

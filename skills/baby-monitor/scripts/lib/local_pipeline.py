@@ -112,11 +112,7 @@ def try_local_analysis(frame_path: Path) -> dict | None:
         log.error("%s: classifier load failed: %s", BIRDEYE, e)
         return None
 
-    from .classifiers import (
-        crop_bassinet,
-        crop_head_region,
-        load_head_state,
-    )
+    from .classifiers import crop_bassinet
     import cv2
 
     timings = {}
@@ -145,18 +141,19 @@ def try_local_analysis(frame_path: Path) -> dict | None:
                  BIRDEYE, presence.confidence, timings["total"])
         return _build_entry("not_present", presence, None, timings)
 
-    # --- Classifier 2: eye state (head-region crop) ---
+    # --- Classifier 2: eye state (bassinet crop) ---
+    # Load head position for recording in entry (not used for cropping)
+    from .classifiers import load_head_state
     head_pos = load_head_state()
-    log.debug("%s: head position x=%.3f y=%.3f", BIRDEYE, head_pos["x"], head_pos["y"])
 
     t2 = time.monotonic()
-    head_crop = crop_head_region(frame, head_pos)
-    eye_result = eye_clf.classify(head_crop)
+    bass_crop = crop_bassinet(frame)
+    eye_result = eye_clf.classify(bass_crop)
     timings["eye_state"] = time.monotonic() - t2
 
-    log.info("%s: eye_state %.3fs  state=%s conf=%.3f probs=%s head=(%.2f,%.2f)",
+    log.info("%s: eye_state %.3fs  state=%s conf=%.3f probs=%s (bassinet crop)",
              BIRDEYE, timings["eye_state"], eye_result.state, eye_result.confidence,
-             eye_result.probabilities, head_pos["x"], head_pos["y"])
+             eye_result.probabilities)
 
     timings["total"] = time.monotonic() - t0
 

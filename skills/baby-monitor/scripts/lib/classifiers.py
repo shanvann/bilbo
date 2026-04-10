@@ -120,15 +120,25 @@ def crop_head_region(frame: np.ndarray, head_pos: dict | None = None) -> np.ndar
 # Model building
 # ---------------------------------------------------------------------------
 
-def _build_mobilenet(num_classes: int) -> nn.Module:
-    """Build MobileNetV3-Small with custom head."""
-    model = models.mobilenet_v3_small(weights=None)
+def _build_mobilenet(num_classes: int, large: bool = False) -> nn.Module:
+    """Build MobileNetV3 with custom head."""
+    if large:
+        model = models.mobilenet_v3_large(weights=None)
+    else:
+        model = models.mobilenet_v3_small(weights=None)
     in_features = model.classifier[3].in_features
     model.classifier[3] = nn.Linear(in_features, num_classes)
     return model
 
 
 _INFERENCE_TRANSFORM = transforms.Compose([
+    transforms.ToPILImage(),
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+
+_EYE_STATE_INFERENCE_TRANSFORM = transforms.Compose([
     transforms.ToPILImage(),
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -201,7 +211,7 @@ class EyeStateResult:
 
 
 class EyeStateClassifier:
-    """MobileNetV3-Small: head crop → eyes_open / eyes_closed / face_not_visible."""
+    """MobileNetV3-Small: bassinet crop → eyes_open / eyes_closed / face_not_visible."""
 
     def __init__(self, model_path: Path, device: str = "cpu"):
         self.device = device
@@ -217,9 +227,9 @@ class EyeStateClassifier:
         self.model.to(device)
         self.model.eval()
 
-    def classify(self, head_crop: np.ndarray) -> EyeStateResult:
-        rgb = cv2.cvtColor(head_crop, cv2.COLOR_BGR2RGB)
-        tensor = _INFERENCE_TRANSFORM(rgb).unsqueeze(0).to(self.device)
+    def classify(self, crop: np.ndarray) -> EyeStateResult:
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        tensor = _EYE_STATE_INFERENCE_TRANSFORM(rgb).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
             logits = self.model(tensor)

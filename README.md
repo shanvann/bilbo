@@ -116,6 +116,7 @@ monitor.py                           # full pipeline (cron runs this)
 monitor.py --dry-run                 # test without writing
 monitor.py --retrain                 # retrain with pending corrections
 monitor.py --retrain --force         # retrain even if no new corrections (e.g. after code changes)
+monitor.py --eval-corrections        # re-eval the deployed model on corrections (no retrain; useful after a rollback)
 monitor.py --audit --sample 50       # spot-check birdeye vs cloud API
 monitor.py --list-models             # show model versions + metrics
 monitor.py --rollback VERSION        # revert to previous model
@@ -280,10 +281,10 @@ Captured frames are needed for retraining classifiers, backtesting detection cha
 |-----------|------------|----------|
 | 1 day | ~0.4 GB | Debugging only |
 | 3 days | ~1.1 GB | Short-term review |
-| **7 days (chosen)** | **~2.5 GB** | **Retraining, backtest, weekly reports** |
-| 30 days | ~10 GB | Full history (not worth the disk) |
+| 7 days | ~1.1 GB | Weekly retraining, single-week backtests |
+| **~67 days (chosen)** | **10 GB cap** | **Multi-week backtests + retraining on long history** |
 
-**Decision:** 7-day retention with 6GB cap. Enough for weekly retraining cycles, full-week backtests, and reviewing any alert from the past week.
+**Decision:** 10 GB cap (raised from 6 GB on 2026-04-09). At 4-min intervals and ~433 KB/frame this holds roughly 67 days of frames, which is enough for multi-week backtest comparisons and for retraining on a long-tail of historical samples. Oldest-first pruning kicks in once the directory exceeds the cap.
 
 ### Storage: SQLite vs JSONL
 
@@ -391,7 +392,7 @@ All data files are gitignored:
 - `data/monitor.db` — SQLite database (primary storage)
 - `data/sleep-log.jsonl` — JSONL backup of all entries
 - `data/corrections.jsonl` — JSONL backup of corrections
-- `data/frames/` — captured camera frames (6GB cap, ~7 days)
+- `data/frames/` — captured camera frames (10 GB cap, ~67 days at 4-min intervals)
 - `data/training-state.json` — PID-based training run state
 - `data/head-state.json` — last known head position
 - `*.log` — system and cron logs (rotating, 5MB x 3)

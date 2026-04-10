@@ -916,10 +916,6 @@ async function loadMonitorStats() {
       agEl.style.color = '';
     }
 
-    // Disagreements
-    document.getElementById('perf-disagreements').textContent =
-      d.shadow ? d.shadow.disagreed : '--';
-
     // Prod cost
     document.getElementById('perf-cloud-cost').textContent = d.cost
       ? '$' + d.cost.estCost.toFixed(2) + ' (' + d.cost.apiCalls + ' calls)'
@@ -929,9 +925,8 @@ async function loadMonitorStats() {
     document.getElementById('perf-latency').textContent =
       d.timing ? Math.round(d.timing.avg * 1000) + 'ms' : '--';
 
-    // Eye confidence
-    document.getElementById('perf-confidence').textContent =
-      d.confidence && d.confidence.eye ? d.confidence.eye.avg.toFixed(2) : '--';
+    // (Misaligned and Eye Confidence tiles removed — replaced by the
+    // Safety panel which shows per-class confusion + safety metrics.)
 
     // Corrections pending
     document.getElementById('perf-corrections').textContent =
@@ -1013,6 +1008,219 @@ function updateCountdown() {
 setInterval(updateCountdown, 1000);
 
 // ---------------------------------------------------------------------------
+// Safety panel: BIRDEYE-vs-ground-truth, per classifier
+// ---------------------------------------------------------------------------
+
+// Display labels for the various class names returned by /api/safety-stats.
+const SAFETY_CLASS_LABELS = {
+  not_present: 'not present',
+  present: 'present',
+  asleep: 'Asleep',
+  awake: 'Awake',
+  eyes_open: 'eyes_open',
+  eyes_closed: 'eyes_closed',
+  face_not_visible: 'face_not_visible',
+};
+
+function _safetyClass(value, thresholds) {
+  // thresholds: [warn, good]. Above good = good, between = warn, below warn = bad.
+  if (value == null || isNaN(value)) return '';
+  if (value >= thresholds[1]) return 'good';
+  if (value >= thresholds[0]) return 'warn';
+  return 'bad';
+}
+
+function _renderConfusion(panel, classes) {
+  if (!panel || !panel.confusion || panel.total === 0) {
+    return '<div class="safety-empty">No samples in window.</div>';
+  }
+  const cm = panel.confusion;
+
+  let html = '<table class="safety-cm"><thead><tr>';
+  html += '<th></th>';
+  for (const c of classes) {
+    html += '<th>' + (SAFETY_CLASS_LABELS[c] || c) + '</th>';
+  }
+  html += '<th>n</th></tr></thead><tbody>';
+
+  for (const truth of classes) {
+    const row = cm[truth] || {};
+    const rowTotal = classes.reduce((a, c) => a + (row[c] || 0), 0);
+    html += '<tr><td class="cm-row-label">' + (SAFETY_CLASS_LABELS[truth] || truth) + '</td>';
+    for (const pred of classes) {
+      const v = row[pred] || 0;
+      let cls;
+      if (v === 0) {
+        cls = 'cm-zero';
+      } else if (truth === pred) {
+        cls = 'cm-correct';
+      } else {
+        const ratio = rowTotal > 0 ? v / rowTotal : 0;
+        if (ratio < 0.1) cls = 'cm-error-low';
+        else if (ratio < 0.3) cls = 'cm-error-mid';
+        else cls = 'cm-error-high';
+      }
+      html += '<td class="' + cls + '">' + v + '</td>';
+    }
+    html += '<td class="cm-row-label">' + rowTotal + '</td></tr>';
+  }
+  html += '</tbody></table>';
+  return html;
+}
+
+function _renderPerClass(panel, classes) {
+  if (!panel || !panel.perClass || panel.total === 0) return '';
+  let html = '<table class="safety-pc"><thead><tr>';
+  html += '<th>class</th><th>P</th><th>R</th><th>F1</th><th>n</th>';
+  html += '</tr></thead><tbody>';
+  for (const c of classes) {
+    const m = panel.perClass[c];
+    if (!m) continue;
+    html += '<tr><td>' + (SAFETY_CLASS_LABELS[c] || c) + '</td>';
+    html += '<td>' + (m.precision * 100).toFixed(0) + '%</td>';
+    html += '<td>' + (m.recall * 100).toFixed(0) + '%</td>';
+    html += '<td>' + (m.f1 * 100).toFixed(0) + '%</td>';
+    html += '<td>' + m.support + '</td></tr>';
+  }
+  html += '</tbody></table>';
+  return html;
+}
+
+function _renderCorrectionsByClass(byClass, classOrder) {
+  // Renders a small table for the corrections-side per-class breakdown.
+  if (!byClass) return '';
+  let html = '<table class="safety-pc"><thead><tr>';
+  html += '<th>class</th><th>correct</th><th>n</th><th>%</th>';
+  html += '</tr></thead><tbody>';
+  for (const c of classOrder) {
+    const v = byClass[c];
+    if (!v || v.total === 0) continue;
+    const pct = Math.round((v.correct / v.total) * 100);
+    html += '<tr><td>' + (SAFETY_CLASS_LABELS[c] || c) + '</td>';
+    html += '<td>' + v.correct + '</td>';
+    html += '<td>' + v.total + '</td>';
+    html += '<td>' + pct + '%</td></tr>';
+  }
+  html += '</tbody></table>';
+  return html;
+}
+
+function renderEyeStateColumn(eyeState) {
+  const cls = ['eyes_open', 'eyes_closed', 'face_not_visible'];
+  const correctionsCls = ['eyes_open', 'eyes_closed', 'face_not_visible'];
+
+  // Headline: macro F1 + accuracy (raw classifier quality — no derived
+  // Awake/Asleep concept, which requires more logic and is decoupled).
+  const cloud = eyeState.vsCloud || {};
+  const macroF1 = cloud.macroF1;
+  const accuracy = cloud.accuracy;
+
+  const macroClass = _safetyClass(macroF1, [0.60, 0.85]);
+  const accClass = _safetyClass(accuracy, [0.75, 0.90]);
+
+  let html = '<h3>Eye State</h3>';
+  html += '<div class="safety-headline">';
+  html += '<div class="safety-headline-row" title="Macro-averaged F1 across {eyes_open, eyes_closed, face_not_visible}. Equal weight per class — doesn\'t get fooled by class imbalance.">';
+  html +=   '<span class="safety-headline-label">Macro F1</span>';
+  html +=   '<span class="safety-headline-value ' + macroClass + '">' + (macroF1 != null ? (macroF1 * 100).toFixed(0) + '%' : '--') + '</span>';
+  html += '</div>';
+  html += '<div class="safety-headline-row" title="Overall fraction of frames where birdeye\'s eye-state prediction matches the cloud API. Biased toward the majority class — see Macro F1 and the per-class breakdown below.">';
+  html +=   '<span class="safety-headline-label">Accuracy</span>';
+  html +=   '<span class="safety-headline-value ' + accClass + '">' + (accuracy != null ? Math.round(accuracy * 100) + '%' : '--') + '</span>';
+  html += '</div>';
+  html += '</div>';
+
+  // Vs cloud
+  html += '<div class="safety-source-label">vs Cloud API</div>';
+  html += _renderConfusion(eyeState.vsCloud, cls);
+  html += _renderPerClass(eyeState.vsCloud, cls);
+
+  // Vs corrections
+  html += '<div class="safety-source-label">vs Corrections</div>';
+  if (eyeState.vsCorrections && eyeState.vsCorrections.total > 0) {
+    const c = eyeState.vsCorrections;
+    html += '<div class="safety-headline-row" style="margin-bottom:4px">';
+    html +=   '<span class="safety-headline-label">Accuracy</span>';
+    html +=   '<span class="safety-headline-value ' + _safetyClass(c.accuracy, [0.75, 0.90]) + '">'
+            + Math.round(c.accuracy * 100) + '% (' + c.total + ' samples)</span>';
+    html += '</div>';
+    html += _renderCorrectionsByClass(c.byClass, correctionsCls);
+  } else {
+    html += '<div class="safety-empty">No data yet — populates on next retrain.</div>';
+  }
+  return html;
+}
+
+function renderPresenceColumn(presence) {
+  const cls = ['not_present', 'present'];
+  const correctionsCls = ['not_present', 'present'];
+
+  const acc = presence.vsCloud ? presence.vsCloud.accuracy : null;
+  const macroF1 = presence.vsCloud ? presence.vsCloud.macroF1 : null;
+
+  const accClass = _safetyClass(acc, [0.90, 0.97]);
+  const macroClass = _safetyClass(macroF1, [0.90, 0.97]);
+
+  let html = '<h3>Presence</h3>';
+  html += '<div class="safety-headline">';
+  html += '<div class="safety-headline-row" title="Overall fraction of frames where birdeye and cloud API agree on present vs not_present.">';
+  html +=   '<span class="safety-headline-label">Accuracy</span>';
+  html +=   '<span class="safety-headline-value ' + accClass + '">' + (acc != null ? Math.round(acc * 100) + '%' : '--') + '</span>';
+  html += '</div>';
+  html += '<div class="safety-headline-row" title="Macro-averaged F1 across {not_present, present}. Equal weight per class.">';
+  html +=   '<span class="safety-headline-label">Macro F1</span>';
+  html +=   '<span class="safety-headline-value ' + macroClass + '">' + (macroF1 != null ? (macroF1 * 100).toFixed(0) + '%' : '--') + '</span>';
+  html += '</div>';
+  html += '</div>';
+
+  // Vs cloud
+  html += '<div class="safety-source-label">vs Cloud API</div>';
+  html += _renderConfusion(presence.vsCloud, cls);
+  html += _renderPerClass(presence.vsCloud, cls);
+
+  // Vs corrections
+  html += '<div class="safety-source-label">vs Corrections</div>';
+  if (presence.vsCorrections && presence.vsCorrections.total > 0) {
+    const c = presence.vsCorrections;
+    html += '<div class="safety-headline-row" style="margin-bottom:4px">';
+    html +=   '<span class="safety-headline-label">Accuracy</span>';
+    html +=   '<span class="safety-headline-value ' + _safetyClass(c.accuracy, [0.90, 0.97]) + '">'
+            + Math.round(c.accuracy * 100) + '% (' + c.total + ' samples)</span>';
+    html += '</div>';
+    html += _renderCorrectionsByClass(c.byClass, correctionsCls);
+  } else {
+    html += '<div class="safety-empty">No data yet — populates on next retrain.</div>';
+  }
+  return html;
+}
+
+async function loadSafetyStats() {
+  try {
+    const hours = document.getElementById('safety-range').value;
+    const res = await fetch('/api/safety-stats?hours=' + hours);
+    const d = await res.json();
+
+    const rangeLabel = hours === '24' ? '24h' : '7d';
+    const total = d.shadowTotal || 0;
+    document.getElementById('safety-period').textContent = '(' + rangeLabel + ', ' + total + ' shadow frames)';
+    document.getElementById('safety-deployed').textContent = d.deployedVersion ? '— ' + d.deployedVersion : '';
+
+    const rollbackBadge = document.getElementById('safety-rollback-badge');
+    if (d.rolledBack) {
+      rollbackBadge.textContent = '⚠ rolled back from ' + d.latestTrainedVersion;
+      rollbackBadge.style.display = '';
+    } else {
+      rollbackBadge.style.display = 'none';
+    }
+
+    document.getElementById('safety-eye').innerHTML = renderEyeStateColumn(d.eyeState || {});
+    document.getElementById('safety-presence').innerHTML = renderPresenceColumn(d.presence || {});
+  } catch (e) {
+    console.error('Safety stats error:', e);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Init & auto-refresh
 // ---------------------------------------------------------------------------
 async function loadAll() {
@@ -1022,6 +1230,7 @@ async function loadAll() {
     loadEvents(),
     loadTrainingStatus(),
     loadMonitorStats(),
+    loadSafetyStats(),
   ]);
   document.getElementById('footer-refresh').textContent =
     'Last refreshed: ' + new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York' });
@@ -1029,6 +1238,7 @@ async function loadAll() {
 
 initTimelineNav();
 document.getElementById('perf-range').addEventListener('change', loadMonitorStats);
+document.getElementById('safety-range').addEventListener('change', loadSafetyStats);
 document.getElementById('events-count').addEventListener('change', loadEvents);
 loadAll();
 setInterval(loadAll, REFRESH_INTERVAL_SEC * 1000);

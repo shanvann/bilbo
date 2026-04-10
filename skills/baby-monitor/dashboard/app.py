@@ -592,6 +592,21 @@ def api_retrain_abort():
     return jsonify({"ok": killed, "status": "aborted" if killed else "not found"})
 
 
+@app.route("/api/safety-stats")
+def api_safety_stats():
+    """Per-classifier safety + quality breakdown for the new dashboard panel.
+
+    Query params:
+        hours: lookback window for the cloud-API ground-truth source
+               (default 168 = 7 days). The corrections-side metric is
+               read from the deployed model's training_runs row and is
+               not windowed.
+    """
+    hours = float(request.args.get("hours", 168))
+    db = get_db()
+    return jsonify(db.get_safety_stats(hours))
+
+
 @app.route("/api/monitor-stats")
 def api_monitor_stats():
     """Model performance stats — powered by SQLite.

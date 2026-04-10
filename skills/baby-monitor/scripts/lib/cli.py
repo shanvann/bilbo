@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -663,6 +664,252 @@ def cmd_rollback(version: str):
     return 0
 
 
+def _reinfer_corrections_against_current_model(
+    model_version: str | None,
+) -> tuple[int, int, dict[str, dict[str, int]], dict[str, dict[str, int]]]:
+    """Run BIRDEYE inference on every corrected frame and compare the raw
+    eye-state classifier output (or presence, for not_in_bassinet corrections)
+    to the human-corrected ground truth.
+
+    Used by cmd_retrain (after a fresh training run) and cmd_eval_corrections
+    (to re-evaluate the currently deployed model without retraining).
+
+    Comparison semantics (updated 2026-04-09): we compare at the eye-state
+    level, NOT at the derived Awake/Asleep level.
+
+    - For corrections labeled `eyes_open`, `eyes_closed`, `face_not_visible`:
+      compared to birdeye's raw eyeState output. A `None` result from
+      try_local_analysis means birdeye's eye-state classifier output
+      `face_not_visible` and the pipeline would fall back to cloud — we
+      treat that as a `face_not_visible` prediction for accounting.
+    - For corrections labeled `not_in_bassinet`: compared to birdeye's
+      presence classifier output (baby_present == False).
+
+    Presence-level agreement is tracked in a separate counter so that
+    "birdeye said present but wrong eye state" counts as correct for the
+    presence panel and wrong for the eye-state panel — the two classifiers
+    are evaluated independently.
+
+    Side effects:
+      - Force-reloads the local_pipeline classifier singletons so the latest
+        model weights on disk are picked up, not whatever was cached.
+      - Mutates entries in sleep-log.jsonl with new shadow data + the
+        provided model_version label.
+
+    Args:
+        model_version: written into entry["shadowModelVersion"] if non-None.
+
+    Returns:
+        (total_reinfer, agreed_after, eye_class_counts, presence_class_counts).
+        eye_class_counts is keyed by the eye-state correction label and
+        covers every reinferred frame (no dropped fallbacks).
+        presence_class_counts is keyed by the presence truth label
+        ("not_present" or "present") and tracks how often birdeye's presence
+        classifier was correct, independently of its eye-state output.
+    """
+    # Force reload of classifiers (clear cached singleton)
+    from .local_pipeline import try_local_analysis
+    import lib.local_pipeline as _lp
+    _lp._presence_clf = None
+    _lp._eye_state_clf = None
+    _lp._available = None
+
+    # State-domain labels kept for backwards compat with the existing
+    # shadow-dict schema (db.insert_entry, api_timeline, etc.). The agreement
+    # computation itself is in eye-state domain — see below.
+    EYE_TO_STATE = {"eyes_open": "Awake", "eyes_closed": "Asleep",
+                    "face_not_visible": "Unknown", "not_in_bassinet": "not_present"}
+
+    all_lines = JSONL_FILE.read_text().strip().splitlines()
+    entries = [json.loads(l) for l in all_lines]
+    updated = 0
+    agreed_after = 0
+    total_reinfer = 0
+    correction_class_counts: dict[str, dict[str, int]] = {}
+    presence_class_counts: dict[str, dict[str, int]] = {
+        "not_present": {"correct": 0, "total": 0},
+        "present":     {"correct": 0, "total": 0},
+    }
+
+    for entry in entries:
+        if not entry.get("eyeStateEdited"):
+            continue
+        frame = entry.get("frame", "")
+        if not frame or not Path(frame).exists():
+            continue
+
+        total_reinfer += 1
+        birdeye_result = try_local_analysis(Path(frame))
+
+        # Extract birdeye's raw eye-state prediction. None result means the
+        # pipeline would have fallen back to cloud, which only happens when
+        # the eye-state classifier output face_not_visible (see
+        # local_pipeline.py:163-176). Record it as such — previously these
+        # frames were silently dropped from per-class accounting.
+        if birdeye_result is None:
+            birdeye_eye = "face_not_visible"
+            birdeye_present = True  # must have been present, else
+                                    # _build_entry("not_present", ...) would
+                                    # have been returned (not None)
+            shadow_pc = None
+            shadow_ec = None
+            shadow_timings = None
+        else:
+            birdeye_present = bool(birdeye_result.get("babyPresent", False))
+            birdeye_eye = birdeye_result.get("eyeState") or "face_not_visible"
+            shadow_pc = birdeye_result.get("presenceConfidence")
+            shadow_ec = birdeye_result.get("eyeConfidence")
+            shadow_timings = birdeye_result.get("birdeyeTimings")
+
+        gt_eye = entry.get("eyeState", "")
+
+        # Agreement is computed at the eye-state level (not the derived
+        # Awake/Asleep level). Awake/Asleep is a higher-level concept that
+        # requires more logic than a single frame's eye-state prediction
+        # and is being decoupled from the raw classifier metrics.
+        #   - not_in_bassinet correction:  presence classifier check
+        #   - eye-state correction:        raw eye-state classifier check
+        if gt_eye == "not_in_bassinet":
+            agreed = (birdeye_present is False)
+        elif not birdeye_present:
+            # Correction says it's an eye state but birdeye said not_present —
+            # that's a presence-side disagreement.
+            agreed = False
+        else:
+            agreed = (birdeye_eye == gt_eye)
+
+        if agreed:
+            agreed_after += 1
+
+        # Per-class tally for the dashboard's eye-state "vs corrections" panel.
+        cls = gt_eye or "unknown"
+        bucket = correction_class_counts.setdefault(cls, {"correct": 0, "total": 0})
+        bucket["total"] += 1
+        if agreed:
+            bucket["correct"] += 1
+
+        # Presence-level tally — independent of eye-state correctness. A frame
+        # where birdeye got the presence right but the eye state wrong still
+        # counts as correct here.
+        pres_truth = "not_present" if gt_eye == "not_in_bassinet" else "present"
+        pres_correct = (birdeye_present is False) if pres_truth == "not_present" else birdeye_present
+        presence_class_counts[pres_truth]["total"] += 1
+        if pres_correct:
+            presence_class_counts[pres_truth]["correct"] += 1
+
+        # Update the entry's shadow sub-dict. Schema matches the pre-existing
+        # shape exactly (birdeyeState, prodState, agreed, eyeState, etc.) so
+        # that db.insert_entry, api_timeline, and the frame-viewer all keep
+        # working. birdeyeState and prodState are derived from eye-state via
+        # EYE_TO_STATE for back-compat with state-domain readers — the
+        # `agreed` value above was computed in eye-state domain, which is
+        # what actually matters for training/metric accounting.
+        birdeye_state_compat = (
+            "not_present" if not birdeye_present
+            else EYE_TO_STATE.get(birdeye_eye, "Unknown")
+        )
+        entry["shadow"] = {
+            "birdeyeState": birdeye_state_compat,
+            "prodState": EYE_TO_STATE.get(gt_eye, "Unknown").lower(),
+            "agreed": agreed,
+            "presenceConfidence": shadow_pc,
+            "eyeConfidence": shadow_ec,
+            "eyeState": birdeye_eye,
+            "birdeyeTimings": shadow_timings,
+        }
+        if model_version is not None:
+            entry["shadowModelVersion"] = model_version
+        updated += 1
+
+    if updated > 0:
+        JSONL_FILE.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+
+    return total_reinfer, agreed_after, correction_class_counts, presence_class_counts
+
+
+def cmd_eval_corrections() -> int:
+    """Re-run BIRDEYE on the human-corrected frames using the currently
+    deployed model, and write the per-class agreement into that model's
+    training_runs row in SQLite.
+
+    Use cases:
+      - The deployed model was trained before correction_agreement existed
+        and the dashboard "vs Corrections" panel is empty.
+      - You rolled back to an older model and want fresh vs-corrections data
+        for it without triggering a full retrain.
+      - You added new corrections via the dashboard and want to see how the
+        deployed model handles them, before deciding whether to retrain.
+    """
+    print("Evaluating deployed model against the corrections set...")
+
+    latest_link = MODELS_DIR / "latest"
+    if not latest_link.is_symlink():
+        print(f"No deployed model — {latest_link} is not a symlink", file=sys.stderr)
+        return 1
+    deployed_version = Path(os.readlink(latest_link)).name
+    print(f"Deployed model: {deployed_version}")
+    print()
+
+    total_reinfer, agreed_after, correction_class_counts, presence_class_counts = (
+        _reinfer_corrections_against_current_model(deployed_version)
+    )
+
+    if total_reinfer == 0:
+        print("No corrected frames found in sleep-log.jsonl.")
+        return 0
+
+    pct = agreed_after * 100 // total_reinfer
+    print(f"Re-inferred {total_reinfer} corrected frames")
+    print(f"Overall eye-state agreement: {agreed_after}/{total_reinfer} ({pct}%)")
+    print()
+    print("Eye-state per-class:")
+    for cls in ("eyes_open", "eyes_closed", "face_not_visible", "not_in_bassinet"):
+        counts = correction_class_counts.get(cls)
+        if not counts or counts["total"] == 0:
+            continue
+        cpct = counts["correct"] * 100 // counts["total"]
+        print(f"  {cls:20s}  {counts['correct']:3d}/{counts['total']:3d}  ({cpct}%)")
+    print()
+    print("Presence per-class (birdeye present/not_present correctness):")
+    for cls in ("not_present", "present"):
+        counts = presence_class_counts.get(cls, {})
+        if not counts or counts["total"] == 0:
+            continue
+        cpct = counts["correct"] * 100 // counts["total"]
+        print(f"  {cls:20s}  {counts['correct']:3d}/{counts['total']:3d}  ({cpct}%)")
+    print()
+
+    # Update SQLite training_runs row for the deployed version.
+    from .db import get_db
+    db = get_db()
+    pres_correct = sum(c["correct"] for c in presence_class_counts.values())
+    pres_total = sum(c["total"] for c in presence_class_counts.values())
+    correction_data = {
+        "by_class": correction_class_counts,
+        "total": {"correct": agreed_after, "total": total_reinfer},
+        "presence": {
+            "by_class": presence_class_counts,
+            "total": {"correct": pres_correct, "total": pres_total},
+        },
+    }
+    updated = db.update_training_run_metrics(
+        deployed_version,
+        {"correction_agreement": correction_data},
+    )
+
+    if updated:
+        print(f"✓ training_runs[{deployed_version}].metrics.correction_agreement updated")
+        print("  (refresh the dashboard to see the new vs-Corrections panel data)")
+        return 0
+    else:
+        print(
+            f"⚠ no training_runs row exists for {deployed_version}; "
+            f"SQLite was not updated. (Check `monitor.py --list-models`.)",
+            file=sys.stderr,
+        )
+        return 1
+
+
 def cmd_retrain(trigger: str = "cli", force: bool = False):
     """Retrain classifiers using corrections + audit disagreements as supplemental data.
 
@@ -768,91 +1015,60 @@ def cmd_retrain(trigger: str = "cli", force: bool = False):
         print(f"Retrain failed (exit code {result.returncode})", file=sys.stderr)
         return result.returncode
 
-    # Sync new training run to SQLite (train_classifiers.py writes JSONL only)
+    # --- Read the new training run from training-log.jsonl ---
+    # We hold off on the SQLite sync until after the re-inference loop below
+    # so we can enrich `metrics.correction_agreement` in a single insert.
     training_log_file = MODELS_DIR / "training-log.jsonl"
+    run_data = None
+    training_log_lines = []
+    model_version = None
     if training_log_file.exists():
-        from .db import get_db
-        db = get_db()
-        last_line = training_log_file.read_text().strip().splitlines()[-1]
-        run_data = json.loads(last_line)
-        # Check if already in db
-        existing = db.get_last_training_runs(1)
-        if not existing or existing[0].get("version") != run_data.get("version"):
-            db.insert_training_run(run_data)
-            log.info("retrain: synced training run %s to SQLite", run_data.get("version"))
+        training_log_lines = training_log_file.read_text().strip().splitlines()
+        if training_log_lines:
+            run_data = json.loads(training_log_lines[-1])
+            model_version = run_data.get("version")
 
     # --- Post-retrain: re-infer corrected frames with new model ---
     print()
     print("Re-inferring corrected frames with new model...")
 
-    # Get the new model version
-    training_log = MODELS_DIR / "training-log.jsonl"
-    model_version = None
-    if training_log.exists():
-        lines = training_log.read_text().strip().splitlines()
-        if lines:
-            model_version = json.loads(lines[-1]).get("version")
-
-    # Force reload of classifiers (clear cached singleton)
-    from .local_pipeline import try_local_analysis
-    import lib.local_pipeline as _lp
-    _lp._presence_clf = None
-    _lp._eye_state_clf = None
-    _lp._available = None
-
-    # Find corrected frames that need re-inference
-    EYE_TO_STATE = {"eyes_open": "Awake", "eyes_closed": "Asleep",
-                    "face_not_visible": "Unknown", "not_in_bassinet": "not_present"}
-
-    all_lines = JSONL_FILE.read_text().strip().splitlines()
-    entries = [json.loads(l) for l in all_lines]
-    updated = 0
-    agreed_after = 0
-    total_reinfer = 0
-
-    for entry in entries:
-        if not entry.get("eyeStateEdited"):
-            continue
-        frame = entry.get("frame", "")
-        if not frame or not Path(frame).exists():
-            continue
-
-        total_reinfer += 1
-        birdeye_result = try_local_analysis(Path(frame))
-
-        if birdeye_result is not None:
-            birdeye_state = birdeye_result.get("state", "Unknown")
-            if not birdeye_result.get("babyPresent", False):
-                birdeye_state = "not_present"
-
-            # Ground truth from correction
-            gt_eye = entry.get("eyeState", "")
-            gt_state = EYE_TO_STATE.get(gt_eye, "Unknown").lower()
-
-            agreed = birdeye_state.lower() == gt_state
-            if agreed:
-                agreed_after += 1
-
-            # Update entry with new shadow result + model version
-            entry["shadow"] = {
-                "birdeyeState": birdeye_state,
-                "prodState": gt_state,
-                "agreed": agreed,
-                "presenceConfidence": birdeye_result.get("presenceConfidence"),
-                "eyeConfidence": birdeye_result.get("eyeConfidence"),
-                "eyeState": birdeye_result.get("eyeState"),
-                "birdeyeTimings": birdeye_result.get("birdeyeTimings"),
-            }
-            entry["shadowModelVersion"] = model_version
-            updated += 1
-
-    # Write back
-    if updated > 0:
-        JSONL_FILE.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+    total_reinfer, agreed_after, correction_class_counts, presence_class_counts = (
+        _reinfer_corrections_against_current_model(model_version)
+    )
 
     agreement_pct = agreed_after * 100 // total_reinfer if total_reinfer > 0 else 0
-    print(f"Re-inferred {updated}/{total_reinfer} corrected frames")
-    print(f"Agreement with ground truth: {agreed_after}/{total_reinfer} ({agreement_pct}%)")
+    print(f"Re-inferred {total_reinfer} corrected frames")
+    print(f"Eye-state agreement: {agreed_after}/{total_reinfer} ({agreement_pct}%)")
+
+    # --- Enrich training-log.jsonl + SQLite training_runs with the
+    # post-retrain correction agreement, then sync. Done in a single pass so
+    # the JSONL backup and SQLite stay consistent.
+    if run_data is not None:
+        if total_reinfer > 0:
+            pres_correct = sum(c["correct"] for c in presence_class_counts.values())
+            pres_total = sum(c["total"] for c in presence_class_counts.values())
+            metrics = run_data.setdefault("metrics", {}) or {}
+            metrics["correction_agreement"] = {
+                "by_class": correction_class_counts,
+                "total": {"correct": agreed_after, "total": total_reinfer},
+                "presence": {
+                    "by_class": presence_class_counts,
+                    "total": {"correct": pres_correct, "total": pres_total},
+                },
+            }
+            run_data["metrics"] = metrics
+            # Rewrite the last JSONL line in place so the SQLite sync (and any
+            # disaster-recovery from JSONL) sees the enriched record.
+            training_log_lines[-1] = json.dumps(run_data)
+            training_log_file.write_text("\n".join(training_log_lines) + "\n")
+
+        from .db import get_db
+        db = get_db()
+        existing = db.get_last_training_runs(1)
+        if not existing or existing[0].get("version") != run_data.get("version"):
+            db.insert_training_run(run_data)
+            log.info("retrain: synced training run %s to SQLite", run_data.get("version"))
+
     print()
     print(f"Retrain complete (model {model_version}).")
 
@@ -945,6 +1161,10 @@ examples:
                       help="spot-check birdeye decisions against cloud API")
     mode.add_argument("--retrain", action="store_true",
                       help="retrain classifiers with corrections + audit data")
+    mode.add_argument("--eval-corrections", action="store_true",
+                      help="re-run BIRDEYE on corrected frames using the deployed "
+                           "model and write per-class agreement to its training_runs row "
+                           "(no retraining; useful after a rollback)")
     p.add_argument("--force", action="store_true",
                    help="(retrain) bypass the 'no new data since last training' guard "
                         "— useful when training code or hyperparameters changed")

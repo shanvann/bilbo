@@ -182,6 +182,7 @@ def api_timeline():
             "shadowEyeState": shadow.get("eyeState"),
             "shadowPresenceConfidence": shadow.get("presenceConfidence"),
             "shadowEyeConfidence": shadow.get("eyeConfidence"),
+            "headPosition": e.get("headPosition"),
             "frame": e.get("frame"),
             "alerts": e.get("alerts", []),
         })

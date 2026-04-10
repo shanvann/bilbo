@@ -279,7 +279,12 @@ class PresenceDataset(Dataset):
 
 
 class EyeStateDataset(Dataset):
-    """Head-region crop → eyes_open / eyes_closed / face_not_visible.
+    """Bassinet crop → eyes_open / eyes_closed / face_not_visible.
+
+    Uses the fixed bassinet-center crop (crop_bassinet) instead of the
+    head-position-dependent crop.  This avoids the ~80% of frames where
+    headPosition is missing or coarse, giving the classifier a consistent
+    input region that always contains the baby when present.
 
     Labels derived from cloud API state:
         Awake → eyes_open (0)
@@ -314,12 +319,7 @@ class EyeStateDataset(Dataset):
             state = e.get("state", "Unknown")
             label = self.STATE_MAP.get(state, 2)  # default to face_not_visible
 
-            # Get head position from cloud API (if available)
-            head_pos = e.get("headPosition")
-            if not isinstance(head_pos, dict) or "x" not in head_pos:
-                head_pos = dict(DEFAULT_HEAD_POS)
-
-            self.samples.append((fpath, label, head_pos))
+            self.samples.append((fpath, label))
 
         if skipped > 0:
             log.info("EyeStateDataset: skipped %d entries (missing frames)", skipped)
@@ -328,9 +328,9 @@ class EyeStateDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        path, label, head_pos = self.samples[idx]
+        path, label = self.samples[idx]
         frame = cv2.imread(str(path))
-        crop = crop_head_region(frame, head_pos)
+        crop = crop_bassinet(frame)
         rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
         if self.transform:
             rgb = self.transform(rgb)
@@ -402,10 +402,10 @@ class CombinedDataset(Dataset):
 # Transforms
 # ---------------------------------------------------------------------------
 
-def get_train_transform():
+def get_train_transform(size=224):
     return transforms.Compose([
         transforms.ToPILImage(),
-        transforms.Resize((224, 224)),
+        transforms.Resize((size, size)),
         transforms.RandomHorizontalFlip(),
         transforms.RandomRotation(15),
         transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05),
@@ -415,23 +415,31 @@ def get_train_transform():
     ])
 
 
-def get_val_transform():
+def get_val_transform(size=224):
     return transforms.Compose([
         transforms.ToPILImage(),
-        transforms.Resize((224, 224)),
+        transforms.Resize((size, size)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
+
+
+EYE_STATE_INPUT_SIZE = 224
 
 
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
 
-def build_model(num_classes: int):
-    model = models.mobilenet_v3_small(
-        weights=models.MobileNet_V3_Small_Weights.IMAGENET1K_V1,
-    )
+def build_model(num_classes: int, large: bool = False):
+    if large:
+        model = models.mobilenet_v3_large(
+            weights=models.MobileNet_V3_Large_Weights.IMAGENET1K_V1,
+        )
+    else:
+        model = models.mobilenet_v3_small(
+            weights=models.MobileNet_V3_Small_Weights.IMAGENET1K_V1,
+        )
     in_features = model.classifier[3].in_features
     model.classifier[3] = nn.Linear(in_features, num_classes)
     return model
@@ -473,10 +481,11 @@ def train_classifier(
     lr: float = 0.001,
     patience: int = 10,
     class_weights: list[float] | None = None,
+    large: bool = False,
 ):
-    """Train a MobileNetV3-Small classifier with early stopping."""
+    """Train a MobileNetV3 classifier with early stopping."""
     device = "cpu"
-    model = build_model(num_classes).to(device)
+    model = build_model(num_classes, large=large).to(device)
 
     # Weighted sampling to handle class imbalance
     labels = [s[1] for s in train_ds.samples]
@@ -772,13 +781,13 @@ def main():
         log.info("Training EYE STATE classifier (eyes_open / eyes_closed / face_not_visible)")
         log.info("=" * 60)
 
-        eye_train_ds = EyeStateDataset(train_entries, frames_dir, get_train_transform())
-        val_ds = EyeStateDataset(val_entries, frames_dir, get_val_transform())
+        eye_train_ds = EyeStateDataset(train_entries, frames_dir, get_train_transform(EYE_STATE_INPUT_SIZE))
+        val_ds = EyeStateDataset(val_entries, frames_dir, get_val_transform(EYE_STATE_INPUT_SIZE))
 
         # Merge in manually validated face crops if provided
         if args.face_crops:
             face_crops_dir = Path(args.face_crops)
-            face_crop_ds = FaceCropDataset(face_crops_dir, get_train_transform())
+            face_crop_ds = FaceCropDataset(face_crops_dir, get_train_transform(EYE_STATE_INPUT_SIZE))
             if len(face_crop_ds) > 0:
                 train_ds = CombinedDataset(eye_train_ds, face_crop_ds)
                 log.info("Eye state: %d from sleep-log + %d from face crops = %d total train",
@@ -831,6 +840,7 @@ def main():
             lr=args.lr,
             patience=args.patience,
             class_weights=eye_class_weights,
+            large=False,
         )
     else:
         eye_metrics = None

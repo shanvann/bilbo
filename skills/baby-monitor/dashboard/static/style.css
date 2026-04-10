@@ -776,6 +776,17 @@ footer {
   padding: 6px 0;
 }
 
+/* Head position overlay on viewer frame */
+.head-overlay {
+  position: absolute;
+  border: 2px solid rgba(74, 158, 255, 0.8);
+  background: rgba(74, 158, 255, 0.08);
+  border-radius: 3px;
+  pointer-events: none;
+  z-index: 1;
+  box-shadow: 0 0 6px rgba(74, 158, 255, 0.3);
+}
+
 /* Section description */
 .section-desc {
   color: #778;

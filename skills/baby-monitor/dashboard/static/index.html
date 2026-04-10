@@ -129,6 +129,23 @@
     </section>
 
 
+    <!-- Safety: BIRDEYE vs ground truth, per classifier -->
+    <section class="card" id="safety-card">
+      <h2>Safety
+        <select id="safety-range" class="detail-select" style="margin-left:8px">
+          <option value="24">Last 24 hr</option>
+          <option value="168" selected>Last 7 days</option>
+        </select>
+        <span class="subtitle" id="safety-period"></span>
+        <span class="subtitle" id="safety-deployed"></span>
+        <span class="subtitle" id="safety-rollback-badge" style="display:none;color:var(--accent-orange)"></span>
+      </h2>
+      <div class="safety-grid">
+        <div class="safety-col" id="safety-eye"></div>
+        <div class="safety-col" id="safety-presence"></div>
+      </div>
+    </section>
+
     <!-- Model Performance -->
     <section class="card">
       <h2>Model Performance
@@ -146,12 +163,7 @@
         <div class="perf-item">
           <div class="perf-value" id="perf-agreement">--</div>
           <div class="perf-label">Alignment</div>
-          <div class="perf-desc">Birdeye vs ground truth (&ge;95% to promote)</div>
-        </div>
-        <div class="perf-item">
-          <div class="perf-value" id="perf-disagreements">--</div>
-          <div class="perf-label">Misaligned</div>
-          <div class="perf-desc">Frames where birdeye differs from ground truth</div>
+          <div class="perf-desc">Birdeye vs ground truth (proxy — see Safety panel for per-class)</div>
         </div>
         <div class="perf-item">
           <div class="perf-value" id="perf-cloud-cost">--</div>
@@ -162,11 +174,6 @@
           <div class="perf-value" id="perf-latency">--</div>
           <div class="perf-label">Shadow Latency</div>
           <div class="perf-desc">Birdeye speed (prod latency after promotion)</div>
-        </div>
-        <div class="perf-item">
-          <div class="perf-value" id="perf-confidence">--</div>
-          <div class="perf-label">Eye Confidence</div>
-          <div class="perf-desc">Birdeye classifier certainty (0-1)</div>
         </div>
         <div class="perf-item">
           <div class="perf-value" id="perf-corrections">--</div>

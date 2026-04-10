@@ -54,8 +54,8 @@ from lib.alerts import (
 )
 from lib.storage import append_entry, get_last_entry
 from lib.cli import (
-    cmd_audit, cmd_backtest, cmd_backtest_birdeye, cmd_last, cmd_list_models,
-    cmd_retrain, cmd_rollback, cmd_status, parse_args,
+    cmd_audit, cmd_backtest, cmd_backtest_birdeye, cmd_eval_corrections,
+    cmd_last, cmd_list_models, cmd_retrain, cmd_rollback, cmd_status, parse_args,
 )
 
 
@@ -126,6 +126,9 @@ def main():
 
     if args.retrain:
         return cmd_retrain(force=args.force)
+
+    if args.eval_corrections:
+        return cmd_eval_corrections()
 
     if args.list_models:
         return cmd_list_models()

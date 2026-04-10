@@ -18,7 +18,7 @@ PROMPT_FILE = SKILL_DIR / "references" / "prompt.md"
 ENV_FILE = Path("/Users/shanit/.openclaw/workspace/.env.baby-monitor")
 MODELS_DIR = SKILL_DIR / "pipeline" / "models"
 
-MAX_FRAMES_KB = 6 * 1024 * 1024  # 6 GB (~7 days at 1-min intervals)
+MAX_FRAMES_KB = 10 * 1024 * 1024  # 10 GB (~67 days at 4-min intervals; raised from 6 GB to keep more history for backtesting)
 REFS_DIR = DATA_DIR / "references"
 
 # ---------------------------------------------------------------------------

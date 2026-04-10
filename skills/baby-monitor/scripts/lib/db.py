@@ -15,6 +15,7 @@ Usage:
 """
 
 import json
+import os
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
@@ -476,6 +477,247 @@ def get_last_training_runs(n: int = 2) -> list[dict]:
     return result
 
 
+def update_training_run_metrics(version: str, updates: dict) -> bool:
+    """Merge `updates` into the `metrics` JSON column of one training_runs row.
+
+    Read-modify-write — safe because we only expect one writer (cmd_retrain
+    and cmd_eval_corrections never overlap). Returns True if a matching row
+    was found and updated, False if no row exists for that version.
+    """
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT metrics FROM training_runs WHERE version = ? LIMIT 1",
+        (version,),
+    ).fetchone()
+    if row is None:
+        return False
+    try:
+        existing = json.loads(row["metrics"]) if row["metrics"] else {}
+    except (TypeError, json.JSONDecodeError):
+        existing = {}
+    existing.update(updates)
+    conn.execute(
+        "UPDATE training_runs SET metrics = ? WHERE version = ?",
+        (json.dumps(existing), version),
+    )
+    conn.commit()
+    return True
+
+
+def get_safety_stats(hours: float = 168) -> dict:
+    """Compute BIRDEYE-vs-ground-truth safety/quality breakdown.
+
+    Returns separate panels for the presence classifier and the eye-state
+    classifier, each with two ground-truth sources:
+
+      - vsCloud: windowed shadow data (entries.shadow_birdeye_state vs
+        entries.shadow_prod_state). High-volume, noisy proxy.
+      - vsCorrections: comes from the latest training_runs row's
+        metrics.correction_agreement (populated by cmd_retrain). Low-volume,
+        high-quality. Updates only at retrain time.
+
+    This is the data backing the dashboard's "Safety" panel — the metrics
+    that actually answer "is birdeye safe enough to promote?".
+    """
+    conn = get_connection()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # ----- Pull shadow rows in the window -----
+    rows = conn.execute("""
+        SELECT shadow_birdeye_state, shadow_prod_state
+        FROM entries
+        WHERE timestamp >= ?
+          AND shadow_birdeye_state IS NOT NULL
+          AND shadow_prod_state IS NOT NULL
+    """, (cutoff,)).fetchall()
+
+    # shadow_birdeye_state has 3 values: not_present | Asleep | Awake.
+    # shadow_prod_state values are case-inconsistent: lowercase from
+    # cmd_retrain re-inference, capitalized from monitor.py historical
+    # writes. Lowercase everything before comparing.
+    #
+    # The eye-state panel is reported in raw eye-state domain (eyes_open /
+    # eyes_closed / face_not_visible), NOT in derived Awake/Asleep. Map
+    # historical state-domain values via STATE_TO_EYE below. Awake/Asleep
+    # is a higher-level concept that requires more logic than a single
+    # frame's eye state and is being decoupled from the raw classifier
+    # metrics.
+    STATE_TO_EYE = {
+        "asleep": "eyes_closed",
+        "awake": "eyes_open",
+        "unknown": "face_not_visible",
+        "drowsy": "face_not_visible",
+    }
+
+    presence_pairs: list[tuple[str, str]] = []
+    eye_pairs: list[tuple[str, str]] = []
+
+    for row in rows:
+        bird = (row["shadow_birdeye_state"] or "").strip()
+        prod_raw = (row["shadow_prod_state"] or "").strip()
+        bird_lower = bird.lower()
+        prod = prod_raw.lower()
+
+        bird_present = bird_lower in ("asleep", "awake")
+        # Cloud-side: Unknown also means present (the API saw a baby but
+        # wasn't sure about state).
+        prod_present = prod in ("asleep", "awake", "unknown", "drowsy")
+
+        presence_pairs.append((
+            "present" if prod_present else "not_present",
+            "present" if bird_present else "not_present",
+        ))
+
+        # Eye-state confusion: only over frames where both sides are
+        # present. Map state-domain labels to eye-state domain — note that
+        # birdeye historically never emits face_not_visible in the shadow
+        # column because that branch falls back to the cloud API
+        # (local_pipeline.py:173-176), so the prediction column of this
+        # 3x3 confusion will always be empty in the face_not_visible row.
+        if bird_present and prod_present:
+            prod_eye = STATE_TO_EYE.get(prod, "face_not_visible")
+            bird_eye = STATE_TO_EYE.get(bird_lower, "face_not_visible")
+            eye_pairs.append((prod_eye, bird_eye))
+
+    def build_panel(pairs: list[tuple[str, str]], classes: list[str]) -> dict:
+        """Build a confusion + per-class P/R/F1 + macro-F1 panel."""
+        cm = {t: {p: 0 for p in classes} for t in classes}
+        for t, p in pairs:
+            if t in cm and p in cm[t]:
+                cm[t][p] += 1
+
+        per_class = {}
+        for cls in classes:
+            tp = cm[cls][cls]
+            fn = sum(cm[cls][p] for p in classes if p != cls)
+            fp = sum(cm[t][cls] for t in classes if t != cls)
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+            per_class[cls] = {
+                "precision": round(precision, 3),
+                "recall": round(recall, 3),
+                "f1": round(f1, 3),
+                "support": tp + fn,
+            }
+
+        total = sum(sum(row.values()) for row in cm.values())
+        correct = sum(cm[c][c] for c in classes)
+        macro_f1 = sum(c["f1"] for c in per_class.values()) / len(classes) if classes else 0.0
+        return {
+            "confusion": cm,
+            "perClass": per_class,
+            "macroF1": round(macro_f1, 3),
+            "accuracy": round(correct / total, 3) if total > 0 else 0.0,
+            "total": total,
+        }
+
+    presence_vs_cloud = build_panel(presence_pairs, ["not_present", "present"])
+    eye_vs_cloud = build_panel(
+        eye_pairs,
+        ["eyes_open", "eyes_closed", "face_not_visible"],
+    )
+
+    # ----- Corrections-side: read from the *deployed* training run -----
+    # The deployed model is whatever pipeline/models/latest points at, which
+    # can differ from the most-recent training_runs row after a --rollback.
+    # We surface both so the dashboard can flag a rolled-back state.
+    from .config import MODELS_DIR
+    latest_link = MODELS_DIR / "latest"
+    deployed_version = None
+    try:
+        if latest_link.is_symlink():
+            deployed_version = Path(os.readlink(latest_link)).name
+    except OSError:
+        pass
+
+    latest_trained = get_last_training_runs(1)
+    latest_trained_version = latest_trained[0].get("version") if latest_trained else None
+
+    # Find the training_runs row matching the deployed version. Falls back to
+    # the latest trained row if the symlink is missing/broken.
+    deployed_run = None
+    if deployed_version:
+        for row in conn.execute(
+            "SELECT metrics FROM training_runs WHERE version = ? LIMIT 1",
+            (deployed_version,),
+        ):
+            try:
+                deployed_run = {"metrics": json.loads(row["metrics"]) if row["metrics"] else None}
+            except (TypeError, json.JSONDecodeError):
+                deployed_run = None
+            break
+    if deployed_run is None and latest_trained:
+        deployed_run = latest_trained[0]
+        deployed_version = deployed_version or latest_trained_version
+
+    corr_data = None
+    if deployed_run:
+        metrics = deployed_run.get("metrics") or {}
+        corr_data = metrics.get("correction_agreement")
+
+    presence_vs_corrections = None
+    eye_vs_corrections = None
+    if corr_data:
+        by_class = corr_data.get("by_class", {})
+
+        # Presence-vs-corrections comes from the separate presence counters
+        # that cmd_retrain/cmd_eval_corrections tally independently of eye
+        # state. Reason: a frame where birdeye said eyes_closed but truth
+        # was eyes_open is WRONG on eye state but CORRECT on presence
+        # (both sides agree the baby is present). The old implementation
+        # conflated these and under-reported presence accuracy by ~25%.
+        pres_data = corr_data.get("presence")
+        if pres_data:
+            pres_by_class = pres_data.get("by_class", {})
+            pres_total_info = pres_data.get("total", {"correct": 0, "total": 0})
+            pres_total = pres_total_info.get("total", 0) or 0
+            pres_correct = pres_total_info.get("correct", 0) or 0
+            presence_vs_corrections = {
+                "byClass": {
+                    "not_present": dict(pres_by_class.get("not_present", {"correct": 0, "total": 0})),
+                    "present":     dict(pres_by_class.get("present",     {"correct": 0, "total": 0})),
+                },
+                "accuracy": round(pres_correct / pres_total, 3) if pres_total > 0 else 0.0,
+                "total": pres_total,
+            }
+        # If the training run predates the presence sub-key (correction_agreement
+        # from before 2026-04-09), leave presence_vs_corrections as None —
+        # re-run `monitor.py --eval-corrections` to populate it.
+
+        # Eye state: the three eye-state classes (drops not_in_bassinet, which
+        # is purely a presence-side label).
+        eye_classes = ("eyes_open", "eyes_closed", "face_not_visible")
+        eye_byclass = {c: dict(by_class.get(c, {"correct": 0, "total": 0})) for c in eye_classes}
+        eye_correct = sum(c["correct"] for c in eye_byclass.values())
+        eye_total = sum(c["total"] for c in eye_byclass.values())
+        eye_vs_corrections = {
+            "byClass": eye_byclass,
+            "accuracy": round(eye_correct / eye_total, 3) if eye_total > 0 else 0.0,
+            "total": eye_total,
+        }
+
+    return {
+        "hours": hours,
+        "shadowTotal": len(presence_pairs),
+        "deployedVersion": deployed_version,
+        "latestTrainedVersion": latest_trained_version,
+        "rolledBack": (
+            deployed_version is not None
+            and latest_trained_version is not None
+            and deployed_version != latest_trained_version
+        ),
+        "presence": {
+            "vsCloud": presence_vs_cloud,
+            "vsCorrections": presence_vs_corrections,
+        },
+        "eyeState": {
+            "vsCloud": eye_vs_cloud,
+            "vsCorrections": eye_vs_corrections,
+        },
+    }
+
+
 def get_training_duration_stats() -> dict:
     """Aggregate training-run duration across all recorded runs.
 
@@ -637,7 +879,9 @@ class MonitorDB:
     # Training
     insert_training_run = staticmethod(insert_training_run)
     get_last_training_runs = staticmethod(get_last_training_runs)
+    update_training_run_metrics = staticmethod(update_training_run_metrics)
     get_training_duration_stats = staticmethod(get_training_duration_stats)
+    get_safety_stats = staticmethod(get_safety_stats)
 
     # State
     get_state = staticmethod(get_state)

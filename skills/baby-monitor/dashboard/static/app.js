@@ -1188,19 +1188,21 @@ function renderClassifierColumn(elId, type) {
     }
     html += '</div>';
 
-    // BIRDEYE confusion + P/R/F1 (collapsed by default)
+    // BIRDEYE per-class P/R/F1 + collapsible confusion matrix
     if (hasBird && bird.confusion) {
-      html += '<details class="cm-details"><summary class="safety-source-label cm-toggle">BIRDEYE vs Corrections</summary>';
-      html += _renderConfusion(bird, classes);
+      html += '<div class="safety-source-label">BIRDEYE vs Corrections</div>';
       html += _renderPerClass(bird, classes);
+      html += '<details class="cm-details"><summary class="cm-toggle">Confusion matrix</summary>';
+      html += _renderConfusion(bird, classes);
       html += '</details>';
     }
 
-    // Cloud API confusion + P/R/F1 (collapsed by default)
+    // Cloud API per-class P/R/F1 + collapsible confusion matrix
     if (hasCloud && cloud.confusion) {
-      html += '<details class="cm-details"><summary class="safety-source-label cm-toggle">Cloud API vs Corrections</summary>';
-      html += _renderConfusion(cloud, classes);
+      html += '<div class="safety-source-label">Cloud API vs Corrections</div>';
       html += _renderPerClass(cloud, classes);
+      html += '<details class="cm-details"><summary class="cm-toggle">Confusion matrix</summary>';
+      html += _renderConfusion(cloud, classes);
       html += '</details>';
     }
 

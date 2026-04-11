@@ -555,6 +555,28 @@ function renderViewer() {
     presenceEl.style.display = 'none';
     presenceEl.classList.remove('disagree');
   }
+  // Face detection label
+  const faceEl = document.getElementById('viewer-birdeye-face');
+  if (e.faceBbox || e.faceBboxCorrected) {
+    const fc = e.faceConfidence;
+    const corrected = !!e.faceBboxCorrected;
+    let faceText = 'BIRDEYE face: detected' + (fc != null ? ' (' + Math.round(fc * 100) + '%)' : '');
+    if (corrected) faceText += ' [corrected]';
+    faceEl.textContent = faceText;
+    faceEl.style.display = '';
+    faceEl.classList.remove('disagree');
+  } else if (e.shadowFallback === 'no_face_detected') {
+    faceEl.textContent = 'BIRDEYE face: not detected → fallback';
+    faceEl.style.display = '';
+    faceEl.classList.add('disagree');
+  } else if (e.shadowBirdeyeState && e.shadowBirdeyeState !== 'not_present') {
+    faceEl.textContent = 'BIRDEYE face: —';
+    faceEl.style.display = '';
+    faceEl.classList.remove('disagree');
+  } else {
+    faceEl.style.display = 'none';
+  }
+
   const EYE_CONF_THRESHOLD = 0.7; // must match EYE_STATE_CONFIDENCE_THRESHOLD in config.py
   if (e.shadowEyeState != null) {
     const lowConf = e.shadowEyeConfidence != null && e.shadowEyeConfidence < EYE_CONF_THRESHOLD;
@@ -570,8 +592,12 @@ function renderViewer() {
     eyeEl.style.display = '';
     eyeEl.classList.remove('disagree');
   } else if (e.shadowBirdeyeState != null) {
-    // Present but no eye state = low confidence fallback
-    eyeEl.textContent = 'BIRDEYE eyes: — (low confidence → cloud fallback)';
+    // Present but no eye state — show specific fallback reason
+    const fallback = e.shadowFallback;
+    const reason = fallback === 'no_face_detected' ? 'no face detected'
+      : fallback === 'low_confidence' ? 'low confidence'
+      : 'unknown';
+    eyeEl.textContent = 'BIRDEYE eyes: — (' + reason + ' → cloud fallback)';
     eyeEl.style.display = '';
     eyeEl.classList.add('disagree');
   } else {
@@ -936,38 +962,58 @@ function renderFaceDetectionColumn() {
     return;
   }
 
-  const detRate = face.detectionRate;
-  const detClass = _safetyClass(detRate, [0.50, 0.75]);
+  const vc = face.vsCloud || {};
   const faceClasses = ['visible', 'not_visible'];
-
   let html = '';
+
+  // --- Production headlines ---
   html += '<div class="safety-source-label">Production (shadow)</div>';
   html += '<div class="safety-headline">';
-  html += '<div class="safety-headline-row" title="% of baby-present frames where YuNet detected a face"><span class="safety-headline-label">Detection Rate</span>';
-  html += '<span class="safety-headline-value ' + detClass + '">' + Math.round(detRate * 100) + '%</span></div>';
 
-  // Macro F1 from vsCloud
-  const vc = face.vsCloud || {};
+  // Detection rate
+  html += '<div class="safety-headline-row" title="% of baby-present frames where a face was detected">';
+  html += '<span class="safety-headline-label">Detection Rate</span>';
+  html += '<span class="safety-headline-value ' + _safetyClass(face.detectionRate, [0.50, 0.75]) + '">'
+    + Math.round(face.detectionRate * 100) + '%</span></div>';
+
+  // Macro F1 vs cloud
   if (vc.macroF1 != null) {
-    html += '<div class="safety-headline-row" title="Macro F1: face detected vs cloud API face visibility (Awake/Asleep = visible, Unknown = not visible)"><span class="safety-headline-label">Macro F1</span>';
-    html += '<span class="safety-headline-value ' + _safetyClass(vc.macroF1, [0.50, 0.75]) + '">' + (vc.macroF1 * 100).toFixed(0) + '%</span></div>';
+    html += '<div class="safety-headline-row" title="Macro F1: face detected → visible, not detected → not_visible, vs cloud API ground truth (Awake/Asleep = visible)">';
+    html += '<span class="safety-headline-label">Macro F1 <span style="color:#556;font-weight:400">(vs cloud)</span></span>';
+    html += '<span class="safety-headline-value ' + _safetyClass(vc.macroF1, [0.50, 0.75]) + '">'
+      + (vc.macroF1 * 100).toFixed(0) + '%</span></div>';
   }
 
-  html += '<div class="safety-headline-row"><span class="safety-headline-label">Frames</span>';
+  // Accuracy vs cloud
+  if (vc.accuracy != null) {
+    html += '<div class="safety-headline-row" title="Overall accuracy vs cloud API">';
+    html += '<span class="safety-headline-label">Accuracy <span style="color:#556;font-weight:400">(vs cloud)</span></span>';
+    html += '<span class="safety-headline-value ' + _safetyClass(vc.accuracy, [0.60, 0.80]) + '">'
+      + Math.round(vc.accuracy * 100) + '%</span></div>';
+  }
+
+  // Fallback rate
+  html += '<div class="safety-headline-row" title="% of baby-present frames where face detection failed → cloud API fallback">';
+  html += '<span class="safety-headline-label">Fallback Rate</span>';
+  html += '<span class="safety-headline-value">' + Math.round(face.fallbackRate * 100) + '%</span></div>';
+
+  // Frame counts
+  html += '<div class="safety-headline-row">';
+  html += '<span class="safety-headline-label">Frames</span>';
   html += '<span class="safety-headline-value">' + face.detected + ' / ' + face.total + '</span></div>';
   html += '</div>';
 
-  // Confusion matrix + per-class P/R/F1 vs cloud
+  // --- Confusion matrix + per-class P/R/F1 vs cloud ---
   if (vc.total > 0) {
     html += '<div class="safety-source-label">vs Cloud API (visible = Awake/Asleep)</div>';
     html += _renderConfusion(vc, faceClasses);
     html += _renderPerClass(vc, faceClasses);
   }
 
-  // Confidence stats
+  // --- Confidence distribution ---
   if (face.confidence) {
     const c = face.confidence;
-    html += '<div class="safety-source-label">Confidence</div>';
+    html += '<div class="safety-source-label">Confidence Distribution</div>';
     html += '<div class="train-details">';
     html += '<div class="train-row"><span>Avg</span><span class="train-val">' + Math.round(c.avg * 100) + '%</span></div>';
     html += '<div class="train-row"><span>Min</span><span class="train-val">' + Math.round(c.min * 100) + '%</span></div>';
@@ -976,27 +1022,31 @@ function renderFaceDetectionColumn() {
     html += '</div>';
   }
 
-  // Training validation metrics (from last training run)
+  // --- Training validation metrics ---
   const faceMetrics = trainingData && trainingData.lastMetrics
     ? trainingData.lastMetrics.face_detect : null;
   if (faceMetrics) {
     html += '<div class="safety-source-label" style="margin-top:14px">Training Validation</div>';
     html += '<div class="train-details">';
     if (faceMetrics.mean_iou != null) {
-      html += '<div class="train-row"><span title="Mean IoU on positive validation samples">Mean IoU</span><span class="train-val">'
+      html += '<div class="train-row"><span title="Mean Intersection-over-Union on positive validation samples (face present)">Mean IoU</span><span class="train-val">'
         + (faceMetrics.mean_iou * 100).toFixed(1) + '%</span></div>';
     }
     if (faceMetrics.conf_accuracy != null) {
-      html += '<div class="train-row"><span title="Confidence binary accuracy (face present vs not)">Conf Accuracy</span><span class="train-val">'
+      html += '<div class="train-row"><span title="Binary accuracy: correctly predicting face present vs absent">Conf Accuracy</span><span class="train-val">'
         + (faceMetrics.conf_accuracy * 100).toFixed(1) + '%</span></div>';
     }
     if (faceMetrics.best_epoch != null) {
-      html += '<div class="train-row"><span>Epochs</span><span class="train-val">'
+      html += '<div class="train-row"><span title="Best epoch / total epochs before early stopping">Epochs</span><span class="train-val">'
         + faceMetrics.best_epoch + ' / ' + faceMetrics.total_epochs + '</span></div>';
     }
     if (faceMetrics.val_loss != null) {
-      html += '<div class="train-row"><span>Val loss</span><span class="train-val">'
+      html += '<div class="train-row"><span title="Combined SmoothL1 bbox + BCE confidence loss on validation set">Val loss</span><span class="train-val">'
         + faceMetrics.val_loss + '</span></div>';
+    }
+    if (faceMetrics.train_total != null) {
+      html += '<div class="train-row"><span>Train / Val</span><span class="train-val">'
+        + faceMetrics.train_total + ' / ' + faceMetrics.val_total + '</span></div>';
     }
     html += '</div>';
   }

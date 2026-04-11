@@ -962,8 +962,6 @@ function renderFaceDetectionColumn() {
     return;
   }
 
-  const vc = face.vsCloud || {};
-  const faceClasses = ['visible', 'not_visible'];
   let html = '';
 
   // --- Production headlines ---
@@ -976,22 +974,6 @@ function renderFaceDetectionColumn() {
   html += '<span class="safety-headline-value ' + _safetyClass(face.detectionRate, [0.50, 0.75]) + '">'
     + Math.round(face.detectionRate * 100) + '%</span></div>';
 
-  // Macro F1 vs cloud
-  if (vc.macroF1 != null) {
-    html += '<div class="safety-headline-row" title="Macro F1: face detected → visible, not detected → not_visible, vs cloud API ground truth (Awake/Asleep = visible)">';
-    html += '<span class="safety-headline-label">Macro F1 <span style="color:#556;font-weight:400">(vs cloud)</span></span>';
-    html += '<span class="safety-headline-value ' + _safetyClass(vc.macroF1, [0.50, 0.75]) + '">'
-      + (vc.macroF1 * 100).toFixed(0) + '%</span></div>';
-  }
-
-  // Accuracy vs cloud
-  if (vc.accuracy != null) {
-    html += '<div class="safety-headline-row" title="Overall accuracy vs cloud API">';
-    html += '<span class="safety-headline-label">Accuracy <span style="color:#556;font-weight:400">(vs cloud)</span></span>';
-    html += '<span class="safety-headline-value ' + _safetyClass(vc.accuracy, [0.60, 0.80]) + '">'
-      + Math.round(vc.accuracy * 100) + '%</span></div>';
-  }
-
   // Fallback rate
   html += '<div class="safety-headline-row" title="% of baby-present frames where face detection failed → cloud API fallback">';
   html += '<span class="safety-headline-label">Fallback Rate</span>';
@@ -1002,13 +984,6 @@ function renderFaceDetectionColumn() {
   html += '<span class="safety-headline-label">Frames</span>';
   html += '<span class="safety-headline-value">' + face.detected + ' / ' + face.total + '</span></div>';
   html += '</div>';
-
-  // --- Confusion matrix + per-class P/R/F1 vs cloud ---
-  if (vc.total > 0) {
-    html += '<div class="safety-source-label">vs Cloud API (visible = Awake/Asleep)</div>';
-    html += _renderConfusion(vc, faceClasses);
-    html += _renderPerClass(vc, faceClasses);
-  }
 
   // --- Confidence distribution ---
   if (face.confidence) {
@@ -1167,58 +1142,62 @@ function renderClassifierColumn(elId, type) {
   const classes = isPresence ? ['not_present', 'present'] : ['eyes_open', 'eyes_closed'];
   let html = '';
 
-  // --- Production metrics from safety stats ---
+  // --- vs Corrections (ground truth) ---
   const safety = safetyData ? (isPresence ? safetyData.presence : safetyData.eyeState) : null;
 
   if (safety) {
-    const cloud = safety.vsCloud || {};
-    const corr = safety.vsCorrections || {};
-    const macroF1 = cloud.macroF1;
-    const accuracy = cloud.accuracy;
+    const bird = safety.birdeyeVsCorrections || {};
+    const cloud = safety.cloudVsCorrections || {};
     const macroThresh = isPresence ? [0.90, 0.97] : [0.60, 0.85];
     const accThresh = isPresence ? [0.90, 0.97] : [0.75, 0.90];
-    const hasCorrData = corr.total > 0;
+    const hasBird = bird.total > 0;
+    const hasCloud = cloud.total > 0;
 
-    html += '<div class="safety-source-label">Production (shadow)</div>';
+    // Headlines: side-by-side BIRDEYE vs Cloud, both against corrections
+    html += '<div class="safety-source-label">vs Corrections (ground truth)</div>';
     html += '<div class="safety-headline">';
-    // Row 1: Macro F1 (cloud) + Macro Recall (corrections)
-    const f1Label = isPresence ? 'Macro F1' : 'Macro F1';
-    html += '<div class="safety-headline-row" title="Macro-averaged F1 from shadow comparison vs cloud API"><span class="safety-headline-label">' + f1Label + ' <span style="color:#556;font-weight:400">(vs cloud)</span></span>';
-    html += '<span class="safety-headline-value ' + _safetyClass(macroF1, macroThresh) + '">' + (macroF1 != null ? (macroF1 * 100).toFixed(0) + '%' : '--') + '</span></div>';
-    if (hasCorrData) {
-      const corrMetric = corr.macroF1 != null ? corr.macroF1 : corr.macroRecall;
-      const corrLabel = corr.macroF1 != null ? 'Macro F1' : 'Macro Recall';
-      if (corrMetric != null) {
-        html += '<div class="safety-headline-row" title="' + corrLabel + ' against human-corrected labels (ground truth)"><span class="safety-headline-label">' + corrLabel + ' <span style="color:#556;font-weight:400">(vs corrections)</span></span>';
-        html += '<span class="safety-headline-value ' + _safetyClass(corrMetric, macroThresh) + '">' + Math.round(corrMetric * 100) + '% <span style="font-size:0.7rem;color:var(--text-dim)">(' + corr.total + ' labels)</span></span></div>';
-      }
+
+    if (hasBird) {
+      html += '<div class="safety-headline-row" title="BIRDEYE macro F1 against human-corrected labels"><span class="safety-headline-label">BIRDEYE Macro F1</span>';
+      html += '<span class="safety-headline-value ' + _safetyClass(bird.macroF1, macroThresh) + '">'
+        + Math.round(bird.macroF1 * 100) + '% <span style="font-size:0.7rem;color:var(--text-dim)">(' + bird.total + ')</span></span></div>';
     }
-    // Row 2: Accuracy (cloud)
-    html += '<div class="safety-headline-row" title="Overall accuracy vs cloud API"><span class="safety-headline-label">Accuracy <span style="color:#556;font-weight:400">(vs cloud)</span></span>';
-    html += '<span class="safety-headline-value ' + _safetyClass(accuracy, accThresh) + '">' + (accuracy != null ? Math.round(accuracy * 100) + '%' : '--') + '</span></div>';
-    if (hasCorrData) {
-      html += '<div class="safety-headline-row" title="Overall accuracy against human-corrected labels (ground truth)"><span class="safety-headline-label">Accuracy <span style="color:#556;font-weight:400">(vs corrections)</span></span>';
-      html += '<span class="safety-headline-value ' + _safetyClass(corr.accuracy, accThresh) + '">' + Math.round(corr.accuracy * 100) + '% <span style="font-size:0.7rem;color:var(--text-dim)">(' + corr.total + ' labels)</span></span></div>';
+    if (hasCloud) {
+      html += '<div class="safety-headline-row" title="Cloud API macro F1 against human-corrected labels"><span class="safety-headline-label">Cloud API Macro F1</span>';
+      html += '<span class="safety-headline-value ' + _safetyClass(cloud.macroF1, macroThresh) + '">'
+        + Math.round(cloud.macroF1 * 100) + '% <span style="font-size:0.7rem;color:var(--text-dim)">(' + cloud.total + ')</span></span></div>';
+    }
+    if (hasBird) {
+      html += '<div class="safety-headline-row" title="BIRDEYE accuracy against corrections"><span class="safety-headline-label">BIRDEYE Accuracy</span>';
+      html += '<span class="safety-headline-value ' + _safetyClass(bird.accuracy, accThresh) + '">'
+        + Math.round(bird.accuracy * 100) + '%</span></div>';
+    }
+    if (hasCloud) {
+      html += '<div class="safety-headline-row" title="Cloud API accuracy against corrections"><span class="safety-headline-label">Cloud API Accuracy</span>';
+      html += '<span class="safety-headline-value ' + _safetyClass(cloud.accuracy, accThresh) + '">'
+        + Math.round(cloud.accuracy * 100) + '%</span></div>';
     }
     html += '</div>';
 
-    html += '<div class="safety-source-label">vs Cloud API</div>';
-    html += _renderConfusion(cloud, classes);
-    html += _renderPerClass(cloud, classes);
+    // BIRDEYE confusion + P/R/F1
+    if (hasBird && bird.confusion) {
+      html += '<div class="safety-source-label">BIRDEYE vs Corrections</div>';
+      html += _renderConfusion(bird, classes);
+      html += _renderPerClass(bird, classes);
+    }
 
-    html += '<div class="safety-source-label">vs Corrections (ground truth)</div>';
-    if (hasCorrData && corr.confusion) {
-      // Full confusion matrix available — same format as vsCloud
-      html += _renderConfusion(corr, classes);
-      html += _renderPerClass(corr, classes);
-    } else if (hasCorrData) {
-      // Legacy: only per-class correct/total
-      html += _renderCorrectionsByClass(corr.byClass, classes);
-    } else {
+    // Cloud API confusion + P/R/F1
+    if (hasCloud && cloud.confusion) {
+      html += '<div class="safety-source-label">Cloud API vs Corrections</div>';
+      html += _renderConfusion(cloud, classes);
+      html += _renderPerClass(cloud, classes);
+    }
+
+    if (!hasBird && !hasCloud) {
       html += '<div class="safety-empty">No corrections data yet.</div>';
     }
   } else {
-    html += '<div class="safety-empty">Loading production metrics...</div>';
+    html += '<div class="safety-empty">Loading metrics...</div>';
   }
 
   // --- Training validation metrics ---

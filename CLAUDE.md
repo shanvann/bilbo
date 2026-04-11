@@ -15,11 +15,19 @@ BILBO — a baby bassinet monitor. A Python pipeline captures RTSP frames every 
 - `skills/baby-monitor/` — the monitor pipeline, training, and dashboard. This is where almost all code changes happen.
   - `scripts/monitor.py` — main pipeline entry point (launchd runs this every 4 min)
   - `scripts/lib/db.py` — **all SQLite read/write goes through here**; do not open `data/monitor.db` directly elsewhere
-  - `scripts/lib/classifiers.py`, `lib/local_pipeline.py` — BIRDEYE (presence + eye-state classifiers, shadow orchestration)
+  - `scripts/lib/classifiers.py` — BIRDEYE classifiers: `PresenceClassifier`, `EyeStateClassifier` (MobileNetV3-Small), `FaceDetector` (YuNet ONNX)
+  - `scripts/lib/local_pipeline.py` — 3-stage BIRDEYE orchestration: presence → YuNet face detection → eye-state
   - `scripts/lib/training_state.py` — PID-based cross-process training state (CLI/dashboard/cron all coordinate through this)
+  - `scripts/lib/config.py` — all constants, paths, thresholds, model chain config, logging setup
+  - `scripts/lib/vision.py` — cloud API calls (OpenAI GPT-4o), prompt rendering, response parsing
+  - `scripts/lib/detect.py` — pixel-diff empty-bassinet detection
+  - `scripts/lib/capture.py` — ffmpeg RTSP frame capture
+  - `scripts/lib/alerts.py` — Telegram wake/safety alerts with cooldown logic
+  - `scripts/lib/storage.py` — frame retention (oldest-first pruning at 10 GB cap)
   - `scripts/train_classifiers.py` — retraining with corrections + audit data, writes versioned model dirs
   - `dashboard/app.py` — Flask app + training APIs
   - `references/prompt.md` — the GPT-4o vision prompt
+  - `scripts/requirements.txt` — Python dependencies (torch, torchvision, opencv-python-headless, openai, scikit-learn, etc.)
 - `skills/baby-report/` — read-only reporting on top of the monitor's data (`--section monitor` for model perf)
 - `skills/classifieds-poster/` — unrelated text-generation skill
 - `AGENTS.md`, `SOUL.md`, `USER.md`, `IDENTITY.md`, `HANDOFF.md`, `HEARTBEAT.md` — agent runtime files (personality, memory protocol, handoff). Ignore for code work; relevant only when running as the assistant.
@@ -89,6 +97,7 @@ Logs land in `skills/baby-monitor/data/system.log`, `cron-stdout.log`, `cron-std
 ## Architecture pointers (read README for the full story)
 
 - **Shadow mode** — every non-empty frame is processed by both pipelines. Cloud API (GPT-4o) decides, BIRDEYE logs in parallel, alignment is recorded. Once alignment ≥ 95%, BIRDEYE is promoted to production. Don't accidentally make BIRDEYE authoritative in code paths until that flip is intentional.
+- **BIRDEYE is 3-stage** — (1) presence classifier (MobileNetV3-Small, bassinet crop), (2) YuNet face detector (ONNX, finds face bbox), (3) eye-state classifier (MobileNetV3-Small, face crop from YuNet bbox). If YuNet fails to detect a face, falls back to head-position crop from the cloud API's last known coordinates. The YuNet model file lives at `pipeline/models/face_detection_yunet_2023mar.onnx`.
 - **Storage** — `data/monitor.db` (SQLite, WAL mode) is primary; `data/sleep-log.jsonl` is an append-only backup. Read paths must use SQLite via `lib/db.py`. Writes are dual-write — keep them in sync.
 - **Wake detection** — non-blocking look-back: 2-of-3 last entries `Awake` triggers a Telegram alert. Don't reintroduce burst-capture (it blocks the pipeline; see Design Decisions in README).
 - **Head position** — when the cloud API runs, it returns head coordinates which are stored in `state` (key: `head`) and used by BIRDEYE's adaptive crop on the next tick.
@@ -103,3 +112,5 @@ Logs land in `skills/baby-monitor/data/system.log`, `cron-stdout.log`, `cron-std
 - **Frame retention**: 7 days / 6 GB cap on `data/frames/`. Don't change retention logic without checking the disk-budget table in README's Design Decisions.
 - **Python version**: 3.12+ but ≤ 3.13 (PyTorch constraint).
 - **Trash, not rm**: prefer `trash` for deletes; data files may be the only copy of training signal.
+- **No tests or linting**: there is no test suite, no linter config, no `pyproject.toml`. Don't waste time looking for them or proposing to add them unless asked.
+- **Retraining is manual-only**: the daily retrain cron is disabled. Only retrain when the user explicitly asks — they don't trust cloud API labels as training signal without manual correction first.

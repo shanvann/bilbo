@@ -226,10 +226,17 @@ def main():
     # --- Shadow: run birdeye (results logged but not used for prod decisions) ---
     shadow_birdeye = try_local_analysis(frame_path)
     if shadow_birdeye is not None:
-        log.info("shadow: birdeye -> %s (conf: presence=%.3f eye=%s)",
-                 shadow_birdeye.get("state"),
-                 shadow_birdeye.get("presenceConfidence", 0),
-                 shadow_birdeye.get("eyeConfidence", "n/a"))
+        fallback = shadow_birdeye.get("fallback")
+        if fallback:
+            log.info("shadow: birdeye -> partial (fallback=%s, presence_conf=%.3f eye=%s)",
+                     fallback,
+                     shadow_birdeye.get("presenceConfidence", 0),
+                     shadow_birdeye.get("eyeConfidence", "n/a"))
+        else:
+            log.info("shadow: birdeye -> %s (conf: presence=%.3f eye=%s)",
+                     shadow_birdeye.get("state"),
+                     shadow_birdeye.get("presenceConfidence", 0),
+                     shadow_birdeye.get("eyeConfidence", "n/a"))
 
     # --- Production: pixel-diff gate → cloud API ---
     is_empty, diff_score = detect_empty_bassinet(frame_path)
@@ -283,7 +290,13 @@ def main():
             "eyeConfidence": shadow_birdeye.get("eyeConfidence"),
             "eyeState": shadow_birdeye.get("eyeState"),
             "birdeyeTimings": shadow_birdeye.get("birdeyeTimings"),
+            "fallback": shadow_birdeye.get("fallback"),
         }
+        # Promote face detection data to top level for dashboard overlay + training
+        if shadow_birdeye.get("faceBbox"):
+            flat["faceBbox"] = shadow_birdeye["faceBbox"]
+        if shadow_birdeye.get("faceConfidence") is not None:
+            flat["faceConfidence"] = shadow_birdeye["faceConfidence"]
         # Track which model version produced this shadow result
         training_log = Path(__file__).resolve().parent.parent / "pipeline" / "models" / "training-log.jsonl"
         if training_log.exists():

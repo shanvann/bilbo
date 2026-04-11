@@ -187,6 +187,7 @@ def api_timeline():
             "faceBbox": e.get("faceBbox"),
             "faceConfidence": e.get("faceConfidence"),
             "faceBboxCorrected": e.get("faceBboxCorrected"),
+            "retrainAgreed": e.get("retrainAgreed"),
             "frame": e.get("frame"),
             "alerts": e.get("alerts", []),
         })
@@ -682,6 +683,38 @@ def api_pending_corrections():
         "lastTrained": last_trained_ts,
         "eyeStateChanges": eye_changes,
     })
+
+
+@app.route("/api/run-inference", methods=["POST"])
+def api_run_inference():
+    """Re-run BIRDEYE inference on a single frame and update its entry.
+
+    Shells out to the main venv's Python since the dashboard venv doesn't
+    have torch/cv2.
+    """
+    data = request.get_json()
+    ts = data.get("timestamp")
+    if not ts:
+        return jsonify({"error": "timestamp required"}), 400
+
+    # Run inference via a subprocess using the main venv (which has torch/cv2)
+    script = str(DATA_DIR.parent / "scripts" / "run_single_inference.py")
+    python = str(DATA_DIR.parent / "venv" / "bin" / "python3")
+
+    try:
+        result = subprocess.run(
+            [python, script, ts],
+            capture_output=True, text=True, timeout=30,
+            cwd=str(DATA_DIR.parent),
+        )
+        if result.returncode != 0:
+            return jsonify({"ok": False, "error": result.stderr.strip()[:200]}), 500
+        resp = json.loads(result.stdout)
+        return jsonify(resp)
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "error": "inference timed out"}), 504
+    except (json.JSONDecodeError, Exception) as e:
+        return jsonify({"ok": False, "error": str(e)[:200]}), 500
 
 
 @app.route("/api/safety-stats")

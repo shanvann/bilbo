@@ -103,7 +103,16 @@ def try_local_analysis(frame_path: Path) -> dict | None:
     """Run the three-stage pipeline on a captured frame.
 
     Stages: presence → face detection → eye state.
-    Returns a flat entry dict when confident, or None to trigger cloud API fallback.
+
+    Returns a flat entry dict.  When confident the dict represents a full
+    classification.  When a stage fails (no face, low confidence) the dict
+    still contains partial results (presence, timings, face bbox if available)
+    plus a ``"fallback"`` key describing why the cloud API should still run.
+    The caller uses ``"fallback"`` to decide whether to use the result as
+    production or only as shadow data.
+
+    Returns ``None`` only for hard errors (deps missing, model load failure,
+    unreadable frame) where no useful data was produced.
     """
     if not _check_available():
         return None
@@ -153,7 +162,9 @@ def try_local_analysis(frame_path: Path) -> dict | None:
         timings["total"] = time.monotonic() - t0
         log.info("%s: FALLBACK no_face_detected (%.2fs) -> cloud API",
                  BIRDEYE, timings["total"])
-        return None
+        entry = _build_entry("Unknown", presence, None, timings)
+        entry["fallback"] = "no_face_detected"
+        return entry
 
     log.info("%s: face_detect %.3fs  conf=%.3f bbox=%s",
              BIRDEYE, timings["face_detect"], face_result.confidence,
@@ -171,12 +182,16 @@ def try_local_analysis(frame_path: Path) -> dict | None:
 
     timings["total"] = time.monotonic() - t0
 
-    # Low confidence → fall back to cloud API
+    # Low confidence → fall back to cloud API but still return partial result
     if eye_result.confidence < EYE_STATE_CONFIDENCE_THRESHOLD:
         log.info("%s: FALLBACK low_confidence %.3f < %.3f (%.2fs) -> cloud API",
                  BIRDEYE, eye_result.confidence, EYE_STATE_CONFIDENCE_THRESHOLD,
                  timings["total"])
-        return None
+        entry = _build_entry("Unknown", presence, eye_result, timings,
+                             face_bbox=face_result.normalized_bbox,
+                             face_confidence=face_result.confidence)
+        entry["fallback"] = "low_confidence"
+        return entry
 
     state = "Awake" if eye_result.state == "eyes_open" else "Asleep"
     log.info("%s: RESULT %s conf=%.3f (%.2fs) -> cloud API skipped",

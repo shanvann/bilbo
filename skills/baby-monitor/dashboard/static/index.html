@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Baby Monitor Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=8">
+  <link rel="stylesheet" href="/static/style.css?v=9">
 </head>
 <body>
   <!-- Top Bar: Compact Status -->
@@ -65,16 +65,16 @@
       </div>
     </section>
 
-    <!-- Timeline Stats -->
-    <section id="timeline-stats" class="stats-row">
-      <div class="stat-card">
-        <div class="stat-value" id="stat-in-bassinet">--</div>
-        <div class="stat-label">In Bassinet</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value" id="stat-out-bassinet">--</div>
-        <div class="stat-label">Out of Bassinet</div>
-      </div>
+    <!-- Daily Bassinet Chart -->
+    <section class="card" id="bassinet-chart-card">
+      <h2>Daily Bassinet Time
+        <select id="bassinet-days" class="detail-select" style="margin-left:8px">
+          <option value="7" selected>Last 7 days</option>
+          <option value="14">Last 14 days</option>
+          <option value="30">Last 30 days</option>
+        </select>
+      </h2>
+      <div id="bassinet-chart" class="bassinet-chart"></div>
     </section>
 
     <!-- Block Detail Panel -->
@@ -133,6 +133,31 @@
     </section>
 
 
+    <!-- Pending Corrections -->
+    <section class="card" id="corrections-card">
+      <h2>Pending Corrections
+        <span class="subtitle" id="corrections-summary"></span>
+      </h2>
+      <div id="corrections-breakdown" class="corrections-breakdown"></div>
+      <div class="table-wrap">
+        <table id="corrections-table">
+          <thead>
+            <tr>
+              <th>Corrected</th>
+              <th>Frame Time</th>
+              <th>Original</th>
+              <th>Corrected To</th>
+              <th>BIRDEYE</th>
+              <th>Source</th>
+              <th style="width:60px">Frame</th>
+            </tr>
+          </thead>
+          <tbody id="corrections-body"></tbody>
+        </table>
+      </div>
+      <div id="corrections-empty" class="safety-empty" style="display:none">No pending corrections — all corrections have been used in training.</div>
+    </section>
+
     <!-- BIRDEYE Classifiers: production metrics + training validation -->
     <section class="card" id="classifiers-card">
       <h2>BIRDEYE Classifiers
@@ -149,7 +174,7 @@
         </span>
       </h2>
       <div class="classifiers-meta" id="classifiers-meta"></div>
-      <div class="train-grid">
+      <div class="classifiers-grid">
         <div class="train-col">
           <h3>Data & Training</h3>
           <div id="train-data" class="train-details"></div>
@@ -157,6 +182,10 @@
         <div class="train-col">
           <h3>Presence</h3>
           <div id="classifier-presence"></div>
+        </div>
+        <div class="train-col">
+          <h3>Face Detection</h3>
+          <div id="classifier-face" class="train-details"></div>
         </div>
         <div class="train-col">
           <h3>Eye State</h3>
@@ -233,6 +262,6 @@
     </div>
   </footer>
 
-  <script src="/static/app.js?v=8"></script>
+  <script src="/static/app.js?v=9"></script>
 </body>
 </html>

@@ -319,6 +319,56 @@ def api_sleep_stats():
     return jsonify({"days": result})
 
 
+@app.route("/api/bassinet-daily")
+def api_bassinet_daily():
+    """Daily in-bassinet vs out-of-bassinet hours for the last N days."""
+    days = int(request.args.get("days", 7))
+    db = get_db()
+
+    import zoneinfo
+    et = zoneinfo.ZoneInfo("America/New_York")
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=days)
+
+    raw = db.get_entries(
+        start=cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        end=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+    # Accumulate per-day in/out durations
+    daily = {}  # date_str → {"in": seconds, "out": seconds}
+    for i in range(len(raw) - 1):
+        e = raw[i]
+        next_e = raw[i + 1]
+        ts = datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00"))
+        next_ts = datetime.fromisoformat(next_e["timestamp"].replace("Z", "+00:00"))
+        dur = (next_ts - ts).total_seconds()
+        if dur <= 0 or dur > 3600:  # skip gaps > 1h
+            continue
+
+        date_str = ts.astimezone(et).strftime("%Y-%m-%d")
+        if date_str not in daily:
+            daily[date_str] = {"in": 0, "out": 0}
+
+        if e.get("babyPresent"):
+            daily[date_str]["in"] += dur
+        else:
+            daily[date_str]["out"] += dur
+
+    result = []
+    for date_str in sorted(daily.keys()):
+        d = daily[date_str]
+        total = d["in"] + d["out"]
+        result.append({
+            "date": date_str,
+            "inHours": round(d["in"] / 3600, 1),
+            "outHours": round(d["out"] / 3600, 1),
+            "inPct": round(d["in"] / total * 100) if total > 0 else 0,
+        })
+
+    return jsonify({"days": result})
+
+
 @app.route("/api/feeds")
 def api_feeds():
     days = int(request.args.get("days", 1))
@@ -570,18 +620,27 @@ def api_retrain():
     monitor_py = str(DATA_DIR.parent / "scripts" / "monitor.py")
     python = str(DATA_DIR.parent / "venv" / "bin" / "python3")
 
-    # Spawn subprocess and track its PID
+    # Spawn subprocess — redirect to log files to avoid pipe buffer deadlock.
+    # Face detection dataset init produces substantial output (~500 frames)
+    # which would fill the 64KB pipe buffer and block the subprocess.
+    retrain_stdout = open(DATA_DIR / "retrain-dashboard-stdout.log", "w")
+    retrain_stderr = open(DATA_DIR / "retrain-dashboard-stderr.log", "w")
+    env = dict(os.environ, PYTHONUNBUFFERED="1")
     proc = subprocess.Popen(
-        [python, monitor_py, "--retrain"],
+        [python, "-u", monitor_py, "--retrain"],
         cwd=str(DATA_DIR.parent),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=retrain_stdout,
+        stderr=retrain_stderr,
+        env=env,
+        start_new_session=True,  # survive dashboard restarts
     )
     _train_mark_started(proc.pid, trigger)
 
     # Background thread to reap the child and update state when done
     def _reap():
         proc.wait()
+        retrain_stdout.close()
+        retrain_stderr.close()
         from lib.training_state import mark_completed
         mark_completed(proc.returncode)
 
@@ -598,6 +657,30 @@ def api_retrain_abort():
 
     killed = _train_abort()
     return jsonify({"ok": killed, "status": "aborted" if killed else "not found"})
+
+
+@app.route("/api/pending-corrections")
+def api_pending_corrections():
+    """Return pending corrections not yet used in training."""
+    db = get_db()
+    logs = db.get_last_training_runs(1)
+    last_trained_ts = logs[0].get("timestamp") if logs else None
+    corrections = db.get_pending_corrections(last_trained_ts)
+
+    # Summary breakdown
+    eye_changes = {}
+    for c in corrections:
+        orig = c.get("originalEyeState") or "unknown"
+        corr = c.get("correctedEyeState") or "unknown"
+        key = f"{orig} → {corr}"
+        eye_changes[key] = eye_changes.get(key, 0) + 1
+
+    return jsonify({
+        "corrections": corrections,
+        "count": len(corrections),
+        "lastTrained": last_trained_ts,
+        "eyeStateChanges": eye_changes,
+    })
 
 
 @app.route("/api/safety-stats")

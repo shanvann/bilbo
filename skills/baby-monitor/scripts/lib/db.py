@@ -423,6 +423,59 @@ def get_pending_corrections_count(last_trained: str = None) -> tuple[int, int]:
     return total, pending
 
 
+def get_pending_corrections(last_trained: str = None) -> list[dict]:
+    """Return pending correction records (not yet used in training).
+
+    Each record includes the correction details plus the entry's current
+    eye state and shadow predictions for context.
+    """
+    conn = get_connection()
+    if last_trained:
+        rows = conn.execute("""
+            SELECT c.corrected_at, c.original_timestamp, c.frame,
+                   c.original_state, c.corrected_state,
+                   c.original_eye_state, c.corrected_eye_state,
+                   c.detection_method, c.source,
+                   e.shadow_birdeye_state, e.shadow_prod_state,
+                   e.presence_confidence, e.eye_confidence
+            FROM corrections c
+            LEFT JOIN entries e ON e.timestamp = c.original_timestamp
+            WHERE c.corrected_at > ?
+            ORDER BY c.corrected_at DESC
+        """, (last_trained,)).fetchall()
+    else:
+        rows = conn.execute("""
+            SELECT c.corrected_at, c.original_timestamp, c.frame,
+                   c.original_state, c.corrected_state,
+                   c.original_eye_state, c.corrected_eye_state,
+                   c.detection_method, c.source,
+                   e.shadow_birdeye_state, e.shadow_prod_state,
+                   e.presence_confidence, e.eye_confidence
+            FROM corrections c
+            LEFT JOIN entries e ON e.timestamp = c.original_timestamp
+            ORDER BY c.corrected_at DESC
+        """).fetchall()
+
+    result = []
+    for row in rows:
+        result.append({
+            "correctedAt": row["corrected_at"],
+            "originalTimestamp": row["original_timestamp"],
+            "frame": row["frame"],
+            "originalState": row["original_state"],
+            "correctedState": row["corrected_state"],
+            "originalEyeState": row["original_eye_state"],
+            "correctedEyeState": row["corrected_eye_state"],
+            "detectionMethod": row["detection_method"],
+            "source": row["source"],
+            "shadowBirdeyeState": row["shadow_birdeye_state"],
+            "shadowProdState": row["shadow_prod_state"],
+            "presenceConfidence": row["presence_confidence"],
+            "eyeConfidence": row["eye_confidence"],
+        })
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Training runs
 # ---------------------------------------------------------------------------
@@ -556,9 +609,10 @@ def get_safety_stats(hours: float = 168) -> dict:
         bird_lower = bird.lower()
         prod = prod_raw.lower()
 
-        bird_present = bird_lower in ("asleep", "awake")
-        # Cloud-side: Unknown also means present (the API saw a baby but
-        # wasn't sure about state).
+        # Both sides: Unknown means present (baby visible, state uncertain).
+        # BIRDEYE returns Unknown when face detection or eye-state fails but
+        # presence classifier confirmed the baby is there.
+        bird_present = bird_lower in ("asleep", "awake", "unknown")
         prod_present = prod in ("asleep", "awake", "unknown", "drowsy")
 
         presence_pairs.append((
@@ -731,6 +785,61 @@ def get_safety_stats(hours: float = 168) -> dict:
                 "total": eye_total,
             }
 
+    # ----- Face detection stats -----
+    # Query baby-present entries with shadow data in the window.
+    # Use cloud API state as proxy ground truth for face visibility:
+    #   Awake/Asleep → face expected (visible)
+    #   Unknown/Drowsy → face not expected (not clearly visible)
+    face_rows = conn.execute("""
+        SELECT data, shadow_prod_state FROM entries
+        WHERE timestamp >= ?
+          AND baby_present = 1
+          AND shadow_birdeye_state IS NOT NULL
+    """, (cutoff,)).fetchall()
+
+    face_total = 0
+    face_detected = 0
+    face_confidences = []
+    # Confusion: (expected, detected) where both are "visible" or "not_visible"
+    face_pairs = []
+
+    for row in face_rows:
+        entry = json.loads(row["data"])
+        face_total += 1
+        fb = entry.get("faceBbox")
+        has_face = bool(fb and isinstance(fb, dict) and "x1" in fb)
+        if has_face:
+            face_detected += 1
+            fc = entry.get("faceConfidence")
+            if fc is not None:
+                face_confidences.append(fc)
+
+        # Ground truth: cloud API state determines if face was visible
+        prod = (row["shadow_prod_state"] or "").strip().lower()
+        face_expected = prod in ("awake", "asleep")
+        face_pairs.append((
+            "visible" if face_expected else "not_visible",
+            "visible" if has_face else "not_visible",
+        ))
+
+    face_vs_cloud = build_panel(face_pairs, ["visible", "not_visible"])
+
+    face_stats = {
+        "total": face_total,
+        "detected": face_detected,
+        "detectionRate": round(face_detected / face_total, 3) if face_total > 0 else 0.0,
+        "fallbackRate": round((face_total - face_detected) / face_total, 3) if face_total > 0 else 0.0,
+        "vsCloud": face_vs_cloud,
+    }
+    if face_confidences:
+        sc = sorted(face_confidences)
+        face_stats["confidence"] = {
+            "avg": round(sum(sc) / len(sc), 3),
+            "min": round(sc[0], 3),
+            "max": round(sc[-1], 3),
+            "p50": round(sc[len(sc) // 2], 3),
+        }
+
     return {
         "hours": hours,
         "shadowTotal": len(presence_pairs),
@@ -749,6 +858,7 @@ def get_safety_stats(hours: float = 168) -> dict:
             "vsCloud": eye_vs_cloud,
             "vsCorrections": eye_vs_corrections,
         },
+        "faceDetection": face_stats,
     }
 
 
@@ -909,6 +1019,7 @@ class MonitorDB:
     # Corrections
     insert_correction = staticmethod(insert_correction)
     get_pending_corrections_count = staticmethod(get_pending_corrections_count)
+    get_pending_corrections = staticmethod(get_pending_corrections)
 
     # Training
     insert_training_run = staticmethod(insert_training_run)

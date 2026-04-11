@@ -162,11 +162,11 @@ async function loadTimeline() {
       document.getElementById('timeline-bar').innerHTML =
         '<div style="padding:8px;color:var(--text-dim)">No data for this date</div>';
       document.getElementById('timeline-labels').innerHTML = '';
-      updateTimelineStats([]);
+      // no timeline entries
       return;
     }
 
-    updateTimelineStats(entries);
+    // Timeline stats now handled by bassinet chart
 
     // For a specific date: midnight to midnight ET
     // For today/live: last 24h
@@ -739,46 +739,178 @@ document.getElementById('block-next').addEventListener('click', () => {
 // ---------------------------------------------------------------------------
 // Timeline stats (in-bassinet vs out, computed from timeline entries)
 // ---------------------------------------------------------------------------
-function updateTimelineStats(entries) {
-  if (!entries || entries.length === 0) {
-    document.getElementById('stat-in-bassinet').textContent = '--';
-    document.getElementById('stat-out-bassinet').textContent = '--';
-    return;
-  }
+// ---------------------------------------------------------------------------
+// Daily bassinet chart
+// ---------------------------------------------------------------------------
+async function loadBassinetChart() {
+  try {
+    const days = document.getElementById('bassinet-days').value;
+    const res = await fetch('/api/bassinet-daily?days=' + days);
+    const data = await res.json();
+    const chartEl = document.getElementById('bassinet-chart');
 
-  let inMs = 0;
-  let outMs = 0;
-
-  for (let i = 0; i < entries.length; i++) {
-    const e = entries[i];
-    const eTime = new Date(e.timestamp).getTime();
-    const nextTime = i + 1 < entries.length
-      ? new Date(entries[i + 1].timestamp).getTime()
-      : eTime; // last entry: no duration to add
-
-    if (i + 1 >= entries.length) continue;
-    const dur = nextTime - eTime;
-
-    if (e.babyPresent) {
-      inMs += dur;
-    } else {
-      outMs += dur;
+    if (!data.days || data.days.length === 0) {
+      chartEl.innerHTML = '<div style="color:var(--text-dim);padding:20px;text-align:center">No data</div>';
+      return;
     }
+
+    // Find max total hours for scaling
+    const maxHours = Math.max(...data.days.map(d => d.inHours + d.outHours), 1);
+
+    let html = '';
+    for (const d of data.days) {
+      const total = d.inHours + d.outHours;
+      const stackPct = total > 0 ? (total / maxHours * 100) : 0;
+      const inPct = total > 0 ? (d.inHours / total * 100) : 0;
+      const outPct = 100 - inPct;
+
+      // Format date as "Mon 4/7"
+      const dt = new Date(d.date + 'T12:00:00');
+      const dayName = dt.toLocaleDateString('en-US', { weekday: 'short' });
+      const monthDay = (dt.getMonth() + 1) + '/' + dt.getDate();
+
+      html += '<div class="bassinet-bar-group">';
+      html += '<div class="bassinet-bar-stack" style="height:100%">';
+      html += '<div style="flex:' + (100 - stackPct) + '"></div>'; // spacer
+      if (outPct > 0 && d.outHours > 0) {
+        html += '<div class="bassinet-bar-seg out" style="flex:' + (stackPct * outPct / 100) + '" title="Out: ' + d.outHours + 'h">'
+          + (d.outHours >= 1 ? d.outHours + 'h' : '') + '</div>';
+      }
+      if (inPct > 0 && d.inHours > 0) {
+        html += '<div class="bassinet-bar-seg in" style="flex:' + (stackPct * inPct / 100) + '" title="In: ' + d.inHours + 'h (' + d.inPct + '%)">'
+          + (d.inHours >= 1 ? d.inHours + 'h' : '') + '</div>';
+      }
+      html += '</div>';
+      html += '<div class="bassinet-bar-label">' + dayName + '<br>' + monthDay + '</div>';
+      html += '</div>';
+    }
+
+    html += '</div>';
+    // Legend
+    html += '<div class="bassinet-chart-legend">';
+    html += '<span><span class="legend-dot" style="background:var(--accent-blue)"></span> In Bassinet</span>';
+    html += '<span><span class="legend-dot" style="background:rgba(255,152,0,0.5)"></span> Out of Bassinet</span>';
+    html += '</div>';
+
+    chartEl.innerHTML = html;
+  } catch (e) {
+    console.error('Bassinet chart error:', e);
   }
-
-  const totalMs = inMs + outMs;
-  const fmtDur = (ms) => {
-    const totalMin = Math.round(ms / 60000);
-    const h = Math.floor(totalMin / 60);
-    const m = totalMin % 60;
-    return h > 0 ? h + 'h ' + m + 'm' : m + 'm';
-  };
-  const pct = (ms) => totalMs > 0 ? Math.round(ms / totalMs * 100) + '%' : '0%';
-
-  document.getElementById('stat-in-bassinet').textContent = fmtDur(inMs) + ' (' + pct(inMs) + ')';
-  document.getElementById('stat-out-bassinet').textContent = fmtDur(outMs) + ' (' + pct(outMs) + ')';
 }
 
+
+// ---------------------------------------------------------------------------
+// Pending Corrections
+// ---------------------------------------------------------------------------
+async function loadPendingCorrections() {
+  try {
+    const res = await fetch('/api/pending-corrections');
+    const data = await res.json();
+    const corrections = data.corrections || [];
+
+    const summary = document.getElementById('corrections-summary');
+    const tbody = document.getElementById('corrections-body');
+    const emptyEl = document.getElementById('corrections-empty');
+    const tableEl = document.getElementById('corrections-table');
+    const breakdownEl = document.getElementById('corrections-breakdown');
+
+    if (corrections.length === 0) {
+      summary.textContent = '';
+      tbody.innerHTML = '';
+      tableEl.style.display = 'none';
+      breakdownEl.innerHTML = '';
+      emptyEl.style.display = '';
+      return;
+    }
+
+    tableEl.style.display = '';
+    emptyEl.style.display = 'none';
+    summary.textContent = '(' + corrections.length + ' pending)';
+
+    // Breakdown chips
+    const changes = data.eyeStateChanges || {};
+    const labelMap = {
+      eyes_open: 'Eyes Open', eyes_closed: 'Eyes Closed',
+      face_not_visible: 'Face Not Visible', not_in_bassinet: 'Not In Bassinet',
+      Awake: 'Awake', Asleep: 'Asleep', Unknown: 'Unknown',
+      unknown: '?', null: '?',
+    };
+    function friendlyLabel(s) { return labelMap[s] || s || '?'; }
+    function friendlyChange(key) {
+      const parts = key.split(' → ');
+      return friendlyLabel(parts[0]) + ' → ' + friendlyLabel(parts[1]);
+    }
+
+    let chips = '';
+    for (const [change, count] of Object.entries(changes).sort((a, b) => b[1] - a[1])) {
+      chips += '<span class="corr-chip">' + friendlyChange(change) + ' <strong>' + count + '</strong></span>';
+    }
+    breakdownEl.innerHTML = chips;
+
+    // Table rows
+    tbody.innerHTML = '';
+    for (const c of corrections) {
+      const tr = document.createElement('tr');
+
+      // Corrected at
+      const tdWhen = document.createElement('td');
+      tdWhen.textContent = formatDateTimeET(c.correctedAt);
+      tr.appendChild(tdWhen);
+
+      // Frame timestamp
+      const tdFrame = document.createElement('td');
+      tdFrame.textContent = formatDateTimeET(c.originalTimestamp);
+      tr.appendChild(tdFrame);
+
+      // Original label (prefer eye state, fall back to sleep state)
+      const tdOrig = document.createElement('td');
+      tdOrig.textContent = friendlyLabel(c.originalEyeState || c.originalState);
+      tdOrig.className = 'corr-label';
+      tr.appendChild(tdOrig);
+
+      // Corrected label
+      const tdCorr = document.createElement('td');
+      tdCorr.textContent = friendlyLabel(c.correctedEyeState || c.correctedState);
+      tdCorr.className = 'corr-label corr-label-new';
+      tr.appendChild(tdCorr);
+
+      // BIRDEYE prediction
+      const tdBirdeye = document.createElement('td');
+      if (c.shadowBirdeyeState) {
+        const birdState = c.shadowBirdeyeState.toLowerCase();
+        const birdEye = birdState === 'awake' ? 'Eyes Open' : birdState === 'asleep' ? 'Eyes Closed' : birdState;
+        const agreed = (c.correctedEyeState === 'eyes_open' && birdState === 'awake') ||
+                       (c.correctedEyeState === 'eyes_closed' && birdState === 'asleep');
+        tdBirdeye.textContent = birdEye;
+        tdBirdeye.className = 'corr-label' + (agreed ? ' corr-agree' : ' corr-disagree');
+      } else {
+        tdBirdeye.textContent = '—';
+        tdBirdeye.className = 'corr-label';
+      }
+      tr.appendChild(tdBirdeye);
+
+      // Source
+      const tdSrc = document.createElement('td');
+      tdSrc.textContent = c.source || 'dashboard';
+      tr.appendChild(tdSrc);
+
+      // Frame thumbnail
+      const tdThumb = document.createElement('td');
+      if (c.frame) {
+        const img = document.createElement('img');
+        img.src = frameUrl(c.frame);
+        img.className = 'corr-thumb';
+        img.onclick = () => showFrameModal(c.frame);
+        tdThumb.appendChild(img);
+      }
+      tr.appendChild(tdThumb);
+
+      tbody.appendChild(tr);
+    }
+  } catch (e) {
+    console.error('Pending corrections error:', e);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // BIRDEYE Classifiers: combined production + training validation view
@@ -794,9 +926,63 @@ function delta(curr, prev, suffix, higherIsBetter) {
   return ' <span style="font-size:0.7rem;color:' + color + '">' + sign + (diff * 100).toFixed(1) + suffix + '</span>';
 }
 
+function renderFaceDetectionColumn() {
+  const el = document.getElementById('classifier-face');
+  if (!el) return;
+
+  const face = safetyData ? safetyData.faceDetection : null;
+  if (!face || face.total === 0) {
+    el.innerHTML = '<div class="safety-empty">No data yet — populates as new frames arrive with face detection.</div>';
+    return;
+  }
+
+  const detRate = face.detectionRate;
+  const detClass = _safetyClass(detRate, [0.50, 0.75]);
+  const faceClasses = ['visible', 'not_visible'];
+
+  let html = '';
+  html += '<div class="safety-source-label">Production (shadow)</div>';
+  html += '<div class="safety-headline">';
+  html += '<div class="safety-headline-row" title="% of baby-present frames where YuNet detected a face"><span class="safety-headline-label">Detection Rate</span>';
+  html += '<span class="safety-headline-value ' + detClass + '">' + Math.round(detRate * 100) + '%</span></div>';
+
+  // Macro F1 from vsCloud
+  const vc = face.vsCloud || {};
+  if (vc.macroF1 != null) {
+    html += '<div class="safety-headline-row" title="Macro F1: face detected vs cloud API face visibility (Awake/Asleep = visible, Unknown = not visible)"><span class="safety-headline-label">Macro F1</span>';
+    html += '<span class="safety-headline-value ' + _safetyClass(vc.macroF1, [0.50, 0.75]) + '">' + (vc.macroF1 * 100).toFixed(0) + '%</span></div>';
+  }
+
+  html += '<div class="safety-headline-row"><span class="safety-headline-label">Frames</span>';
+  html += '<span class="safety-headline-value">' + face.detected + ' / ' + face.total + '</span></div>';
+  html += '</div>';
+
+  // Confusion matrix + per-class P/R/F1 vs cloud
+  if (vc.total > 0) {
+    html += '<div class="safety-source-label">vs Cloud API (visible = Awake/Asleep)</div>';
+    html += _renderConfusion(vc, faceClasses);
+    html += _renderPerClass(vc, faceClasses);
+  }
+
+  // Confidence stats
+  if (face.confidence) {
+    const c = face.confidence;
+    html += '<div class="safety-source-label">Confidence</div>';
+    html += '<div class="train-details">';
+    html += '<div class="train-row"><span>Avg</span><span class="train-val">' + Math.round(c.avg * 100) + '%</span></div>';
+    html += '<div class="train-row"><span>Min</span><span class="train-val">' + Math.round(c.min * 100) + '%</span></div>';
+    html += '<div class="train-row"><span>Median</span><span class="train-val">' + Math.round(c.p50 * 100) + '%</span></div>';
+    html += '<div class="train-row"><span>Max</span><span class="train-val">' + Math.round(c.max * 100) + '%</span></div>';
+    html += '</div>';
+  }
+
+  el.innerHTML = html;
+}
+
 function renderClassifiers() {
   renderDataColumn();
   renderClassifierColumn('classifier-presence', 'presence');
+  renderFaceDetectionColumn();
   renderClassifierColumn('classifier-eye', 'eye_state');
 
   // Meta line: model version, deployed version, training status, rollback
@@ -1266,6 +1452,8 @@ const SAFETY_CLASS_LABELS = {
   awake: 'Awake',
   eyes_open: 'eyes_open',
   eyes_closed: 'eyes_closed',
+  visible: 'visible',
+  not_visible: 'not visible',
 };
 
 function _safetyClass(value, thresholds) {
@@ -1378,6 +1566,8 @@ async function loadAll() {
     loadTrainingStatus(),
     loadMonitorStats(),
     loadSafetyStats(),
+    loadBassinetChart(),
+    loadPendingCorrections(),
   ]);
   document.getElementById('footer-refresh').textContent =
     'Last refreshed: ' + new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York' });
@@ -1387,5 +1577,6 @@ initTimelineNav();
 document.getElementById('perf-range').addEventListener('change', loadMonitorStats);
 document.getElementById('safety-range').addEventListener('change', loadSafetyStats);
 document.getElementById('events-count').addEventListener('change', loadEvents);
+document.getElementById('bassinet-days').addEventListener('change', loadBassinetChart);
 loadAll();
 setInterval(loadAll, REFRESH_INTERVAL_SEC * 1000);

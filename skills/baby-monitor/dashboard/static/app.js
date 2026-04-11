@@ -1066,6 +1066,15 @@ function renderClassifiers() {
       }
     }
 
+    // Fallback rate from face detection
+    if (safetyData && safetyData.faceDetection) {
+      const fd = safetyData.faceDetection;
+      const fbPct = Math.round(fd.fallbackRate * 100);
+      const fbColor = fbPct > 20 ? 'meta-warn' : '';
+      tags.push('<span class="meta-tag ' + fbColor + '" title="% of baby-present frames where face detection failed → cloud API fallback">'
+        + 'fallback: ' + fbPct + '% (' + (fd.total - fd.detected) + '/' + fd.total + ')</span>');
+    }
+
     // Run status
     if (trainingData) {
       if (trainingData.running) {
@@ -1179,18 +1188,20 @@ function renderClassifierColumn(elId, type) {
     }
     html += '</div>';
 
-    // BIRDEYE confusion + P/R/F1
+    // BIRDEYE confusion + P/R/F1 (collapsed by default)
     if (hasBird && bird.confusion) {
-      html += '<div class="safety-source-label">BIRDEYE vs Corrections</div>';
+      html += '<details class="cm-details"><summary class="safety-source-label cm-toggle">BIRDEYE vs Corrections</summary>';
       html += _renderConfusion(bird, classes);
       html += _renderPerClass(bird, classes);
+      html += '</details>';
     }
 
-    // Cloud API confusion + P/R/F1
+    // Cloud API confusion + P/R/F1 (collapsed by default)
     if (hasCloud && cloud.confusion) {
-      html += '<div class="safety-source-label">Cloud API vs Corrections</div>';
+      html += '<details class="cm-details"><summary class="safety-source-label cm-toggle">Cloud API vs Corrections</summary>';
       html += _renderConfusion(cloud, classes);
       html += _renderPerClass(cloud, classes);
+      html += '</details>';
     }
 
     if (!hasBird && !hasCloud) {

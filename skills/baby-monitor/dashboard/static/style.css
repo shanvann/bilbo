@@ -783,6 +783,29 @@ footer {
   padding: 6px 0;
 }
 
+/* Collapsible confusion matrices */
+.cm-details {
+  margin: 4px 0;
+}
+.cm-toggle {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+.cm-toggle::before {
+  content: '▸ ';
+  font-size: 0.7rem;
+}
+.cm-details[open] .cm-toggle::before {
+  content: '▾ ';
+}
+.cm-toggle:hover {
+  color: var(--accent-blue);
+}
+.cm-details summary::-webkit-details-marker {
+  display: none;
+}
+
 /* Face detection overlay on viewer frame */
 .face-overlay {
   position: absolute;

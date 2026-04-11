@@ -589,6 +589,10 @@ footer {
   color: var(--accent-green);
   background: rgba(76, 175, 80, 0.15);
 }
+.viewer-retrain-status.retrain-disagree {
+  color: var(--accent-red);
+  background: rgba(239, 83, 80, 0.15);
+}
 
 /* Model performance grid */
 .perf-grid {

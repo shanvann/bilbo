@@ -505,6 +505,51 @@ document.getElementById('viewer-clear-face').addEventListener('click', async () 
 
 _initDragToDraw();
 
+// Run Inference button — re-run BIRDEYE on current frame
+document.getElementById('viewer-run-inference').addEventListener('click', async () => {
+  const e = viewerEntries[viewerIndex];
+  if (!e) return;
+  const saved = document.getElementById('viewer-saved');
+  const btn = document.getElementById('viewer-run-inference');
+  btn.disabled = true;
+  btn.textContent = 'Running...';
+  saved.textContent = '';
+
+  try {
+    const res = await fetch('/api/run-inference', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ timestamp: e.timestamp }),
+    });
+    const data = await res.json();
+    if (data.ok && data.shadow) {
+      // Update local entry with new shadow data
+      e.shadowBirdeyeState = data.shadow.birdeyeState;
+      e.shadowEyeState = data.shadow.eyeState;
+      e.shadowPresenceConfidence = data.shadow.presenceConfidence;
+      e.shadowEyeConfidence = data.shadow.eyeConfidence;
+      e.shadowFallback = data.shadow.fallback;
+      if (data.faceBbox) e.faceBbox = data.faceBbox;
+      if (data.faceConfidence != null) e.faceConfidence = data.faceConfidence;
+      if (data.retrainAgreed != null) e.retrainAgreed = data.retrainAgreed;
+      saved.textContent = 'inference done';
+      saved.style.color = '#4caf50';
+      renderViewer();
+    } else {
+      saved.textContent = data.reason || 'no result';
+      saved.style.color = 'var(--accent-orange)';
+    }
+  } catch (err) {
+    saved.textContent = 'error';
+    saved.style.color = '#ff5252';
+    console.error('Inference error:', err);
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Run Inference';
+  setTimeout(() => { saved.textContent = ''; }, 3000);
+});
+
 function renderViewer() {
   if (viewerEntries.length === 0) return;
   const e = viewerEntries[viewerIndex];
@@ -609,7 +654,7 @@ function renderViewer() {
   const stateSelect = document.getElementById('viewer-state');
   stateSelect.value = eyeState;
 
-  // Retrain status indicator (derived from training API data)
+  // Retrain status indicator (derived from training API data + retrainAgreed)
   const retrainEl = document.getElementById('viewer-retrain-status');
   const correctedAtStr = e.eyeStateCorrectedAt || e._correctedAt;
   const lastTrainedStr = trainingData && trainingData.lastTrained;
@@ -617,8 +662,17 @@ function renderViewer() {
     const correctedAt = correctedAtStr ? new Date(correctedAtStr) : null;
     const lastTrained = lastTrainedStr ? new Date(lastTrainedStr) : null;
     if (lastTrained && correctedAt && correctedAt < lastTrained) {
-      retrainEl.textContent = 'retrained';
-      retrainEl.className = 'viewer-retrain-status retrained';
+      // Was retrained — show whether inference now agrees with correction
+      if (e.retrainAgreed === true) {
+        retrainEl.textContent = 'retrained ✓';
+        retrainEl.className = 'viewer-retrain-status retrained';
+      } else if (e.retrainAgreed === false) {
+        retrainEl.textContent = 'retrained ✗ still disagrees';
+        retrainEl.className = 'viewer-retrain-status retrain-disagree';
+      } else {
+        retrainEl.textContent = 'retrained';
+        retrainEl.className = 'viewer-retrain-status retrained';
+      }
     } else {
       retrainEl.textContent = 'pending retrain';
       retrainEl.className = 'viewer-retrain-status pending';

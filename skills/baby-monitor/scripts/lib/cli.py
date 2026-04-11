@@ -712,6 +712,8 @@ def _reinfer_corrections_against_current_model(
     import lib.local_pipeline as _lp
     _lp._presence_clf = None
     _lp._eye_state_clf = None
+    _lp._face_detector = None
+    _lp._face_detector_fallback = None
     _lp._available = None
 
     # State-domain labels kept for backwards compat with the existing
@@ -825,10 +827,58 @@ def _reinfer_corrections_against_current_model(
         }
         if model_version is not None:
             entry["shadowModelVersion"] = model_version
+
+        # Tag whether post-retrain inference agrees with correction
+        entry["retrainAgreed"] = agreed
+
+        # Promote face detection data
+        if birdeye_result and birdeye_result.get("faceBbox"):
+            entry["faceBbox"] = birdeye_result["faceBbox"]
+        if birdeye_result and birdeye_result.get("faceConfidence") is not None:
+            entry["faceConfidence"] = birdeye_result["faceConfidence"]
+
         updated += 1
 
+    # Write back to JSONL
     if updated > 0:
         JSONL_FILE.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+
+    # Write back to SQLite — update shadow columns + retrainAgreed for each
+    # corrected entry so the dashboard sees fresh results immediately.
+    if updated > 0:
+        from .db import get_connection
+        conn = get_connection()
+        for entry in entries:
+            if not entry.get("eyeStateEdited"):
+                continue
+            ts = entry.get("timestamp")
+            if not ts:
+                continue
+            shadow = entry.get("shadow", {})
+            conn.execute("""
+                UPDATE entries SET
+                    data = ?,
+                    shadow_birdeye_state = ?,
+                    shadow_prod_state = ?,
+                    shadow_agreed = ?,
+                    presence_confidence = ?,
+                    eye_confidence = ?,
+                    shadow_timings_total = ?,
+                    shadow_model_version = ?
+                WHERE timestamp = ?
+            """, (
+                json.dumps(entry),
+                shadow.get("birdeyeState"),
+                shadow.get("prodState"),
+                1 if shadow.get("agreed") else 0,
+                shadow.get("presenceConfidence"),
+                shadow.get("eyeConfidence"),
+                (shadow.get("birdeyeTimings") or {}).get("total"),
+                entry.get("shadowModelVersion"),
+                ts,
+            ))
+        conn.commit()
+        log.info("reinfer: updated %d entries in SQLite", updated)
 
     return total_reinfer, agreed_after, correction_class_counts, presence_class_counts, eye_confusion_pairs, pres_confusion_pairs
 

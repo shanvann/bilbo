@@ -31,6 +31,8 @@ from pathlib import Path
 from .config import (
     PRESENCE_MODEL,
     EYE_STATE_MODEL,
+    FACE_DETECT_MODEL_PT,
+    FACE_DETECT_PT_CONFIDENCE_THRESHOLD,
 )
 
 log = logging.getLogger("monitor")
@@ -38,7 +40,8 @@ log = logging.getLogger("monitor")
 # Lazy-loaded singletons
 _presence_clf = None
 _eye_state_clf = None
-_face_detector = None
+_face_detector = None      # primary (trainable or YuNet)
+_face_detector_fallback = None  # YuNet fallback when trainable is primary
 _available = None  # None = not yet checked
 
 BIRDEYE = "birdeye"
@@ -74,11 +77,11 @@ def _check_available() -> bool:
 # ---------------------------------------------------------------------------
 
 def _get_classifiers():
-    global _presence_clf, _eye_state_clf, _face_detector
+    global _presence_clf, _eye_state_clf, _face_detector, _face_detector_fallback
     if _presence_clf is not None and _eye_state_clf is not None and _face_detector is not None:
-        return _presence_clf, _eye_state_clf, _face_detector
+        return _presence_clf, _eye_state_clf, _face_detector, _face_detector_fallback
 
-    from .classifiers import BabyPresenceClassifier, EyeStateClassifier, FaceDetector
+    from .classifiers import BabyPresenceClassifier, EyeStateClassifier, FaceDetector, TrainableFaceDetector
 
     device = "cpu"
     presence_path = PRESENCE_MODEL
@@ -89,10 +92,22 @@ def _get_classifiers():
 
     _presence_clf = BabyPresenceClassifier(presence_path, device)
     _eye_state_clf = EyeStateClassifier(eye_path, device)
-    _face_detector = FaceDetector()
+
+    # Face detector: try trainable model first, fall back to YuNet
+    try:
+        _face_detector = TrainableFaceDetector(
+            FACE_DETECT_MODEL_PT, device,
+            confidence_threshold=FACE_DETECT_PT_CONFIDENCE_THRESHOLD,
+        )
+        _face_detector_fallback = FaceDetector()
+        log.info("%s: using trainable face detector (YuNet as fallback)", BIRDEYE)
+    except (FileNotFoundError, Exception) as e:
+        log.info("%s: trainable face detector not available (%s), using YuNet", BIRDEYE, e)
+        _face_detector = FaceDetector()
+        _face_detector_fallback = None
 
     log.info("%s: classifiers loaded in %.2fs", BIRDEYE, time.monotonic() - t0)
-    return _presence_clf, _eye_state_clf, _face_detector
+    return _presence_clf, _eye_state_clf, _face_detector, _face_detector_fallback
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +133,7 @@ def try_local_analysis(frame_path: Path) -> dict | None:
         return None
 
     try:
-        presence_clf, eye_clf, face_detector = _get_classifiers()
+        presence_clf, eye_clf, face_detector, face_fallback = _get_classifiers()
     except Exception as e:
         log.error("%s: classifier load failed: %s", BIRDEYE, e)
         return None
@@ -156,6 +171,11 @@ def try_local_analysis(frame_path: Path) -> dict | None:
     # --- Stage 2: face detection (on bassinet crop) ---
     t_face = time.monotonic()
     face_result = face_detector.detect(bassinet_crop)
+    if face_result is None and face_fallback is not None:
+        face_result = face_fallback.detect(bassinet_crop)
+        if face_result is not None:
+            log.info("%s: face_detect primary missed, fallback found face conf=%.3f",
+                     BIRDEYE, face_result.confidence)
     timings["face_detect"] = time.monotonic() - t_face
 
     if face_result is None:

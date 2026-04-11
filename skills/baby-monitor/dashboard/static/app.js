@@ -976,6 +976,31 @@ function renderFaceDetectionColumn() {
     html += '</div>';
   }
 
+  // Training validation metrics (from last training run)
+  const faceMetrics = trainingData && trainingData.lastMetrics
+    ? trainingData.lastMetrics.face_detect : null;
+  if (faceMetrics) {
+    html += '<div class="safety-source-label" style="margin-top:14px">Training Validation</div>';
+    html += '<div class="train-details">';
+    if (faceMetrics.mean_iou != null) {
+      html += '<div class="train-row"><span title="Mean IoU on positive validation samples">Mean IoU</span><span class="train-val">'
+        + (faceMetrics.mean_iou * 100).toFixed(1) + '%</span></div>';
+    }
+    if (faceMetrics.conf_accuracy != null) {
+      html += '<div class="train-row"><span title="Confidence binary accuracy (face present vs not)">Conf Accuracy</span><span class="train-val">'
+        + (faceMetrics.conf_accuracy * 100).toFixed(1) + '%</span></div>';
+    }
+    if (faceMetrics.best_epoch != null) {
+      html += '<div class="train-row"><span>Epochs</span><span class="train-val">'
+        + faceMetrics.best_epoch + ' / ' + faceMetrics.total_epochs + '</span></div>';
+    }
+    if (faceMetrics.val_loss != null) {
+      html += '<div class="train-row"><span>Val loss</span><span class="train-val">'
+        + faceMetrics.val_loss + '</span></div>';
+    }
+    html += '</div>';
+  }
+
   el.innerHTML = html;
 }
 

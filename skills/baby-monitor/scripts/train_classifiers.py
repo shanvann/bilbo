@@ -742,6 +742,286 @@ def train_classifier(
 
 
 # ---------------------------------------------------------------------------
+# Face detector training (MobileNetV3-Small + bbox regression)
+# ---------------------------------------------------------------------------
+
+class FaceDetectorDataset(Dataset):
+    """Dataset for trainable face detector.
+
+    Positive samples: frames with faceBbox or faceBboxCorrected (target = bbox + conf=1)
+    Negative samples: frames with babyPresent=False (target = zeros + conf=0)
+
+    faceBboxCorrected takes priority over faceBbox (user corrections > YuNet auto).
+    """
+
+    def __init__(self, entries: list[dict], frames_dir: Path, transform=None):
+        self.transform = transform
+        self.samples = []  # (path, bbox_or_none)  bbox = {x1,y1,x2,y2} normalized
+
+        skipped_missing = 0
+        positives = 0
+        negatives = 0
+
+        for e in entries:
+            fname = Path(e.get("frame", "")).name
+            fpath = frames_dir / fname
+            if not fpath.exists():
+                skipped_missing += 1
+                continue
+
+            # Priority 1: user-corrected bbox
+            bbox = e.get("faceBboxCorrected")
+            if bbox and all(k in bbox for k in ("x1", "y1", "x2", "y2")):
+                self.samples.append((fpath, bbox))
+                positives += 1
+                continue
+
+            # Priority 2: auto-detected bbox (from YuNet or backfill)
+            bbox = e.get("faceBbox")
+            if bbox and all(k in bbox for k in ("x1", "y1", "x2", "y2")):
+                self.samples.append((fpath, bbox))
+                positives += 1
+                continue
+
+            # Negative: baby not present (no face expected)
+            if not e.get("babyPresent", False):
+                self.samples.append((fpath, None))
+                negatives += 1
+
+        log.info("FaceDetectorDataset: %d samples (pos=%d, neg=%d), skipped %d missing",
+                 len(self.samples), positives, negatives, skipped_missing)
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        path, bbox = self.samples[idx]
+        frame = cv2.imread(str(path))
+        bass = crop_bassinet(frame)
+        rgb = cv2.cvtColor(bass, cv2.COLOR_BGR2RGB)
+
+        # Random horizontal flip (must flip bbox too)
+        flipped = False
+        if self.transform and random.random() < 0.5:
+            rgb = np.fliplr(rgb).copy()
+            flipped = True
+
+        if self.transform:
+            tensor = self.transform(rgb)
+        else:
+            tensor = transforms.ToTensor()(rgb)
+
+        if bbox is not None:
+            x1, y1, x2, y2 = bbox["x1"], bbox["y1"], bbox["x2"], bbox["y2"]
+            if flipped:
+                x1, x2 = 1.0 - x2, 1.0 - x1
+            target = torch.tensor([x1, y1, x2, y2, 1.0], dtype=torch.float32)
+        else:
+            target = torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0], dtype=torch.float32)
+
+        return tensor, target
+
+
+def _face_detect_transform_train():
+    """Transform for face detector training — no spatial augmentation (bbox-aware flip is manual)."""
+    return transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize((224, 224)),
+        transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05),
+        transforms.RandomGrayscale(p=0.3),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+
+
+def _face_detect_transform_val():
+    return transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+
+
+def _iou(pred_bbox, target_bbox):
+    """Compute IoU between two (x1, y1, x2, y2) tensors."""
+    x1 = torch.max(pred_bbox[0], target_bbox[0])
+    y1 = torch.max(pred_bbox[1], target_bbox[1])
+    x2 = torch.min(pred_bbox[2], target_bbox[2])
+    y2 = torch.min(pred_bbox[3], target_bbox[3])
+
+    inter = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+    area_pred = (pred_bbox[2] - pred_bbox[0]) * (pred_bbox[3] - pred_bbox[1])
+    area_target = (target_bbox[2] - target_bbox[0]) * (target_bbox[3] - target_bbox[1])
+    union = area_pred + area_target - inter
+
+    return inter / (union + 1e-6)
+
+
+def train_face_detector(
+    train_ds: FaceDetectorDataset,
+    val_ds: FaceDetectorDataset,
+    output_path: Path,
+    epochs: int = 40,
+    batch_size: int = 32,
+    lr: float = 0.0005,
+    patience: int = 12,
+):
+    """Train the MobileNetV3-Small face detector with bbox regression."""
+    device = "cpu"
+
+    # Build model with ImageNet pre-trained weights
+    model = models.mobilenet_v3_small(
+        weights=models.MobileNet_V3_Small_Weights.IMAGENET1K_V1,
+    )
+    model.classifier = nn.Sequential(
+        nn.Linear(576, 256),
+        nn.Hardswish(),
+        nn.Dropout(0.2),
+        nn.Linear(256, 5),
+    )
+    model.to(device)
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+
+    bbox_criterion = nn.SmoothL1Loss(reduction="none")
+    conf_criterion = nn.BCEWithLogitsLoss()
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+    best_metric = -1.0  # combined metric: mean IoU on positives + conf accuracy
+    best_state = None
+    best_epoch = 0
+    patience_counter = 0
+    best_metrics_snapshot = {}
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        train_loss = 0.0
+        train_n = 0
+
+        for inputs, targets in train_loader:
+            inputs = inputs.to(device)
+            targets = targets.to(device)
+
+            optimizer.zero_grad()
+            outputs = model(inputs)  # raw logits (5 outputs)
+
+            # Split targets
+            target_bbox = targets[:, :4]
+            target_conf = targets[:, 4]
+            has_face = target_conf > 0.5  # positive mask
+
+            # Confidence loss (all samples)
+            loss_conf = conf_criterion(outputs[:, 4], target_conf)
+
+            # Bbox loss (only positive samples)
+            if has_face.any():
+                pred_bbox = torch.sigmoid(outputs[has_face, :4])
+                loss_bbox = bbox_criterion(pred_bbox, target_bbox[has_face]).mean()
+            else:
+                loss_bbox = torch.tensor(0.0)
+
+            loss = loss_conf + 2.0 * loss_bbox  # weight bbox loss higher
+            loss.backward()
+            optimizer.step()
+
+            train_loss += loss.item() * inputs.size(0)
+            train_n += inputs.size(0)
+
+        scheduler.step()
+
+        # Validate
+        model.eval()
+        val_ious = []
+        val_conf_correct = 0
+        val_conf_total = 0
+        val_loss = 0.0
+        val_n = 0
+
+        with torch.no_grad():
+            for inputs, targets in val_loader:
+                inputs = inputs.to(device)
+                targets = targets.to(device)
+
+                outputs = model(inputs)
+                target_bbox = targets[:, :4]
+                target_conf = targets[:, 4]
+                has_face = target_conf > 0.5
+
+                # Loss
+                loss_conf = conf_criterion(outputs[:, 4], target_conf)
+                if has_face.any():
+                    pred_bbox = torch.sigmoid(outputs[has_face, :4])
+                    loss_bbox = bbox_criterion(pred_bbox, target_bbox[has_face]).mean()
+                else:
+                    loss_bbox = torch.tensor(0.0)
+                val_loss += (loss_conf + 2.0 * loss_bbox).item() * inputs.size(0)
+                val_n += inputs.size(0)
+
+                # IoU on positives
+                pred_bbox_all = torch.sigmoid(outputs[:, :4])
+                pred_conf = torch.sigmoid(outputs[:, 4])
+
+                for i in range(inputs.size(0)):
+                    if has_face[i]:
+                        iou_val = _iou(pred_bbox_all[i], target_bbox[i]).item()
+                        val_ious.append(iou_val)
+
+                # Confidence accuracy
+                pred_binary = (pred_conf > 0.5).float()
+                val_conf_correct += (pred_binary == target_conf).sum().item()
+                val_conf_total += inputs.size(0)
+
+        mean_iou = sum(val_ious) / len(val_ious) if val_ious else 0.0
+        conf_acc = val_conf_correct / max(val_conf_total, 1)
+        val_avg_loss = val_loss / max(val_n, 1)
+        # Combined metric: IoU matters most, confidence accuracy is secondary
+        combined = 0.7 * mean_iou + 0.3 * conf_acc
+
+        log.info("Epoch %d/%d — train_loss=%.4f val_loss=%.4f mean_iou=%.3f conf_acc=%.3f combined=%.3f",
+                 epoch, epochs, train_loss / max(train_n, 1), val_avg_loss,
+                 mean_iou, conf_acc, combined)
+
+        if combined > best_metric:
+            best_metric = combined
+            best_state = copy.deepcopy(model.state_dict())
+            best_epoch = epoch
+            patience_counter = 0
+            best_metrics_snapshot = {
+                "mean_iou": round(mean_iou, 4),
+                "conf_accuracy": round(conf_acc, 4),
+                "val_loss": round(val_avg_loss, 4),
+                "combined": round(combined, 4),
+                "iou_samples": len(val_ious),
+            }
+            log.info("  → new best model (combined=%.3f, iou=%.3f, conf_acc=%.3f)",
+                     combined, mean_iou, conf_acc)
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                log.info("Early stopping at epoch %d (best epoch %d)", epoch, best_epoch)
+                break
+
+    # Save
+    if best_state is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(best_state, output_path)
+        log.info("Face detector saved to %s (epoch %d)", output_path, best_epoch)
+
+    metrics = {
+        "best_epoch": best_epoch,
+        "total_epochs": epoch,
+        **best_metrics_snapshot,
+        "train_total": len(train_ds),
+        "val_total": len(val_ds),
+    }
+    return metrics
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -752,7 +1032,7 @@ def main():
     parser.add_argument("--sleep-log", required=True, help="Path to sleep-log.jsonl")
     parser.add_argument("--frames", required=True, help="Directory containing frame images")
     parser.add_argument("--output", default="../pipeline/models", help="Output directory for .pt files")
-    parser.add_argument("--model", default="all", choices=["all", "presence", "eye-state"])
+    parser.add_argument("--model", default="all", choices=["all", "presence", "eye-state", "face-detect"])
     parser.add_argument("--face-crops", help="Dir with validated face crops: {eyes_open,eyes_closed,eyes_unclear}/")
     parser.add_argument("--corrections", help="Path to corrections.jsonl (dashboard edits)")
     parser.add_argument("--audit", help="Path to audit-log.jsonl (audit disagreements)")
@@ -882,6 +1162,45 @@ def main():
     else:
         eye_metrics = None
 
+    # --- Face detector ---
+    if args.model in ("all", "face-detect"):
+        log.info("=" * 60)
+        log.info("Training FACE DETECTOR (MobileNetV3 bbox regression)")
+        log.info("=" * 60)
+
+        # Load entries from SQLite for bbox data (more complete than JSONL)
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from lib.db import get_db
+        db = get_db()
+        all_db_entries = db.get_entries()
+
+        face_train_ds = FaceDetectorDataset(
+            [e for i, e in enumerate(all_db_entries) if i % 5 != 0],  # 80% train
+            frames_dir,
+            _face_detect_transform_train(),
+        )
+        face_val_ds = FaceDetectorDataset(
+            [e for i, e in enumerate(all_db_entries) if i % 5 == 0],  # 20% val
+            frames_dir,
+            _face_detect_transform_val(),
+        )
+        log.info("Face detector: train=%d, val=%d", len(face_train_ds), len(face_val_ds))
+
+        if len(face_train_ds) < 50:
+            log.warning("Not enough face detector training data (%d samples), skipping", len(face_train_ds))
+            face_metrics = None
+        else:
+            face_metrics = train_face_detector(
+                face_train_ds, face_val_ds,
+                output_path=output_dir / "face_detector.pt",
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                lr=0.0005,
+                patience=12,
+            )
+    else:
+        face_metrics = None
+
     # --- Version the models ---
     version_id = datetime.now().strftime("v_%Y%m%d_%H%M%S")
     version_dir = output_dir / version_id
@@ -943,6 +1262,7 @@ def main():
         "metrics": {
             "presence": presence_metrics,
             "eye_state": eye_metrics,
+            "face_detect": face_metrics,
         },
     }
     with open(training_log, "a") as f:

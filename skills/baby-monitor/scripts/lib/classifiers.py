@@ -321,6 +321,94 @@ class FaceDetector:
         )
 
 
+# ---------------------------------------------------------------------------
+# Face detector (trainable MobileNetV3)
+# ---------------------------------------------------------------------------
+
+def _build_face_detector_model() -> nn.Module:
+    """MobileNetV3-Small with 5-output regression head for face detection."""
+    model = models.mobilenet_v3_small(weights=None)
+    # Replace classifier: features → avgpool → classifier
+    # MobileNetV3-Small last channel = 576
+    model.classifier = nn.Sequential(
+        nn.Linear(576, 256),
+        nn.Hardswish(),
+        nn.Dropout(0.2),
+        nn.Linear(256, 5),  # x1, y1, x2, y2, confidence
+    )
+    return model
+
+
+class TrainableFaceDetector:
+    """MobileNetV3-Small face detector: bassinet crop → face bbox + confidence.
+
+    Same interface as FaceDetector (YuNet) so it's a drop-in replacement.
+    Trained on user-corrected bboxes + YuNet auto-detections.
+    """
+
+    def __init__(self, model_path: Path, device: str = "cpu",
+                 confidence_threshold: float = 0.5):
+        self.device = device
+        self.confidence_threshold = confidence_threshold
+        self.model = _build_face_detector_model()
+
+        if model_path.exists():
+            state = torch.load(model_path, map_location=device, weights_only=True)
+            self.model.load_state_dict(state)
+            log.info("birdeye: trainable face detector loaded from %s", model_path)
+        else:
+            raise FileNotFoundError(f"Trainable face detector model not found: {model_path}")
+
+        self.model.to(device)
+        self.model.eval()
+
+    def detect(self, bassinet_crop: np.ndarray) -> FaceDetectResult | None:
+        """Detect face in bassinet crop. Returns FaceDetectResult or None."""
+        h, w = bassinet_crop.shape[:2]
+        rgb = cv2.cvtColor(bassinet_crop, cv2.COLOR_BGR2RGB)
+        tensor = _INFERENCE_TRANSFORM(rgb).unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            output = self.model(tensor)
+            output = torch.sigmoid(output[0])  # all 5 outputs through sigmoid
+
+        conf = float(output[4])
+        if conf < self.confidence_threshold:
+            return None
+
+        # Normalized coords (0-1 fractions of bassinet crop)
+        nx1, ny1, nx2, ny2 = float(output[0]), float(output[1]), float(output[2]), float(output[3])
+
+        # Clamp and ensure valid ordering
+        nx1, nx2 = min(nx1, nx2), max(nx1, nx2)
+        ny1, ny2 = min(ny1, ny2), max(ny1, ny2)
+        nx1 = max(0.0, min(1.0, nx1))
+        ny1 = max(0.0, min(1.0, ny1))
+        nx2 = max(0.0, min(1.0, nx2))
+        ny2 = max(0.0, min(1.0, ny2))
+
+        # Reject tiny predictions (less than 3% in either dimension)
+        if (nx2 - nx1) < 0.03 or (ny2 - ny1) < 0.03:
+            return None
+
+        # Convert to pixel coords
+        x1 = int(nx1 * w)
+        y1 = int(ny1 * h)
+        x2 = int(nx2 * w)
+        y2 = int(ny2 * h)
+
+        return FaceDetectResult(
+            bbox=(x1, y1, x2, y2),
+            confidence=conf,
+            normalized_bbox={
+                "x1": round(nx1, 4),
+                "y1": round(ny1, 4),
+                "x2": round(nx2, 4),
+                "y2": round(ny2, 4),
+            },
+        )
+
+
 def crop_face(bassinet_crop: np.ndarray, bbox: tuple,
               padding: float = FACE_CROP_PADDING) -> np.ndarray:
     """Extract a padded face crop from the bassinet crop.

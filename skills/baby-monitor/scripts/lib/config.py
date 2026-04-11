@@ -87,7 +87,7 @@ BASSINET_CROP = {"x": 0.15, "y": 0.10, "w": 0.70, "h": 0.80}
 HEAD_CROP_SIZE = 0.30
 # Eye-state classifier confidence threshold — below this, fall back to cloud API
 EYE_STATE_CONFIDENCE_THRESHOLD = 0.7
-# Face detector (YuNet) config
+# Face detector (YuNet) config — used as fallback
 FACE_DETECT_MODEL = MODELS_DIR / "face_detection_yunet_2023mar.onnx"
 FACE_DETECT_SCORE_THRESHOLD = 0.5
 FACE_DETECT_NMS_THRESHOLD = 0.3
@@ -99,6 +99,9 @@ _MODELS_LATEST = MODELS_DIR / "latest"
 _MODEL_BASE = _MODELS_LATEST if _MODELS_LATEST.exists() else MODELS_DIR
 PRESENCE_MODEL = _MODEL_BASE / "presence_classifier.pt"
 EYE_STATE_MODEL = _MODEL_BASE / "eye_state_classifier.pt"
+# Trainable face detector (MobileNetV3-Small + bbox regression)
+FACE_DETECT_MODEL_PT = _MODEL_BASE / "face_detector.pt"
+FACE_DETECT_PT_CONFIDENCE_THRESHOLD = 0.5
 
 # ---------------------------------------------------------------------------
 # Legacy alert rules (currently disabled)

@@ -1,18 +1,22 @@
 ---
 name: baby-report
-description: Generate baby activity reports from tracked data (feeds, sleep, pumping, diapers, weight, monitor performance). Use when asked for a baby report, baby summary, activity summary, sleep report, feeding report, monitor performance, birdeye stats, model accuracy, API costs, or any time-ranged query about baby activities. Triggers on "baby report", "activity report", "weekly summary", "daily summary", "how did the baby sleep", "feeding summary", "diaper report", "monitor performance", "birdeye", "model stats", "API usage".
+description: Generate baby activity reports from tracked data (feeds, sleep, pumping, diapers, weight, monitor performance). Use when asked for a baby report, baby summary, activity summary, sleep report, feeding report, monitor performance, birdeye stats, model accuracy, API costs, or any time-ranged query about baby activities. Triggers on "baby report", "activity report", "weekly summary", "daily summary", "how did the baby sleep", "feeding summary", "diaper report", "monitor performance", "birdeye", "model stats", "API usage". Also use for ANY baby monitor or BIRDEYE-related questions — training results, face detection analysis, model performance, shadow mode metrics. This skill is the single entry point for all baby monitoring data.
 ---
 
 # Baby Report
 
-Generate consistent, accurate reports from three data sources:
+Generate consistent, accurate reports from these data sources:
 1. **Activity CSV** (`baby-monitor/data/activity-log.csv`) — manual tracking: feeds, pumps, diapers, weight
-2. **Monitor SQLite DB** (`baby-monitor/data/monitor.db`) — canonical source for camera entries, shadow-mode BIRDEYE metrics, corrections, and review state
-3. **Sleep monitor JSONL** (`baby-monitor/data/sleep-log.jsonl`) — append-only backup; used only if the DB is missing
+2. **Baby-monitor dashboard HTTP API** (`http://localhost:5555/api/*`) — canonical source for the **Monitor** section (BIRDEYE classifier metrics, model deploy state, production decision counts, shadow stats, costs). baby-report is a thin client of these endpoints — there is no local SQL or F1 computation in the monitor section, so the agent reading the report sees the exact same numbers as the live dashboard UI.
+3. **Monitor SQLite DB** (`baby-monitor/data/monitor.db`) — used only by the **Sleep** section, which iterates raw entries to compute in-bassinet stretches.
+4. **Sleep monitor JSONL** (`baby-monitor/data/sleep-log.jsonl`) — append-only backup; used by the Sleep section only when the DB is missing.
 
 **Data source rules:**
-- **Sleep / monitor** → SQLite when available (canonical); JSONL fallback
-- **Everything else** (feeding, pumping, diapers, weight) → activity CSV
+- **Monitor** → dashboard HTTP API (`/api/monitor-stats`, `/api/safety-stats`). Requires the dashboard launchd service to be running; the section returns a clear error otherwise.
+- **Sleep** → SQLite when available; JSONL fallback.
+- **Everything else** (feeding, pumping, diapers, weight) → activity CSV.
+
+Override the dashboard URL with `BABY_REPORT_DASHBOARD_URL=http://host:port` if it's bound somewhere other than `http://localhost:5555`.
 
 ## Usage
 
@@ -49,36 +53,31 @@ Counts, poo/pee breakdown, stool colors.
 ### Weight (from CSV)
 Weight measurements found in feed notes.
 
-### Monitor (from SQLite)
-Two distinct things are reported back-to-back:
+### Monitor (from dashboard HTTP API)
+The monitor section is rendered from two dashboard endpoints — `lib/monitor.py` is a pure HTTP client of these. **No local F1 or confusion math.** Whatever the dashboard's BIRDEYE Classifiers card shows, the report shows.
 
-**Monitor Performance** — production decision source:
+**Monitor Performance** — windowed by `--range`, sourced from `GET /api/monitor-stats?hours=N`:
 - Coverage (expected vs actual entries; 1 entry per 4 min).
-- Production decision source breakdown: cloud API, pixel-diff, birdeye. BIRDEYE is normally 0% here because it runs in shadow mode — this line measures who *decided* each frame, not who classified it. Once BIRDEYE is promoted out of shadow mode this will be non-zero.
+- Production decision source breakdown: cloud API, pixel-diff, birdeye. BIRDEYE is normally 0% here because it runs in shadow mode — this line measures who *decided* each frame, not who classified it.
 - API cost estimate (calls made vs avoided).
-- Cloud API model breakdown, coverage gaps >10 min, and alert count.
+- BIRDEYE inference latency stats (avg, p50, p99, max).
+- Presence and eye-classifier confidence stats.
+- Cloud API model breakdown and capture-gap count.
+- Shadow agreement rate (BIRDEYE vs prod state, when both produced one).
 
-**BIRDEYE Shadow Performance** — shown whenever entries carry shadow fields:
-- Shadow model version(s) in use.
-- Per-stage inference latency (`shadow.birdeyeTimings.total`): avg, p50, p95, max.
-- Presence and eye-classifier confidence stats (from `shadow.presenceConfidence` / `shadow.eyeConfidence`).
-- Fallback usage (when trainable face detector bails and YuNet or head-position crop is used).
+**BIRDEYE Classifiers** — sourced from `GET /api/safety-stats?hours=N`:
+- Deployed model version (with rollback warning).
+- Shadow frame count in window.
+- Ground truth labels (reviewed + corrected counts).
+- Face detection rate / fallback rate.
+- **Presence panel** (`not_present` vs `present`): BIRDEYE and Cloud API macro-F1, accuracy, per-class P/R/F1 vs ground truth.
+- **Eye-state panel** (`eyes_open` vs `eyes_closed`): same shape.
 
-**Eye-state (eyes_open vs eyes_closed)** — the only label dimension reported. Body-state (Asleep/Awake) analysis is intentionally omitted because the Asleep/Awake taxonomy is being redefined upstream.
-- Alignment vs prod on paired frames (frames where BOTH prod and BIRDEYE produced one of `eyes_open` / `eyes_closed`).
-- 2×2 confusion matrix.
-- Per-class P/R/F1 for `eyes_open` and `eyes_closed` (small-sample warning when n<20).
-- **Ground truth** (when corrected or reviewed frames exist in window):
-    - Accuracy plus per-class P/R/F1 restricted to the ground-truth slice.
-    - GT sourced from the DB's authoritative `eye_state` column, which is overwritten on dashboard correction (`eye_state_edited=1`) and confirmed on review (`reviewed=1`).
-- **Diagnostics** — rows that fell outside the paired set:
-    - `unclassified`: prod had a real eye label, BIRDEYE returned `None` (face detection / classifier failure).
-    - `hallucinated`: prod said `face_not_visible` / `not_in_bassinet`, but BIRDEYE returned an eye label anyway.
-    - `declined_correctly`: prod and BIRDEYE both declined to classify.
+> ⚠ The dashboard's GT pairs are computed across **all** reviewed/corrected frames, not just the requested window. The classifier F1/accuracy numbers in the report are therefore lifetime metrics, not windowed. Only the production decision counts, latency, costs, and shadow frame count are scoped by `--range`.
 
-**JSON output** (`--format json`) returns the full structured metrics under `monitor`, with the shadow-mode block under `monitor.shadow`. Top-level shadow keys: `count`, `confidence`, `timing_total`, `fallbacks`, `model_versions`, `eye_state`. The `eye_state` block has sub-keys `paired_count`, `alignment`, `confusion`, `per_class`, `ground_truth`, `diagnostics`.
+**JSON output** (`--format json`) passes the dashboard responses through verbatim under the top-level `monitor` key, with two sub-objects: `monitor.monitor_stats` and `monitor.safety_stats`. This is intentionally a 1:1 mirror of the dashboard's API contract.
 
-The `analyze_monitor_entries()` and `analyze_shadow_performance()` functions in `lib/monitor.py` are pure — they take a list of entries and return the structured dicts above, so the dashboard or other tools can import them directly.
+**Failure mode**: if the dashboard isn't running, the Monitor section (and the JSON `monitor` key) returns a clear error pointing at the launchctl command. There is no silent fallback to local SQL — that's how the two skills drift apart.
 
 ## CSV Column Mapping (important quirks)
 
@@ -86,6 +85,18 @@ For **Diaper** rows, columns are shifted:
 - `Duration` → stool color (yellow/green/brown)
 - `Start Condition` → consistency (Loose/Runny/Solid)
 - `End Condition` → contents (Poo:small, Pee:medium, Both, etc.)
+
+## Answering Baby Monitor Questions
+
+For any question about training results, BIRDEYE performance, face detection, model accuracy, or monitoring data — **always use this skill exclusively**. Do not manually explore the baby-monitor directory, read sleep-log.jsonl directly, or run ad-hoc Python scripts outside of `report.py`.
+
+The canonical workflow:
+1. Determine the relevant time range and section
+2. Run `report.py` with appropriate `--range` and `--section` flags
+3. For training-specific questions, check `pipeline/models/training-log.jsonl` via `report.py --section monitor`
+4. Present results from the report output only
+
+**Working directory:** Always run from `skills/baby-report/` using the system Python (`python3`), not the baby-monitor venv.
 
 ## Updating Data
 

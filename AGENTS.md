@@ -1,4 +1,4 @@
-# AGENTS.md - Your Workspace
+# AGENTS.md
 
 This folder is home. Treat it that way.
 
@@ -221,6 +221,11 @@ Think of it like a human reviewing their journal and updating their mental model
 
 The goal: Be helpful without being annoying. Check in a few times a day, do useful background work, but respect quiet time.
 
-## Make It Yours
+## Skills & Data — Key Rules
 
-This is a starting point. Add your own conventions, style, and rules as you figure out what works.
+### Baby Monitoring
+- **`baby-report` is the single entry point** for ALL baby monitoring questions: training results, BIRDEYE performance, face detection, model accuracy, shadow metrics, sleep, feeds, diapers, weight — everything.
+- **Never** manually explore `skills/baby-monitor/` files, read raw JSONL/SQLite directly, or run ad-hoc scripts outside `report.py`.
+- Run reports from `skills/baby-report/`: `python3 scripts/report.py --range <range> --section <section>`
+- Sections: `sleep`, `monitor`, `feeding`, `pumping`, `diapers`, `weight`
+- `--section monitor` covers BIRDEYE shadow performance, training metrics, model accuracy, API costs.

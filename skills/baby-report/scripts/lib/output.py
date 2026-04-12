@@ -5,7 +5,7 @@ import json
 from .loaders import load_activity_csv, load_sleep_log, parse_duration_str
 from .sleep import analyze_sleep_monitor, sleep_section
 from .sections import feeding_section, pump_section, diaper_section, weight_section
-from .monitor import analyze_monitor_entries, monitor_section
+from .monitor import monitor_metrics_dict, monitor_section
 
 
 def generate_report(start, end, sections=None, csv_path=None):
@@ -40,7 +40,7 @@ def generate_report(start, end, sections=None, csv_path=None):
     if 'weight' in all_sections and feed_weight_notes:
         parts.append(weight_section(feed_weight_notes))
     if 'monitor' in all_sections:
-        parts.append(monitor_section(monitor_entries, num_days, start, end))
+        parts.append(monitor_section(num_days, start, end))
 
     return '\n\n'.join(parts)
 
@@ -75,17 +75,9 @@ def generate_json_report(start, end, csv_path=None):
     pump_rows = [r for r in rows if r['Type'].strip() == 'Pump']
     diaper_rows = [r for r in rows if r['Type'].strip() == 'Diaper']
 
-    # Monitor performance metrics
-    monitor_metrics = analyze_monitor_entries(monitor_entries)
-    # Remove non-serializable datetime objects from gaps
-    serializable_gaps = []
-    for g in monitor_metrics.get("gaps", []):
-        serializable_gaps.append({
-            "start": g["start"].isoformat() if hasattr(g["start"], "isoformat") else str(g["start"]),
-            "end": g["end"].isoformat() if hasattr(g["end"], "isoformat") else str(g["end"]),
-            "minutes": round(g["minutes"], 1),
-        })
-    monitor_metrics["gaps"] = serializable_gaps
+    # Monitor metrics — pass-through from the dashboard's API responses so
+    # the JSON output matches the live dashboard 1:1.
+    monitor_metrics = monitor_metrics_dict(start, end)
 
     report = {
         'range': {'start': start.isoformat(), 'end': end.isoformat(), 'days': round(num_days, 1)},

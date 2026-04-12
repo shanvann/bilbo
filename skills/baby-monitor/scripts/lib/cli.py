@@ -658,9 +658,131 @@ def cmd_rollback(version: str):
 
     print(f"Rolled back: {old_version or 'none'} → {target.name}")
     print("Reload launchd to use the rolled-back models:")
-    print("  launchctl unload ~/Library/LaunchAgents/com.openclaw.baby-monitor.plist")
-    print("  launchctl load ~/Library/LaunchAgents/com.openclaw.baby-monitor.plist")
+    print("  launchctl unload ~/Library/LaunchAgents/com.baby-monitor.plist")
+    print("  launchctl load ~/Library/LaunchAgents/com.baby-monitor.plist")
 
+    return 0
+
+
+def cmd_backfill_shadow(hours: float | None = None, only_stale: bool = False,
+                         dry_run: bool = False, limit: int | None = None) -> int:
+    """Re-run BIRDEYE shadow inference over historical entries.
+
+    Use after deploying a new model: replays the local pipeline against
+    every frame in the window and writes the new predictions into both the
+    JSON `data` blob and the indexed shadow_birdeye_* columns.
+
+    --only-stale skips entries already tagged with the deployed model
+    version, so repeated runs are cheap and incremental.
+    """
+    import time as _time
+    from .db import get_db, _derive_shadow_columns
+    from .local_pipeline import try_local_analysis
+    import lib.local_pipeline as _lp
+
+    latest_link = MODELS_DIR / "latest"
+    if not latest_link.is_symlink():
+        print(f"No deployed model — {latest_link} is not a symlink", file=sys.stderr)
+        return 1
+    deployed_version = Path(os.readlink(latest_link)).name
+    print(f"deployed model: {deployed_version}")
+
+    # Force fresh classifier load so we pick up the latest weights on disk.
+    _lp._presence_clf = None
+    _lp._eye_state_clf = None
+    _lp._face_detector = None
+    _lp._face_detector_fallback = None
+    _lp._available = None
+
+    db = get_db()
+    entries = db.get_entries(hours=hours) if hours is not None else db.get_entries()
+    print(f"window: {f'last {hours}h' if hours is not None else 'all entries'} — {len(entries)} fetched")
+
+    if only_stale:
+        entries = [e for e in entries if e.get("shadowModelVersion") != deployed_version]
+        print(f"--only-stale: {len(entries)} entries with stale or missing model version")
+
+    if limit is not None:
+        entries = entries[:limit]
+        print(f"--limit: capped to {len(entries)} entries")
+
+    n_total = len(entries)
+    n_processed = 0
+    n_missing_frame = 0
+    n_hard_error = 0
+    n_updated = 0
+    n_changed = 0
+    t0 = _time.monotonic()
+
+    for i, entry in enumerate(entries, 1):
+        ts = entry.get("timestamp")
+        frame = entry.get("frame")
+        if not frame or not Path(frame).exists():
+            n_missing_frame += 1
+            continue
+
+        result = try_local_analysis(Path(frame))
+        n_processed += 1
+
+        if result is None:
+            n_hard_error += 1
+            continue
+
+        # Build the shadow dict in the same shape live capture writes
+        # (monitor.py uses state-domain birdeyeState/prodState fields for
+        # back-compat with historical readers).
+        birdeye_state = result.get("state", "Unknown")
+        if not result.get("babyPresent", False):
+            birdeye_state = "not_present"
+        prod_state = entry.get("state", "Unknown")
+        if not entry.get("babyPresent", False):
+            prod_state = "not_present"
+
+        shadow = {
+            "birdeyeState": birdeye_state,
+            "prodState": prod_state,
+            "agreed": birdeye_state.lower() == prod_state.lower(),
+            "presenceConfidence": result.get("presenceConfidence"),
+            "eyeConfidence": result.get("eyeConfidence"),
+            "eyeState": result.get("eyeState"),
+            "birdeyeTimings": result.get("birdeyeTimings"),
+            "fallback": result.get("fallback"),
+        }
+
+        # Detect actual prediction change before mutating
+        prev_present = entry.get("shadow", {}).get("birdeyeState") if isinstance(entry.get("shadow"), dict) else None
+        prev_eye = entry.get("shadow", {}).get("eyeState") if isinstance(entry.get("shadow"), dict) else None
+        if prev_present != birdeye_state or prev_eye != shadow["eyeState"]:
+            n_changed += 1
+
+        updates = {"shadow": shadow, "shadowModelVersion": deployed_version}
+        if result.get("faceBbox"):
+            updates["faceBbox"] = result["faceBbox"]
+        if result.get("faceConfidence") is not None:
+            updates["faceConfidence"] = result["faceConfidence"]
+
+        if not dry_run:
+            db.update_entry(ts, updates)
+        n_updated += 1
+
+        if i % 100 == 0 or i == n_total:
+            elapsed = _time.monotonic() - t0
+            rate = n_processed / elapsed if elapsed else 0
+            eta = (n_total - i) / rate if rate else 0
+            print(
+                f"  [{i}/{n_total}] processed={n_processed} updated={n_updated} "
+                f"changed={n_changed} missing={n_missing_frame} errors={n_hard_error} "
+                f"rate={rate:.1f}/s eta={eta:.0f}s",
+                flush=True,
+            )
+
+    elapsed = _time.monotonic() - t0
+    print(
+        f"done in {elapsed:.1f}s — total={n_total} processed={n_processed} "
+        f"updated={n_updated} changed={n_changed} missing_frame={n_missing_frame} "
+        f"hard_error={n_hard_error}"
+        + (" (dry-run)" if dry_run else "")
+    )
     return 0
 
 
@@ -818,7 +940,7 @@ def _reinfer_corrections_against_current_model(
         )
         entry["shadow"] = {
             "birdeyeState": birdeye_state_compat,
-            "prodState": EYE_TO_STATE.get(gt_eye, "Unknown").lower(),
+            "prodState": EYE_TO_STATE.get(gt_eye, "Unknown"),
             "agreed": agreed,
             "presenceConfidence": shadow_pc,
             "eyeConfidence": shadow_ec,
@@ -848,6 +970,8 @@ def _reinfer_corrections_against_current_model(
     if updated > 0:
         from .db import get_connection
         conn = get_connection()
+        # Derive new-schema shadow columns from the in-memory shadow dict.
+        from .db import _derive_shadow_columns
         for entry in entries:
             if not entry.get("eyeStateEdited"):
                 continue
@@ -855,11 +979,12 @@ def _reinfer_corrections_against_current_model(
             if not ts:
                 continue
             shadow = entry.get("shadow", {})
+            bird_present, bird_eye, agreed = _derive_shadow_columns(entry, shadow)
             conn.execute("""
                 UPDATE entries SET
                     data = ?,
-                    shadow_birdeye_state = ?,
-                    shadow_prod_state = ?,
+                    shadow_birdeye_present = ?,
+                    shadow_birdeye_eye = ?,
                     shadow_agreed = ?,
                     presence_confidence = ?,
                     eye_confidence = ?,
@@ -868,9 +993,9 @@ def _reinfer_corrections_against_current_model(
                 WHERE timestamp = ?
             """, (
                 json.dumps(entry),
-                shadow.get("birdeyeState"),
-                shadow.get("prodState"),
-                1 if shadow.get("agreed") else 0,
+                bird_present,
+                bird_eye,
+                agreed,
                 shadow.get("presenceConfidence"),
                 shadow.get("eyeConfidence"),
                 (shadow.get("birdeyeTimings") or {}).get("total"),
@@ -1256,6 +1381,17 @@ examples:
                       help="list available model versions")
     mode.add_argument("--rollback", metavar="VERSION",
                       help="rollback to a specific model version")
+    mode.add_argument("--backfill-shadow", action="store_true",
+                      help="re-run BIRDEYE shadow inference on historical entries "
+                           "(use after deploying a new model)")
+    p.add_argument("--hours", metavar="N", type=float,
+                   help="(backfill-shadow) only process entries from the last N hours "
+                        "(default: all entries)")
+    p.add_argument("--only-stale", action="store_true",
+                   help="(backfill-shadow) skip entries already tagged with the "
+                        "currently deployed model version")
+    p.add_argument("--limit", metavar="N", type=int,
+                   help="(backfill-shadow) cap the number of entries processed")
     p.add_argument("--dry-run", action="store_true",
                    help="run full pipeline but do not write to the JSONL log")
     p.add_argument("--verbose", "-v", action="store_true",

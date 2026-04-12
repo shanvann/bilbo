@@ -54,8 +54,9 @@ from lib.alerts import (
 )
 from lib.storage import append_entry, get_last_entry
 from lib.cli import (
-    cmd_audit, cmd_backtest, cmd_backtest_birdeye, cmd_eval_corrections,
-    cmd_last, cmd_list_models, cmd_retrain, cmd_rollback, cmd_status, parse_args,
+    cmd_audit, cmd_backfill_shadow, cmd_backtest, cmd_backtest_birdeye,
+    cmd_eval_corrections, cmd_last, cmd_list_models, cmd_retrain, cmd_rollback,
+    cmd_status, parse_args,
 )
 
 
@@ -135,6 +136,14 @@ def main():
 
     if args.rollback:
         return cmd_rollback(args.rollback)
+
+    if args.backfill_shadow:
+        return cmd_backfill_shadow(
+            hours=args.hours,
+            only_stale=args.only_stale,
+            dry_run=args.dry_run,
+            limit=args.limit,
+        )
 
     # --- Load config ---
 

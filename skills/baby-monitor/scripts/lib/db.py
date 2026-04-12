@@ -57,8 +57,8 @@ def init_db():
             presence_confidence REAL,
             eye_confidence REAL,
             diff_score REAL,
-            shadow_birdeye_state TEXT,
-            shadow_prod_state TEXT,
+            shadow_birdeye_present INTEGER,
+            shadow_birdeye_eye TEXT,
             shadow_agreed INTEGER,
             shadow_timings_total REAL,
             data JSON,
@@ -117,6 +117,11 @@ def init_db():
         ("training_runs", "finished_at", "TEXT"),
         ("entries", "reviewed", "INTEGER DEFAULT 0"),
         ("entries", "reviewed_at", "TEXT"),
+        # Eye-state shadow columns (replaced the old state-domain ones).
+        # shadow_birdeye_present: 1 if BIRDEYE saw a baby, 0 if not, NULL if BIRDEYE didn't run.
+        # shadow_birdeye_eye: eyes_open / eyes_closed / NULL.
+        ("entries", "shadow_birdeye_present", "INTEGER"),
+        ("entries", "shadow_birdeye_eye", "TEXT"),
     ):
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
@@ -130,17 +135,54 @@ def init_db():
 # Entries (sleep log)
 # ---------------------------------------------------------------------------
 
+_EYE_LABELS = ("eyes_open", "eyes_closed")
+
+
+def _derive_shadow_columns(entry: dict, shadow: dict) -> tuple[int | None, str | None, int | None]:
+    """Derive the three indexed shadow columns from the in-memory entry + shadow dict.
+
+    Returns (shadow_birdeye_present, shadow_birdeye_eye, shadow_agreed). All
+    three can be None when the shadow comparison didn't run or can't be compared.
+    """
+    if not shadow:
+        return None, None, None
+
+    # Presence: BIRDEYE saw a baby iff its state label isn't the sentinel
+    # 'not_present'. The JSON shadow dict still carries the state-domain
+    # birdeyeState field for back-compat with historical readers.
+    birdeye_state_legacy = shadow.get("birdeyeState")
+    if birdeye_state_legacy is None:
+        present = None
+    elif birdeye_state_legacy == "not_present":
+        present = 0
+    else:
+        present = 1
+
+    birdeye_eye = shadow.get("eyeState")
+    if birdeye_eye not in _EYE_LABELS:
+        birdeye_eye = None
+
+    prod_eye = entry.get("eyeState")
+    if prod_eye not in _EYE_LABELS or birdeye_eye is None:
+        agreed = None
+    else:
+        agreed = 1 if birdeye_eye == prod_eye else 0
+
+    return present, birdeye_eye, agreed
+
+
 def insert_entry(entry: dict):
     """Insert a sleep log entry. Also stores full JSON in data column."""
     conn = get_connection()
     shadow = entry.get("shadow", {}) if isinstance(entry.get("shadow"), dict) else {}
+    birdeye_present, birdeye_eye, agreed = _derive_shadow_columns(entry, shadow)
     conn.execute("""
         INSERT INTO entries (
             timestamp, frame, baby_present, state, eye_state,
             eye_state_edited, eye_state_corrected_at,
             detection_method, model_used, shadow_model_version,
             presence_confidence, eye_confidence, diff_score,
-            shadow_birdeye_state, shadow_prod_state, shadow_agreed,
+            shadow_birdeye_present, shadow_birdeye_eye, shadow_agreed,
             shadow_timings_total, data
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
@@ -157,9 +199,9 @@ def insert_entry(entry: dict):
         entry.get("presenceConfidence"),
         entry.get("eyeConfidence"),
         entry.get("diffScore"),
-        shadow.get("birdeyeState"),
-        shadow.get("prodState"),
-        1 if shadow.get("agreed") else (0 if "agreed" in shadow else None),
+        birdeye_present,
+        birdeye_eye,
+        agreed,
         shadow.get("birdeyeTimings", {}).get("total") if isinstance(shadow.get("birdeyeTimings"), dict) else None,
         json.dumps(entry),
     ))
@@ -216,11 +258,20 @@ def update_entry(timestamp: str, updates: dict) -> bool:
     entry = json.loads(row["data"])
     entry.update(updates)
 
+    shadow = entry.get("shadow") if isinstance(entry.get("shadow"), dict) else {}
+    bird_present, bird_eye, agreed = _derive_shadow_columns(entry, shadow)
+    bird_timings_total = (
+        shadow.get("birdeyeTimings", {}).get("total")
+        if isinstance(shadow.get("birdeyeTimings"), dict) else None
+    )
+
     # Update indexed columns too
     conn.execute("""
         UPDATE entries SET
             state = ?, eye_state = ?, eye_state_edited = ?,
             eye_state_corrected_at = ?, shadow_model_version = ?,
+            shadow_birdeye_present = ?, shadow_birdeye_eye = ?,
+            shadow_agreed = ?, shadow_timings_total = ?,
             data = ?
         WHERE timestamp = ?
     """, (
@@ -229,6 +280,10 @@ def update_entry(timestamp: str, updates: dict) -> bool:
         1 if entry.get("eyeStateEdited") else 0,
         entry.get("eyeStateCorrectedAt"),
         entry.get("shadowModelVersion"),
+        bird_present,
+        bird_eye,
+        agreed,
+        bird_timings_total,
         json.dumps(entry),
         timestamp,
     ))
@@ -483,7 +538,7 @@ def get_pending_corrections(last_trained: str = None) -> list[dict]:
                    c.original_state, c.corrected_state,
                    c.original_eye_state, c.corrected_eye_state,
                    c.detection_method, c.source,
-                   e.shadow_birdeye_state, e.shadow_prod_state,
+                   e.shadow_birdeye_present, e.shadow_birdeye_eye,
                    e.presence_confidence, e.eye_confidence
             FROM corrections c
             LEFT JOIN entries e ON e.timestamp = c.original_timestamp
@@ -496,7 +551,7 @@ def get_pending_corrections(last_trained: str = None) -> list[dict]:
                    c.original_state, c.corrected_state,
                    c.original_eye_state, c.corrected_eye_state,
                    c.detection_method, c.source,
-                   e.shadow_birdeye_state, e.shadow_prod_state,
+                   e.shadow_birdeye_present, e.shadow_birdeye_eye,
                    e.presence_confidence, e.eye_confidence
             FROM corrections c
             LEFT JOIN entries e ON e.timestamp = c.original_timestamp
@@ -515,8 +570,8 @@ def get_pending_corrections(last_trained: str = None) -> list[dict]:
             "correctedEyeState": row["corrected_eye_state"],
             "detectionMethod": row["detection_method"],
             "source": row["source"],
-            "shadowBirdeyeState": row["shadow_birdeye_state"],
-            "shadowProdState": row["shadow_prod_state"],
+            "shadowBirdeyePresent": row["shadow_birdeye_present"],
+            "shadowBirdeyeEye": row["shadow_birdeye_eye"],
             "presenceConfidence": row["presence_confidence"],
             "eyeConfidence": row["eye_confidence"],
         })
@@ -667,7 +722,8 @@ def get_safety_stats(hours: float = 168) -> dict:
     # the corrected eye_state overrides.
     gt_rows = conn.execute("""
         SELECT e.timestamp, e.state AS cloud_state, e.eye_state AS cloud_eye_state,
-               e.shadow_birdeye_state, e.baby_present, e.eye_state_edited,
+               e.shadow_birdeye_present, e.shadow_birdeye_eye,
+               e.baby_present, e.eye_state_edited,
                e.reviewed, e.data,
                c.corrected_eye_state, c.corrected_state
         FROM entries e
@@ -696,32 +752,48 @@ def get_safety_stats(hours: float = 168) -> dict:
     corrected_count = 0
 
     for row in unique_rows:
-        # Determine ground truth eye state
-        # Priority: correction > reviewed entry's existing eye state
+        # Derive (truth_present, truth_eye) separately. Presence is known
+        # whenever we have any human signal; eye-state is only defined for
+        # frames where the baby is present AND the eyes are scoreable. A
+        # frame can contribute to the presence matrix without contributing
+        # to the eye-state matrix (e.g. reviewed "Unknown" cloud labels, or
+        # corrections to "face_not_visible").
+        # Priority: correction > reviewed entry's existing label.
+        truth_present = None
         truth_eye = None
         if row["corrected_eye_state"]:
-            truth_eye = row["corrected_eye_state"]
+            ces = row["corrected_eye_state"]
+            if ces in ("eyes_open", "eyes_closed"):
+                truth_present, truth_eye = True, ces
+            elif ces == "not_in_bassinet":
+                truth_present, truth_eye = False, "not_in_bassinet"
+            elif ces == "face_not_visible":
+                # Baby present, face occluded — counts for presence only.
+                truth_present, truth_eye = True, None
             corrected_count += 1
         elif row["corrected_state"]:
             cs = (row["corrected_state"] or "").lower()
-            truth_eye = STATE_TO_EYE.get(cs)
+            mapped = STATE_TO_EYE.get(cs)
+            if mapped:
+                truth_present, truth_eye = True, mapped
             corrected_count += 1
         elif row["reviewed"]:
-            # Reviewed but not corrected — the existing label is ground truth
-            truth_eye = row["cloud_eye_state"]
-            if not truth_eye:
-                cs = (row["cloud_state"] or "").lower()
-                truth_eye = STATE_TO_EYE.get(cs)
-            # If baby not present, mark as not_in_bassinet
+            # Reviewed but not corrected — the existing label is ground truth.
             if not row["baby_present"]:
-                truth_eye = "not_in_bassinet"
+                truth_present, truth_eye = False, "not_in_bassinet"
+            else:
+                truth_present = True
+                eye = row["cloud_eye_state"]
+                if eye in ("eyes_open", "eyes_closed"):
+                    truth_eye = eye
+                else:
+                    truth_eye = STATE_TO_EYE.get((row["cloud_state"] or "").lower())
+                # truth_eye may stay None for ambiguous cloud labels (e.g.
+                # state="Unknown") — that's fine, presence still counts.
             reviewed_count += 1
 
-        if not truth_eye or truth_eye not in ("eyes_open", "eyes_closed", "not_in_bassinet"):
+        if truth_present is None:
             continue
-
-        # Ground truth presence
-        truth_present = truth_eye != "not_in_bassinet"
 
         # --- Cloud API predictions ---
         cloud_eye = row["cloud_eye_state"]
@@ -739,21 +811,18 @@ def get_safety_stats(hours: float = 168) -> dict:
                 cloud_eye_pairs.append((truth_eye, cloud_eye))
 
         # --- BIRDEYE predictions ---
-        bird = (row["shadow_birdeye_state"] or "").strip().lower()
-        if not bird:
+        # shadow_birdeye_present: 1 if BIRDEYE saw a baby, 0 if not, NULL if BIRDEYE didn't run.
+        bird_present_col = row["shadow_birdeye_present"]
+        if bird_present_col is None:
             continue  # no shadow data for this frame
-        bird_present = bird in ("asleep", "awake", "unknown")
+        bird_present = bool(bird_present_col)
 
         bird_pres_pairs.append((
             "present" if truth_present else "not_present",
             "present" if bird_present else "not_present",
         ))
         if truth_present and bird_present and truth_eye in ("eyes_open", "eyes_closed"):
-            bird_eye = STATE_TO_EYE.get(bird)
-            entry_data = json.loads(row["data"]) if row["data"] else {}
-            shadow = entry_data.get("shadow", {})
-            shadow_eye = shadow.get("eyeState")
-            pred_eye = shadow_eye if shadow_eye in ("eyes_open", "eyes_closed") else bird_eye
+            pred_eye = row["shadow_birdeye_eye"]
             if pred_eye in ("eyes_open", "eyes_closed"):
                 bird_eye_pairs.append((truth_eye, pred_eye))
 
@@ -761,9 +830,11 @@ def get_safety_stats(hours: float = 168) -> dict:
     eye_classes = ["eyes_open", "eyes_closed"]
 
     # ----- Windowed shadow production stats (detection rate, timing) -----
+    # "has shadow data" == BIRDEYE ran on the frame, which is the `shadow_birdeye_present`
+    # column being non-NULL (it's 0/1 when set, NULL when BIRDEYE didn't run).
     shadow_row = conn.execute("""
         SELECT COUNT(*) as total,
-               SUM(CASE WHEN shadow_birdeye_state IS NOT NULL THEN 1 ELSE 0 END) as with_shadow
+               SUM(CASE WHEN shadow_birdeye_present IS NOT NULL THEN 1 ELSE 0 END) as with_shadow
         FROM entries
         WHERE timestamp >= ? AND baby_present = 1
     """, (cutoff,)).fetchone()
@@ -785,7 +856,7 @@ def get_safety_stats(hours: float = 168) -> dict:
         SELECT data FROM entries
         WHERE timestamp >= ?
           AND baby_present = 1
-          AND shadow_birdeye_state IS NOT NULL
+          AND shadow_birdeye_present IS NOT NULL
     """, (cutoff,)).fetchall()
 
     face_total = 0

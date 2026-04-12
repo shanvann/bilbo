@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Baby Monitor Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=13">
+  <link rel="stylesheet" href="/static/style.css?v=14">
 </head>
 <body>
   <!-- Top Bar: Compact Status -->
@@ -171,6 +171,7 @@
         </select>
         <span class="subtitle" id="safety-period"></span>
         <span style="float:right">
+          <label class="skip-face-label" title="Skip face detector training (~60 min savings)"><input type="checkbox" id="skip-face-detect" checked> skip face</label>
           <button id="footer-retrain" class="footer-retrain-btn">Retrain Model</button>
           <button id="footer-abort" class="footer-abort-btn" style="display:none">Abort</button>
         </span>
@@ -264,6 +265,6 @@
     </div>
   </footer>
 
-  <script src="/static/app.js?v=13"></script>
+  <script src="/static/app.js?v=14"></script>
 </body>
 </html>

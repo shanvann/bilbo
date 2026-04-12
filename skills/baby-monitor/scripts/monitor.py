@@ -125,7 +125,7 @@ def main():
         return cmd_audit(sample_size=args.sample)
 
     if args.retrain:
-        return cmd_retrain(force=args.force)
+        return cmd_retrain(force=args.force, skip_face_detect=args.skip_face_detect)
 
     if args.eval_corrections:
         return cmd_eval_corrections()

@@ -980,7 +980,7 @@ def cmd_eval_corrections() -> int:
         return 1
 
 
-def cmd_retrain(trigger: str = "cli", force: bool = False):
+def cmd_retrain(trigger: str = "cli", force: bool = False, skip_face_detect: bool = False):
     """Retrain classifiers using corrections + audit disagreements as supplemental data.
 
     Only retrains if corrections.jsonl or audit-log.jsonl has new entries since the
@@ -1073,6 +1073,8 @@ def cmd_retrain(trigger: str = "cli", force: bool = False):
         cmd.extend(["--corrections", str(CORRECTIONS_FILE)])
     if AUDIT_LOG_FILE.exists() and AUDIT_LOG_FILE.stat().st_size > 0:
         cmd.extend(["--audit", str(AUDIT_LOG_FILE)])
+    if skip_face_detect:
+        cmd.extend(["--model", "all-no-face"])
 
     print(f"Running: {' '.join(cmd[-6:])}")
     print()
@@ -1248,6 +1250,8 @@ examples:
     p.add_argument("--force", action="store_true",
                    help="(retrain) bypass the 'no new data since last training' guard "
                         "— useful when training code or hyperparameters changed")
+    p.add_argument("--skip-face-detect", action="store_true",
+                   help="(retrain) skip face detector training (~60 min savings)")
     mode.add_argument("--list-models", action="store_true",
                       help="list available model versions")
     mode.add_argument("--rollback", metavar="VERSION",

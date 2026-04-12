@@ -7,13 +7,12 @@ description: Generate baby activity reports from tracked data (feeds, sleep, pum
 
 Generate consistent, accurate reports from three data sources:
 1. **Activity CSV** (`baby-monitor/data/activity-log.csv`) — manual tracking: feeds, pumps, diapers, weight
-2. **Sleep monitor JSONL** (`baby-monitor/data/sleep-log.jsonl`) — camera-based bassinet monitoring
-3. **Monitor performance** (same JSONL) — detection method usage, BIRDEYE classifier metrics, cloud API costs
+2. **Monitor SQLite DB** (`baby-monitor/data/monitor.db`) — canonical source for camera entries, shadow-mode BIRDEYE metrics, corrections, and review state
+3. **Sleep monitor JSONL** (`baby-monitor/data/sleep-log.jsonl`) — append-only backup; used only if the DB is missing
 
 **Data source rules:**
-- **Sleep** → camera monitor JSONL when available (ground truth); falls back to CSV for days with no camera data
+- **Sleep / monitor** → SQLite when available (canonical); JSONL fallback
 - **Everything else** (feeding, pumping, diapers, weight) → activity CSV
-- **Monitor** → sleep-log.jsonl `detectionMethod` field distinguishes birdeye (local), cloud API, and pixel-diff entries
 
 ## Usage
 
@@ -50,30 +49,36 @@ Counts, poo/pee breakdown, stool colors.
 ### Weight (from CSV)
 Weight measurements found in feed notes.
 
-### Monitor (from JSONL)
-BIRDEYE local classifier performance and cloud API usage. Reports:
+### Monitor (from SQLite)
+Two distinct things are reported back-to-back:
 
-- **Detection method breakdown** — percentage of frames handled by birdeye (local), cloud API, and pixel-diff
-- **API cost estimate** — cloud API calls made vs avoided, estimated dollar savings
-- **BIRDEYE confidence stats** — presence classifier and eye state classifier confidence distributions (avg, min, max, p50, p95)
-- **BIRDEYE inference timing** — per-frame latency (avg, p50, p95)
-- **BIRDEYE state distribution** — how many frames classified as Asleep, Awake, not_present
-- **Cloud API model usage** — which models were called (gpt-4o as backup to birdeye)
-- **Coverage gaps** — periods >10 min with no entries (cron missed or camera down)
-- **State transitions** — birdeye Awake↔Asleep transitions (helps spot flip-flopping)
-- **Alerts** — count and types of safety alerts triggered
+**Monitor Performance** — production decision source:
+- Coverage (expected vs actual entries; 1 entry per 4 min).
+- Production decision source breakdown: cloud API, pixel-diff, birdeye. BIRDEYE is normally 0% here because it runs in shadow mode — this line measures who *decided* each frame, not who classified it. Once BIRDEYE is promoted out of shadow mode this will be non-zero.
+- API cost estimate (calls made vs avoided).
+- Cloud API model breakdown, coverage gaps >10 min, and alert count.
 
-The `analyze_monitor_entries()` function in `lib/monitor.py` is a pure function (no I/O) that accepts a list of entries and returns a structured dict. It is designed to be importable by the dashboard for real-time metrics:
+**BIRDEYE Shadow Performance** — shown whenever entries carry shadow fields:
+- Shadow model version(s) in use.
+- Per-stage inference latency (`shadow.birdeyeTimings.total`): avg, p50, p95, max.
+- Presence and eye-classifier confidence stats (from `shadow.presenceConfidence` / `shadow.eyeConfidence`).
+- Fallback usage (when trainable face detector bails and YuNet or head-position crop is used).
 
-```python
-from lib.monitor import analyze_monitor_entries
-metrics = analyze_monitor_entries(entries)
-# metrics["birdeye"]["rate"]           → 0.98
-# metrics["birdeye"]["timing"]["avg"]  → 0.041
-# metrics["cost"]["est_saved"]         → 1.25
-```
+**Eye-state (eyes_open vs eyes_closed)** — the only label dimension reported. Body-state (Asleep/Awake) analysis is intentionally omitted because the Asleep/Awake taxonomy is being redefined upstream.
+- Alignment vs prod on paired frames (frames where BOTH prod and BIRDEYE produced one of `eyes_open` / `eyes_closed`).
+- 2×2 confusion matrix.
+- Per-class P/R/F1 for `eyes_open` and `eyes_closed` (small-sample warning when n<20).
+- **Ground truth** (when corrected or reviewed frames exist in window):
+    - Accuracy plus per-class P/R/F1 restricted to the ground-truth slice.
+    - GT sourced from the DB's authoritative `eye_state` column, which is overwritten on dashboard correction (`eye_state_edited=1`) and confirmed on review (`reviewed=1`).
+- **Diagnostics** — rows that fell outside the paired set:
+    - `unclassified`: prod had a real eye label, BIRDEYE returned `None` (face detection / classifier failure).
+    - `hallucinated`: prod said `face_not_visible` / `not_in_bassinet`, but BIRDEYE returned an eye label anyway.
+    - `declined_correctly`: prod and BIRDEYE both declined to classify.
 
-**JSON output** includes the full monitor metrics under the `monitor` key, with nested `birdeye`, `cloud_api`, `pixel_diff`, `gaps`, `alerts`, `transitions`, and `cost` objects.
+**JSON output** (`--format json`) returns the full structured metrics under `monitor`, with the shadow-mode block under `monitor.shadow`. Top-level shadow keys: `count`, `confidence`, `timing_total`, `fallbacks`, `model_versions`, `eye_state`. The `eye_state` block has sub-keys `paired_count`, `alignment`, `confusion`, `per_class`, `ground_truth`, `diagnostics`.
+
+The `analyze_monitor_entries()` and `analyze_shadow_performance()` functions in `lib/monitor.py` are pure — they take a list of entries and return the structured dicts above, so the dashboard or other tools can import them directly.
 
 ## CSV Column Mapping (important quirks)
 

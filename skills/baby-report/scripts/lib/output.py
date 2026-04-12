@@ -10,15 +10,16 @@ from .monitor import analyze_monitor_entries, monitor_section
 
 def generate_report(start, end, sections=None, csv_path=None):
     """Generate the full text report."""
-    num_days = max((end - start).total_seconds() / 86400, 1)
+    span_hours = (end - start).total_seconds() / 3600
+    num_days = max(span_hours / 24, 1)  # clamped to avoid /0 in per-day math
 
     rows = load_activity_csv(start, end, csv_path=csv_path)
     monitor_entries = load_sleep_log(start, end)
 
     all_sections = sections or ['sleep', 'feeding', 'pumping', 'diapers', 'weight', 'monitor']
 
-    if num_days <= 1:
-        range_label = f"Last {int(num_days * 24)}h"
+    if span_hours <= 24:
+        range_label = f"Last {int(round(span_hours))}h"
     else:
         range_label = f"{start.strftime('%b %d')} – {end.strftime('%b %d')}"
 

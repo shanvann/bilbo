@@ -618,6 +618,7 @@ def api_retrain():
 
     data = request.get_json(silent=True) or {}
     trigger = data.get("trigger", "dashboard")
+    skip_face = data.get("skipFaceDetect", False)
 
     monitor_py = str(DATA_DIR.parent / "scripts" / "monitor.py")
     python = str(DATA_DIR.parent / "venv" / "bin" / "python3")
@@ -628,8 +629,11 @@ def api_retrain():
     retrain_stdout = open(DATA_DIR / "retrain-dashboard-stdout.log", "w")
     retrain_stderr = open(DATA_DIR / "retrain-dashboard-stderr.log", "w")
     env = dict(os.environ, PYTHONUNBUFFERED="1")
+    cmd = [python, "-u", monitor_py, "--retrain"]
+    if skip_face:
+        cmd.append("--skip-face-detect")
     proc = subprocess.Popen(
-        [python, "-u", monitor_py, "--retrain"],
+        cmd,
         cwd=str(DATA_DIR.parent),
         stdout=retrain_stdout,
         stderr=retrain_stderr,

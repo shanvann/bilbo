@@ -1436,7 +1436,10 @@ document.getElementById('footer-retrain').addEventListener('click', async () => 
     const res = await fetch('/api/retrain', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ trigger: 'dashboard' }),
+      body: JSON.stringify({
+        trigger: 'dashboard',
+        skipFaceDetect: document.getElementById('skip-face-detect').checked,
+      }),
     });
     const data = await res.json();
     if (!data.ok) {

@@ -1032,7 +1032,7 @@ def main():
     parser.add_argument("--sleep-log", required=True, help="Path to sleep-log.jsonl")
     parser.add_argument("--frames", required=True, help="Directory containing frame images")
     parser.add_argument("--output", default="../pipeline/models", help="Output directory for .pt files")
-    parser.add_argument("--model", default="all", choices=["all", "presence", "eye-state", "face-detect"])
+    parser.add_argument("--model", default="all", choices=["all", "all-no-face", "presence", "eye-state", "face-detect"])
     parser.add_argument("--face-crops", help="Dir with validated face crops: {eyes_open,eyes_closed,eyes_unclear}/")
     parser.add_argument("--corrections", help="Path to corrections.jsonl (dashboard edits)")
     parser.add_argument("--audit", help="Path to audit-log.jsonl (audit disagreements)")
@@ -1070,7 +1070,7 @@ def main():
              len(train_entries), len(val_entries), len(test_entries), TIME_BLOCK_MINUTES)
 
     # --- Presence classifier ---
-    if args.model in ("all", "presence"):
+    if args.model in ("all", "all-no-face", "presence"):
         log.info("=" * 60)
         log.info("Training PRESENCE classifier (present / not_present)")
         log.info("=" * 60)
@@ -1093,7 +1093,7 @@ def main():
         presence_metrics = None
 
     # --- Eye state classifier ---
-    if args.model in ("all", "eye-state"):
+    if args.model in ("all", "all-no-face", "eye-state"):
         log.info("=" * 60)
         log.info("Training EYE STATE classifier (eyes_open / eyes_closed)")
         log.info("=" * 60)

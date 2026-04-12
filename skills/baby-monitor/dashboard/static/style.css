@@ -370,6 +370,12 @@ footer {
   opacity: 0.5;
   cursor: default;
 }
+.skip-face-label {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  margin-right: 4px;
+}
 
 /* Responsive */
 @media (max-width: 600px) {

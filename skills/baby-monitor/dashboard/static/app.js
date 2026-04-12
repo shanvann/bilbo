@@ -993,14 +993,16 @@ async function loadPendingCorrections() {
       tdCorr.className = 'corr-label corr-label-new';
       tr.appendChild(tdCorr);
 
-      // BIRDEYE prediction
+      // BIRDEYE prediction — eye-state direct from shadow_birdeye_eye column
       const tdBirdeye = document.createElement('td');
-      if (c.shadowBirdeyeState) {
-        const birdState = c.shadowBirdeyeState.toLowerCase();
-        const birdEye = birdState === 'awake' ? 'Eyes Open' : birdState === 'asleep' ? 'Eyes Closed' : birdState;
-        const agreed = (c.correctedEyeState === 'eyes_open' && birdState === 'awake') ||
-                       (c.correctedEyeState === 'eyes_closed' && birdState === 'asleep');
-        tdBirdeye.textContent = birdEye;
+      if (c.shadowBirdeyeEye) {
+        const labelMap = { eyes_open: 'Eyes Open', eyes_closed: 'Eyes Closed' };
+        tdBirdeye.textContent = labelMap[c.shadowBirdeyeEye] || c.shadowBirdeyeEye;
+        const agreed = c.correctedEyeState === c.shadowBirdeyeEye;
+        tdBirdeye.className = 'corr-label' + (agreed ? ' corr-agree' : ' corr-disagree');
+      } else if (c.shadowBirdeyePresent === 0) {
+        tdBirdeye.textContent = 'Not Present';
+        const agreed = c.correctedEyeState === 'not_in_bassinet';
         tdBirdeye.className = 'corr-label' + (agreed ? ' corr-agree' : ' corr-disagree');
       } else {
         tdBirdeye.textContent = '—';
@@ -1714,7 +1716,9 @@ async function loadSafetyStats() {
 
     const rangeLabel = {'6':'6h','12':'12h','24':'24h','168':'7d'}[hours] || hours+'h';
     const total = safetyData.shadowTotal || 0;
-    document.getElementById('safety-period').textContent = '(' + rangeLabel + ', ' + total + ' shadow frames)';
+    const periodEl = document.getElementById('safety-period');
+    periodEl.textContent = '(' + rangeLabel + ', ' + total + ' frames with baby in bassinet)';
+    periodEl.title = 'BIRDEYE shadow inference only runs on frames where the baby is present in the bassinet — empty-bassinet frames are excluded from this count and from all classifier metrics in this card.';
 
     renderClassifiers();
   } catch (e) {

@@ -14,9 +14,11 @@ BILBO — a baby bassinet monitor. A Python pipeline captures RTSP frames every 
 
 - `skills/baby-monitor/` — the monitor pipeline, training, and dashboard. This is where almost all code changes happen.
   - `scripts/monitor.py` — main pipeline entry point (launchd runs this every 4 min)
+  - `scripts/run_single_inference.py` — runs BIRDEYE on one frame by timestamp; invoked as a subprocess by the dashboard's `/api/run-inference` (the dashboard venv intentionally has no torch/cv2)
   - `scripts/lib/db.py` — **all SQLite read/write goes through here**; do not open `data/monitor.db` directly elsewhere
-  - `scripts/lib/classifiers.py` — BIRDEYE classifiers: `PresenceClassifier`, `EyeStateClassifier` (MobileNetV3-Small), `FaceDetector` (YuNet ONNX)
-  - `scripts/lib/local_pipeline.py` — 3-stage BIRDEYE orchestration: presence → YuNet face detection → eye-state
+  - `scripts/lib/cli.py` — argparse wiring and `cmd_last`/`cmd_backtest`/`cmd_status` handlers for `monitor.py`
+  - `scripts/lib/classifiers.py` — BIRDEYE classifiers: `BabyPresenceClassifier`, `EyeStateClassifier` (MobileNetV3-Small), `TrainableFaceDetector` (MobileNetV3-Small, primary), `FaceDetector` (YuNet ONNX, fallback)
+  - `scripts/lib/local_pipeline.py` — 3-stage BIRDEYE orchestration: presence → face detection → eye-state
   - `scripts/lib/training_state.py` — PID-based cross-process training state (CLI/dashboard/cron all coordinate through this)
   - `scripts/lib/config.py` — all constants, paths, thresholds, model chain config, logging setup
   - `scripts/lib/vision.py` — cloud API calls (OpenAI GPT-4o), prompt rendering, response parsing
@@ -52,6 +54,7 @@ python scripts/monitor.py --audit --sample 50   # spot-check shadow vs prod disa
 python scripts/monitor.py --list-models         # versioned model history + metrics
 python scripts/monitor.py --rollback VERSION    # revert to a previous model
 python scripts/monitor.py --retrain             # retrain with pending corrections
+python scripts/monitor.py --backfill-shadow --hours 168 --only-stale  # re-run BIRDEYE on historical frames after deploying a new model (--only-stale skips entries already tagged with the deployed version; supports --limit, --dry-run)
 ```
 
 ### Training (`scripts/train_classifiers.py`)
@@ -62,9 +65,11 @@ python scripts/train_classifiers.py \
   --face-crops pipeline/output/bootstrap/face_crops/ \
   --corrections data/corrections.jsonl \
   --audit data/audit-log.jsonl
-# Train just one classifier:
+# Train just one classifier (or skip the slow face detector):
 python scripts/train_classifiers.py ... --model presence
 python scripts/train_classifiers.py ... --model eye-state
+python scripts/train_classifiers.py ... --model face-detect
+python scripts/train_classifiers.py ... --model all-no-face  # skips face detector (~60 min)
 ```
 Label priority during training: dashboard corrections > audit disagreements > cloud API labels.
 
@@ -85,9 +90,9 @@ python scripts/report.py --range 1h --section monitor  # quick post-deploy check
 ### Scheduling (launchd, NOT OpenClaw cron)
 ```bash
 launchctl list | grep baby-monitor                                                  # status (exit code 0 = ok)
-launchctl load   ~/Library/LaunchAgents/com.openclaw.baby-monitor.plist             # capture (every 4 min)
-launchctl load   ~/Library/LaunchAgents/com.openclaw.baby-monitor-dashboard.plist   # dashboard (persistent)
-launchctl load   ~/Library/LaunchAgents/com.openclaw.baby-monitor-retrain.plist     # daily retrain (12am ET)
+launchctl load   ~/Library/LaunchAgents/com.baby-monitor.plist             # capture (every 4 min)
+launchctl load   ~/Library/LaunchAgents/com.baby-monitor-dashboard.plist   # dashboard (persistent)
+launchctl load   ~/Library/LaunchAgents/com.baby-monitor-retrain.plist     # daily retrain (12am ET)
 launchctl unload <plist>                                                            # to stop
 ```
 Logs land in `skills/baby-monitor/data/system.log`, `cron-stdout.log`, `cron-stderr.log`.
@@ -97,7 +102,7 @@ Logs land in `skills/baby-monitor/data/system.log`, `cron-stdout.log`, `cron-std
 ## Architecture pointers (read README for the full story)
 
 - **Shadow mode** — every non-empty frame is processed by both pipelines. Cloud API (GPT-4o) decides, BIRDEYE logs in parallel, alignment is recorded. Once alignment ≥ 95%, BIRDEYE is promoted to production. Don't accidentally make BIRDEYE authoritative in code paths until that flip is intentional.
-- **BIRDEYE is 3-stage** — (1) presence classifier (MobileNetV3-Small, bassinet crop), (2) YuNet face detector (ONNX, finds face bbox), (3) eye-state classifier (MobileNetV3-Small, face crop from YuNet bbox). If YuNet fails to detect a face, falls back to head-position crop from the cloud API's last known coordinates. The YuNet model file lives at `pipeline/models/face_detection_yunet_2023mar.onnx`.
+- **BIRDEYE is 3-stage** — (1) presence classifier (MobileNetV3-Small, bassinet crop), (2) face detector (finds face bbox), (3) eye-state classifier (MobileNetV3-Small, face crop from bbox). The face detector is a trainable MobileNetV3 (`pipeline/models/face_detector.pt`) loaded as primary, with YuNet ONNX (`pipeline/models/face_detection_yunet_2023mar.onnx`) loaded as a fallback. If both fail, falls back to a head-position crop from the cloud API's last known coordinates.
 - **Storage** — `data/monitor.db` (SQLite, WAL mode) is primary; `data/sleep-log.jsonl` is an append-only backup. Read paths must use SQLite via `lib/db.py`. Writes are dual-write — keep them in sync.
 - **Wake detection** — non-blocking look-back: 2-of-3 last entries `Awake` triggers a Telegram alert. Don't reintroduce burst-capture (it blocks the pipeline; see Design Decisions in README).
 - **Head position** — when the cloud API runs, it returns head coordinates which are stored in `state` (key: `head`) and used by BIRDEYE's adaptive crop on the next tick.

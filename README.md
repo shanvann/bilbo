@@ -89,9 +89,9 @@ TELEGRAM_CHAT_ID="123456789"
 ### Start Monitoring
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.openclaw.baby-monitor.plist        # monitor (every 4 min)
-launchctl load ~/Library/LaunchAgents/com.openclaw.baby-monitor-dashboard.plist  # dashboard (persistent)
-launchctl load ~/Library/LaunchAgents/com.openclaw.baby-monitor-retrain.plist    # daily retrain (12am ET)
+launchctl load ~/Library/LaunchAgents/com.baby-monitor.plist        # monitor (every 4 min)
+launchctl load ~/Library/LaunchAgents/com.baby-monitor-dashboard.plist  # dashboard (persistent)
+launchctl load ~/Library/LaunchAgents/com.baby-monitor-retrain.plist    # daily retrain (12am ET)
 ```
 
 ## Skills

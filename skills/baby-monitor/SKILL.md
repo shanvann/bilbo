@@ -50,7 +50,7 @@ Head position is adaptive: when birdeye falls back to the cloud API, the API ret
 
 - RTSP stream URL + OpenAI key: `/Users/shanit/.openclaw/workspace/.env.baby-monitor`
 - Vision prompt: `references/prompt.md`
-- Launchd plist: `~/Library/LaunchAgents/com.openclaw.baby-monitor.plist` (60s interval)
+- Launchd plist: `~/Library/LaunchAgents/com.baby-monitor.plist` (60s interval)
 - Classifier models: `pipeline/models/presence_classifier.pt`, `pipeline/models/eye_state_classifier.pt`
 - Head state: `data/head-state.json`
 
@@ -58,8 +58,8 @@ Head position is adaptive: when birdeye falls back to the cloud API, the API ret
 
 ```bash
 launchctl list | grep baby-monitor                                       # status (exit 0 = ok)
-launchctl unload ~/Library/LaunchAgents/com.openclaw.baby-monitor.plist  # stop
-launchctl load ~/Library/LaunchAgents/com.openclaw.baby-monitor.plist    # start
+launchctl unload ~/Library/LaunchAgents/com.baby-monitor.plist  # stop
+launchctl load ~/Library/LaunchAgents/com.baby-monitor.plist    # start
 ```
 
 Logs: `data/system.log` (rotating, 5MB x 3), `data/cron-stdout.log`, `data/cron-stderr.log`
@@ -83,6 +83,7 @@ Logs: `data/system.log` (rotating, 5MB x 3), `data/cron-stdout.log`, `data/cron-
 | `monitor.py --backtest --alerts` | Test wake alert accuracy |
 | `monitor.py --alert-stats` | Show alert precision from user feedback |
 | `monitor.py --feedback ID yes\|no` | Record user feedback for an alert |
+| `monitor.py --backfill-shadow --hours N [--only-stale] [--limit N] [--dry-run]` | Re-run BIRDEYE shadow inference on historical entries (use after deploying a new model). `--only-stale` skips entries already tagged with the deployed version. |
 | `monitor.py --verbose` | Print all log messages to stderr |
 
 ### train_classifiers.py — retrain BIRDEYE models

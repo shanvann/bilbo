@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Baby Monitor Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=14">
+  <link rel="stylesheet" href="/static/style.css?v=15">
 </head>
 <body>
   <!-- Top Bar: Compact Status -->
@@ -99,6 +99,10 @@
         </select>
         <button id="block-label-apply" class="viewer-btn">Apply to all</button>
         <span id="block-label-status" class="viewer-saved"></span>
+        <label class="block-reviewed-label" title="Mark all frames in this block as reviewed (confirmed ground truth for F1 calculation)">
+          <input type="checkbox" id="block-reviewed"> Reviewed
+        </label>
+        <span id="block-reviewed-status" class="viewer-saved"></span>
       </div>
       <div id="block-detail-viewer" class="block-viewer">
         <div class="viewer-frame" id="viewer-frame-container" style="position:relative">
@@ -265,6 +269,6 @@
     </div>
   </footer>
 
-  <script src="/static/app.js?v=14"></script>
+  <script src="/static/app.js?v=15"></script>
 </body>
 </html>

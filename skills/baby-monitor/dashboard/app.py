@@ -188,6 +188,7 @@ def api_timeline():
             "faceConfidence": e.get("faceConfidence"),
             "faceBboxCorrected": e.get("faceBboxCorrected"),
             "retrainAgreed": e.get("retrainAgreed"),
+            "reviewed": e.get("reviewed", False),
             "frame": e.get("frame"),
             "alerts": e.get("alerts", []),
         })
@@ -687,6 +688,19 @@ def api_pending_corrections():
         "lastTrained": last_trained_ts,
         "eyeStateChanges": eye_changes,
     })
+
+
+@app.route("/api/mark-reviewed", methods=["POST"])
+def api_mark_reviewed():
+    """Mark a list of entries as reviewed (human-confirmed ground truth)."""
+    data = request.get_json()
+    timestamps = data.get("timestamps", [])
+    if not timestamps:
+        return jsonify({"error": "timestamps required"}), 400
+
+    db = get_db()
+    updated = db.mark_reviewed(timestamps)
+    return jsonify({"ok": True, "updated": updated})
 
 
 @app.route("/api/run-inference", methods=["POST"])

@@ -110,14 +110,16 @@ def init_db():
         );
     """)
 
-    # Idempotent migrations for existing DBs (added 2026-04-09: training timing)
-    for col, decl in (
-        ("duration_seconds", "REAL"),
-        ("started_at", "TEXT"),
-        ("finished_at", "TEXT"),
+    # Idempotent migrations for existing DBs
+    for table, col, decl in (
+        ("training_runs", "duration_seconds", "REAL"),
+        ("training_runs", "started_at", "TEXT"),
+        ("training_runs", "finished_at", "TEXT"),
+        ("entries", "reviewed", "INTEGER DEFAULT 0"),
+        ("entries", "reviewed_at", "TEXT"),
     ):
         try:
-            conn.execute(f"ALTER TABLE training_runs ADD COLUMN {col} {decl}")
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
         except sqlite3.OperationalError:
             pass  # column already exists
 
@@ -410,6 +412,51 @@ def insert_correction(correction: dict):
     conn.commit()
 
 
+def mark_reviewed(timestamps: list[str]) -> int:
+    """Mark a list of entries as reviewed (human-confirmed ground truth).
+
+    Returns the number of entries updated.
+    """
+    if not timestamps:
+        return 0
+    conn = get_connection()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    updated = 0
+    for ts in timestamps:
+        row = conn.execute("SELECT data FROM entries WHERE timestamp = ?", (ts,)).fetchone()
+        if not row:
+            continue
+        entry = json.loads(row["data"])
+        entry["reviewed"] = True
+        entry["reviewedAt"] = now
+        conn.execute("""
+            UPDATE entries SET reviewed = 1, reviewed_at = ?, data = ?
+            WHERE timestamp = ?
+        """, (now, json.dumps(entry), ts))
+        updated += 1
+    conn.commit()
+    return updated
+
+
+def get_reviewed_ground_truth() -> list[dict]:
+    """Get all reviewed frames as ground truth for F1 calculation.
+
+    Returns entries that are either:
+    - reviewed=1 (user confirmed the label, corrected or not)
+    - eye_state_edited=1 (user corrected the label)
+
+    For reviewed-but-uncorrected frames, the existing eye_state/state
+    from the cloud API is the confirmed ground truth.
+    """
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT data FROM entries
+        WHERE reviewed = 1 OR eye_state_edited = 1
+        ORDER BY timestamp ASC
+    """).fetchall()
+    return [json.loads(row["data"]) for row in rows]
+
+
 def get_pending_corrections_count(last_trained: str = None) -> tuple[int, int]:
     """Return (total_corrections, pending_corrections)."""
     conn = get_connection()
@@ -613,31 +660,63 @@ def get_safety_stats(hours: float = 168) -> dict:
             "total": total,
         }
 
-    # ----- Compute vs-corrections panels from corrections table -----
-    # Join corrections with entries to get both cloud API and BIRDEYE
-    # predictions for each corrected frame.  This is the only ground truth.
-    corr_rows = conn.execute("""
-        SELECT c.corrected_eye_state, c.corrected_state,
-               e.state AS cloud_state, e.eye_state AS cloud_eye_state,
-               e.shadow_birdeye_state, e.baby_present,
-               e.data
-        FROM corrections c
-        JOIN entries e ON e.timestamp = c.original_timestamp
+    # ----- Compute vs ground truth (reviewed + corrected frames) -----
+    # Ground truth = reviewed frames (user confirmed label) + corrected
+    # frames (user changed label).  For reviewed-but-uncorrected frames
+    # the existing eye_state is confirmed correct.  For corrected frames
+    # the corrected eye_state overrides.
+    gt_rows = conn.execute("""
+        SELECT e.timestamp, e.state AS cloud_state, e.eye_state AS cloud_eye_state,
+               e.shadow_birdeye_state, e.baby_present, e.eye_state_edited,
+               e.reviewed, e.data,
+               c.corrected_eye_state, c.corrected_state
+        FROM entries e
+        LEFT JOIN corrections c ON c.original_timestamp = e.timestamp
+        WHERE e.reviewed = 1 OR e.eye_state_edited = 1
+        ORDER BY e.timestamp ASC
     """).fetchall()
+
+    # Deduplicate: if an entry has multiple corrections, take the latest
+    seen = set()
+    unique_rows = []
+    for row in reversed(gt_rows):
+        ts = row["timestamp"]
+        if ts in seen:
+            continue
+        seen.add(ts)
+        unique_rows.append(row)
+    unique_rows.reverse()
 
     # Build pairs: (truth, predicted) for each source
     bird_pres_pairs = []
     cloud_pres_pairs = []
     bird_eye_pairs = []
     cloud_eye_pairs = []
+    reviewed_count = 0
+    corrected_count = 0
 
-    for row in corr_rows:
-        # Determine ground truth eye state from correction
-        truth_eye = row["corrected_eye_state"]
-        if not truth_eye:
-            # Fall back to corrected state → eye mapping
+    for row in unique_rows:
+        # Determine ground truth eye state
+        # Priority: correction > reviewed entry's existing eye state
+        truth_eye = None
+        if row["corrected_eye_state"]:
+            truth_eye = row["corrected_eye_state"]
+            corrected_count += 1
+        elif row["corrected_state"]:
             cs = (row["corrected_state"] or "").lower()
             truth_eye = STATE_TO_EYE.get(cs)
+            corrected_count += 1
+        elif row["reviewed"]:
+            # Reviewed but not corrected — the existing label is ground truth
+            truth_eye = row["cloud_eye_state"]
+            if not truth_eye:
+                cs = (row["cloud_state"] or "").lower()
+                truth_eye = STATE_TO_EYE.get(cs)
+            # If baby not present, mark as not_in_bassinet
+            if not row["baby_present"]:
+                truth_eye = "not_in_bassinet"
+            reviewed_count += 1
+
         if not truth_eye or truth_eye not in ("eyes_open", "eyes_closed", "not_in_bassinet"):
             continue
 
@@ -674,7 +753,6 @@ def get_safety_stats(hours: float = 168) -> dict:
             entry_data = json.loads(row["data"]) if row["data"] else {}
             shadow = entry_data.get("shadow", {})
             shadow_eye = shadow.get("eyeState")
-            # Use direct eye state if available, else map from state
             pred_eye = shadow_eye if shadow_eye in ("eyes_open", "eyes_closed") else bird_eye
             if pred_eye in ("eyes_open", "eyes_closed"):
                 bird_eye_pairs.append((truth_eye, pred_eye))
@@ -748,13 +826,18 @@ def get_safety_stats(hours: float = 168) -> dict:
             and latest_trained_version is not None
             and deployed_version != latest_trained_version
         ),
+        "groundTruth": {
+            "total": reviewed_count + corrected_count,
+            "reviewed": reviewed_count,
+            "corrected": corrected_count,
+        },
         "presence": {
-            "birdeyeVsCorrections": build_panel(bird_pres_pairs, pres_classes) if bird_pres_pairs else None,
-            "cloudVsCorrections": build_panel(cloud_pres_pairs, pres_classes) if cloud_pres_pairs else None,
+            "birdeyeVsGT": build_panel(bird_pres_pairs, pres_classes) if bird_pres_pairs else None,
+            "cloudVsGT": build_panel(cloud_pres_pairs, pres_classes) if cloud_pres_pairs else None,
         },
         "eyeState": {
-            "birdeyeVsCorrections": build_panel(bird_eye_pairs, eye_classes) if bird_eye_pairs else None,
-            "cloudVsCorrections": build_panel(cloud_eye_pairs, eye_classes) if cloud_eye_pairs else None,
+            "birdeyeVsGT": build_panel(bird_eye_pairs, eye_classes) if bird_eye_pairs else None,
+            "cloudVsGT": build_panel(cloud_eye_pairs, eye_classes) if cloud_eye_pairs else None,
         },
         "faceDetection": face_stats,
     }
@@ -914,10 +997,12 @@ class MonitorDB:
     get_timeline = staticmethod(get_timeline)
     get_monitor_stats = staticmethod(get_monitor_stats)
 
-    # Corrections
+    # Corrections & review
     insert_correction = staticmethod(insert_correction)
     get_pending_corrections_count = staticmethod(get_pending_corrections_count)
     get_pending_corrections = staticmethod(get_pending_corrections)
+    mark_reviewed = staticmethod(mark_reviewed)
+    get_reviewed_ground_truth = staticmethod(get_reviewed_ground_truth)
 
     # Training
     insert_training_run = staticmethod(insert_training_run)

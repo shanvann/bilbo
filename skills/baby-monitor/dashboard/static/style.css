@@ -461,6 +461,13 @@ footer {
   font-size: 0.85rem;
   color: var(--text-dim);
 }
+.block-reviewed-label {
+  font-size: 0.85rem;
+  color: var(--accent-green);
+  cursor: pointer;
+  margin-left: auto;
+}
+.block-reviewed-label input { cursor: pointer; }
 .block-pending-badge {
   font-size: 0.8rem;
   color: var(--accent-orange);

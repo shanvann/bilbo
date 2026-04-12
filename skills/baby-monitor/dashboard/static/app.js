@@ -308,6 +308,13 @@ function showBlockDetail(seg, durStr) {
   viewerIndex = 0;
   renderViewer();
 
+  // Reviewed checkbox: checked if ALL frames in block are reviewed
+  const allReviewed = seg.entries.length > 0 && seg.entries.every(e => e.reviewed);
+  const reviewedCb = document.getElementById('block-reviewed');
+  reviewedCb.checked = allReviewed;
+  reviewedCb.disabled = allReviewed; // can't un-review
+  document.getElementById('block-reviewed-status').textContent = '';
+
   panel.style.display = 'block';
   panel.scrollIntoView({ behavior: 'smooth' });
 }
@@ -809,6 +816,38 @@ document.getElementById('block-label-apply').addEventListener('click', async () 
   renderViewer(); // refresh current frame display
   setTimeout(() => { status.textContent = ''; }, 3000);
 });
+// Reviewed checkbox — marks all frames in the block as reviewed ground truth
+document.getElementById('block-reviewed').addEventListener('change', async (ev) => {
+  if (!ev.target.checked) return; // can't un-review
+  if (viewerEntries.length === 0) return;
+
+  const status = document.getElementById('block-reviewed-status');
+  status.textContent = 'saving...';
+  status.style.color = 'var(--text-dim)';
+
+  const timestamps = viewerEntries.map(e => e.timestamp);
+  try {
+    const res = await fetch('/api/mark-reviewed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ timestamps }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      viewerEntries.forEach(e => { e.reviewed = true; });
+      status.textContent = data.updated + ' frames reviewed';
+      status.style.color = 'var(--accent-green)';
+      setTimeout(() => { status.textContent = ''; }, 3000);
+    } else {
+      status.textContent = 'error';
+      status.style.color = '#ff5252';
+    }
+  } catch (err) {
+    status.textContent = 'error';
+    status.style.color = '#ff5252';
+  }
+});
+
 document.getElementById('block-prev').addEventListener('click', () => {
   if (currentBlockIndex > 0) openBlock(currentBlockIndex - 1);
 });
@@ -1209,34 +1248,38 @@ function renderClassifierColumn(elId, type) {
   const safety = safetyData ? (isPresence ? safetyData.presence : safetyData.eyeState) : null;
 
   if (safety) {
-    const bird = safety.birdeyeVsCorrections || {};
-    const cloud = safety.cloudVsCorrections || {};
+    const bird = safety.birdeyeVsGT || {};
+    const cloud = safety.cloudVsGT || {};
+    const gt = safetyData.groundTruth || {};
     const macroThresh = isPresence ? [0.90, 0.97] : [0.60, 0.85];
     const accThresh = isPresence ? [0.90, 0.97] : [0.75, 0.90];
     const hasBird = bird.total > 0;
     const hasCloud = cloud.total > 0;
 
-    // Headlines: side-by-side BIRDEYE vs Cloud, both against corrections
-    html += '<div class="safety-source-label">vs Corrections (ground truth)</div>';
+    // Ground truth source label
+    const gtLabel = gt.total > 0
+      ? '(' + gt.total + ' labels: ' + gt.reviewed + ' reviewed, ' + gt.corrected + ' corrected)'
+      : '';
+    html += '<div class="safety-source-label">vs Ground Truth <span style="color:#556;font-weight:400">' + gtLabel + '</span></div>';
     html += '<div class="safety-headline">';
 
     if (hasBird) {
-      html += '<div class="safety-headline-row" title="BIRDEYE macro F1 against human-corrected labels"><span class="safety-headline-label">BIRDEYE Macro F1</span>';
+      html += '<div class="safety-headline-row" title="BIRDEYE macro F1 against reviewed + corrected ground truth"><span class="safety-headline-label">BIRDEYE Macro F1</span>';
       html += '<span class="safety-headline-value ' + _safetyClass(bird.macroF1, macroThresh) + '">'
         + Math.round(bird.macroF1 * 100) + '% <span style="font-size:0.7rem;color:var(--text-dim)">(' + bird.total + ')</span></span></div>';
     }
     if (hasCloud) {
-      html += '<div class="safety-headline-row" title="Cloud API macro F1 against human-corrected labels"><span class="safety-headline-label">Cloud API Macro F1</span>';
+      html += '<div class="safety-headline-row" title="Cloud API macro F1 against reviewed + corrected ground truth"><span class="safety-headline-label">Cloud API Macro F1</span>';
       html += '<span class="safety-headline-value ' + _safetyClass(cloud.macroF1, macroThresh) + '">'
         + Math.round(cloud.macroF1 * 100) + '% <span style="font-size:0.7rem;color:var(--text-dim)">(' + cloud.total + ')</span></span></div>';
     }
     if (hasBird) {
-      html += '<div class="safety-headline-row" title="BIRDEYE accuracy against corrections"><span class="safety-headline-label">BIRDEYE Accuracy</span>';
+      html += '<div class="safety-headline-row" title="BIRDEYE accuracy against ground truth"><span class="safety-headline-label">BIRDEYE Accuracy</span>';
       html += '<span class="safety-headline-value ' + _safetyClass(bird.accuracy, accThresh) + '">'
         + Math.round(bird.accuracy * 100) + '%</span></div>';
     }
     if (hasCloud) {
-      html += '<div class="safety-headline-row" title="Cloud API accuracy against corrections"><span class="safety-headline-label">Cloud API Accuracy</span>';
+      html += '<div class="safety-headline-row" title="Cloud API accuracy against ground truth"><span class="safety-headline-label">Cloud API Accuracy</span>';
       html += '<span class="safety-headline-value ' + _safetyClass(cloud.accuracy, accThresh) + '">'
         + Math.round(cloud.accuracy * 100) + '%</span></div>';
     }
@@ -1244,7 +1287,7 @@ function renderClassifierColumn(elId, type) {
 
     // BIRDEYE per-class P/R/F1 + collapsible confusion matrix
     if (hasBird && bird.confusion) {
-      html += '<div class="safety-source-label">BIRDEYE vs Corrections</div>';
+      html += '<div class="safety-source-label">BIRDEYE vs Ground Truth</div>';
       html += _renderPerClass(bird, classes);
       html += '<details class="cm-details"><summary class="cm-toggle">Confusion matrix</summary>';
       html += _renderConfusion(bird, classes);
@@ -1253,7 +1296,7 @@ function renderClassifierColumn(elId, type) {
 
     // Cloud API per-class P/R/F1 + collapsible confusion matrix
     if (hasCloud && cloud.confusion) {
-      html += '<div class="safety-source-label">Cloud API vs Corrections</div>';
+      html += '<div class="safety-source-label">Cloud API vs Ground Truth</div>';
       html += _renderPerClass(cloud, classes);
       html += '<details class="cm-details"><summary class="cm-toggle">Confusion matrix</summary>';
       html += _renderConfusion(cloud, classes);
@@ -1261,7 +1304,7 @@ function renderClassifierColumn(elId, type) {
     }
 
     if (!hasBird && !hasCloud) {
-      html += '<div class="safety-empty">No corrections data yet.</div>';
+      html += '<div class="safety-empty">No ground truth data yet — review blocks in the timeline to build ground truth.</div>';
     }
   } else {
     html += '<div class="safety-empty">Loading metrics...</div>';

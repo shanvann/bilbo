@@ -39,7 +39,10 @@ from lib.capture import capture_frame, enforce_disk_limit
 from lib.db import get_db
 from lib.detect import detect_empty_bassinet, make_empty_entry
 from lib.vision import analyze_frame, flatten_analysis
-from lib.local_pipeline import try_local_analysis
+from lib.local_pipeline import (
+    birdeye_result_to_shadow_blob,
+    run_birdeye_inference,
+)
 from lib.alerts import (
     check_alerts,
     check_edge_alert,
@@ -225,97 +228,97 @@ def main():
     enforce_disk_limit()
 
     # =======================================================================
-    # Production pipeline: pixel-diff → cloud API (reliable, ground truth)
-    # Shadow pipeline: birdeye runs in parallel (logged, not used for decisions)
+    # BIRDEYE-primary pipeline:
+    #   pixel-diff → BIRDEYE classifier → cloud API (only on BIRDEYE fallback)
     #
-    # Birdeye results are compared against cloud API to track agreement.
-    # Once agreement exceeds threshold, birdeye can be promoted to production.
+    # BIRDEYE handles ~99.4% of non-empty frames in current production data;
+    # the cloud API runs only when BIRDEYE bails (no_face_detected,
+    # low_confidence) or hard-errors (deps missing, model load failed,
+    # unreadable frame). Edge alert (`check_edge_alert`) is currently
+    # disabled by side-effect: it reads `bassinetLocation`, which only
+    # the cloud API populates, so it now only fires on BIRDEYE fallback
+    # frames. Tracked in github issue #3 — trained
+    # BassinetLocationClassifier will restore it.
     # =======================================================================
 
-    # --- Shadow: run birdeye (results logged but not used for prod decisions) ---
-    shadow_birdeye = try_local_analysis(frame_path)
-    if shadow_birdeye is not None:
-        fallback = shadow_birdeye.get("fallback")
-        if fallback:
-            log.info("shadow: birdeye -> partial (fallback=%s, presence_conf=%.3f eye=%s)",
-                     fallback,
-                     shadow_birdeye.get("presenceConfidence", 0),
-                     shadow_birdeye.get("eyeConfidence", "n/a"))
-        else:
-            log.info("shadow: birdeye -> %s (conf: presence=%.3f eye=%s)",
-                     shadow_birdeye.get("state"),
-                     shadow_birdeye.get("presenceConfidence", 0),
-                     shadow_birdeye.get("eyeConfidence", "n/a"))
-
-    # --- Production: pixel-diff gate → cloud API ---
     is_empty, diff_score = detect_empty_bassinet(frame_path)
 
     if is_empty:
         flat = make_empty_entry(frame_path, diff_score)
-        log.info("pipeline: pixel-diff -> empty (score=%.2f), cloud API skipped", diff_score)
+        log.info("pipeline: pixel-diff -> empty (score=%.2f), birdeye skipped", diff_score)
+        birdeye_result = None
     else:
-        log.info("pipeline: pixel-diff -> changed (score=%.2f), calling cloud API", diff_score)
-        try:
-            analysis = analyze_frame(frame_path, api_key, anthropic_key)
-        except RuntimeError as e:
-            log.error("pipeline: analysis failed, aborting - %s", e)
-            _output("error", error=str(e), frame=str(frame_path))
-            return 1
+        log.info("pipeline: pixel-diff -> changed (score=%.2f), running birdeye", diff_score)
+        birdeye_result = run_birdeye_inference(frame_path)
 
-        flat = flatten_analysis(analysis, str(frame_path))
-        flat["diffScore"] = round(diff_score, 2) if diff_score >= 0 else None
-
-        # Heuristic: if state is "Unknown", baby is present, and position matches
-        # the previous frame, infer "Asleep" (baby hasn't moved, likely sleeping)
-        if flat.get("state") == "Unknown" and flat.get("babyPresent"):
-            prev = get_last_entry()
-            if prev and prev.get("babyPresent") and prev.get("sleepPosition") == flat.get("sleepPosition"):
-                if flat.get("sleepPosition") != "Unknown":
-                    log.info("heuristic: state Unknown -> Asleep (position unchanged: %s)", flat.get("sleepPosition"))
-                    flat["state"] = "Asleep"
-                    flat["stateInferred"] = True
-
-        # Update head position from cloud API (for birdeye shadow)
-        head_pos = flat.get("headPosition")
-        if isinstance(head_pos, dict) and head_pos.get("visible", False):
-            from lib.classifiers import save_head_state
-            save_head_state(head_pos["x"], head_pos["y"], source="cloud-api")
-
-    # --- Compare shadow birdeye vs production result ---
-    if shadow_birdeye is not None:
-        prod_state = flat.get("state", "Unknown")
-        if not flat.get("babyPresent", False):
-            prod_state = "not_present"
-        birdeye_state = shadow_birdeye.get("state", "Unknown")
-        if not shadow_birdeye.get("babyPresent", False):
-            birdeye_state = "not_present"
-
-        agreed = birdeye_state.lower() == prod_state.lower()
-        flat["shadow"] = {
-            "birdeyeState": birdeye_state,
-            "prodState": prod_state,
-            "agreed": agreed,
-            "presenceConfidence": shadow_birdeye.get("presenceConfidence"),
-            "eyeConfidence": shadow_birdeye.get("eyeConfidence"),
-            "eyeState": shadow_birdeye.get("eyeState"),
-            "birdeyeTimings": shadow_birdeye.get("birdeyeTimings"),
-            "fallback": shadow_birdeye.get("fallback"),
-        }
-        # Promote face detection data to top level for dashboard overlay + training
-        if shadow_birdeye.get("faceBbox"):
-            flat["faceBbox"] = shadow_birdeye["faceBbox"]
-        if shadow_birdeye.get("faceConfidence") is not None:
-            flat["faceConfidence"] = shadow_birdeye["faceConfidence"]
-        # Track which model version produced this shadow result
-        training_log = Path(__file__).resolve().parent.parent / "pipeline" / "models" / "training-log.jsonl"
-        if training_log.exists():
-            last_line = training_log.read_text().strip().splitlines()[-1:]
-            if last_line:
-                flat["shadowModelVersion"] = json.loads(last_line[0]).get("version")
-        if agreed:
-            log.info("shadow: AGREE birdeye=%s prod=%s", birdeye_state, prod_state)
+        # Decide whether BIRDEYE handled this frame or we need cloud fallback.
+        # `not_present` is a confident answer, NOT a fallback. The fallback
+        # field is only set on the partial-result paths inside BIRDEYE.
+        if birdeye_result is None:
+            fallback_reason = "hard_error"
+        elif birdeye_result.get("fallback") in ("no_face_detected", "low_confidence"):
+            fallback_reason = birdeye_result["fallback"]
         else:
-            log.warning("shadow: DISAGREE birdeye=%s prod=%s", birdeye_state, prod_state)
+            fallback_reason = None
+
+        if fallback_reason is None:
+            # BIRDEYE handled it cleanly — its outputs ARE the entry.
+            flat = dict(birdeye_result)
+            flat["diffScore"] = round(diff_score, 2) if diff_score >= 0 else None
+            log.info("pipeline: birdeye -> %s (presence=%.3f eye=%s)",
+                     flat.get("state"),
+                     flat.get("presenceConfidence", 0),
+                     flat.get("eyeConfidence", "n/a"))
+        else:
+            # BIRDEYE bailed → cloud API fallback. The cloud API is
+            # authoritative on this frame's primary fields.
+            log.warning("pipeline: birdeye fallback=%s, calling cloud API",
+                        fallback_reason)
+            try:
+                analysis = analyze_frame(frame_path, api_key, anthropic_key)
+            except RuntimeError as e:
+                log.error("pipeline: cloud API fallback also failed - %s", e)
+                _output("error", error=str(e), frame=str(frame_path))
+                return 1
+
+            flat = flatten_analysis(analysis, str(frame_path))
+            flat["diffScore"] = round(diff_score, 2) if diff_score >= 0 else None
+            flat["birdeyeFallback"] = fallback_reason
+
+            # Heuristic: if state is "Unknown", baby is present, and position
+            # matches the previous frame, infer "Asleep" (baby hasn't moved,
+            # likely sleeping). Kept from the pre-flip pipeline.
+            if flat.get("state") == "Unknown" and flat.get("babyPresent"):
+                prev = get_last_entry()
+                if prev and prev.get("babyPresent") and prev.get("sleepPosition") == flat.get("sleepPosition"):
+                    if flat.get("sleepPosition") != "Unknown":
+                        log.info("heuristic: state Unknown -> Asleep (position unchanged: %s)",
+                                 flat.get("sleepPosition"))
+                        flat["state"] = "Asleep"
+                        flat["stateInferred"] = True
+
+            # Save head position from cloud API for the next BIRDEYE
+            # tick's adaptive crop (the trainable face detector is the
+            # primary source now, but the head crop is still a useful
+            # last-resort fallback inside BIRDEYE).
+            head_pos = flat.get("headPosition")
+            if isinstance(head_pos, dict) and head_pos.get("visible", False):
+                from lib.classifiers import save_head_state
+                save_head_state(head_pos["x"], head_pos["y"], source="cloud-api")
+
+        # Always populate the audit-trail fields from BIRDEYE's output,
+        # even on fallback frames where the cloud API wrote the primary
+        # fields. The `shadow` blob and the indexed shadow_birdeye_*
+        # columns are now an immutable record of what the model said,
+        # separate from the user-facing labels which can be corrected.
+        flat["shadow"] = birdeye_result_to_shadow_blob(birdeye_result)
+        if birdeye_result is not None:
+            if birdeye_result.get("shadowModelVersion"):
+                flat["shadowModelVersion"] = birdeye_result["shadowModelVersion"]
+            if birdeye_result.get("faceBbox") and "faceBbox" not in flat:
+                flat["faceBbox"] = birdeye_result["faceBbox"]
+            if birdeye_result.get("faceConfidence") is not None and "faceConfidence" not in flat:
+                flat["faceConfidence"] = birdeye_result["faceConfidence"]
 
     alerts = check_alerts(flat)
 

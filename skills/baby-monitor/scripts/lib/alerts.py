@@ -275,3 +275,13 @@ def check_alerts(flat: dict) -> list[str]:
             alerts.append(f"{label}: {value}")
     log.debug("alert check: %d rules evaluated, %d alerts triggered", checked, len(alerts))
     return alerts
+
+
+# NOTE: edge alert (`check_edge_alert` above) reads `entry["bassinetLocation"]`,
+# a field only the cloud API populates. Post BIRDEYE-primary flip the cloud API
+# only runs on BIRDEYE fallback (~0.6% of frames), so the edge alert is
+# effectively disabled until a trained BassinetLocationClassifier ships —
+# see github issue #3 for the implementation plan. A geometric stopgap was
+# tried (face_cy > 0.70 + presence + persistence) and backtested at recall
+# 0.79 / precision 0.06 → 42 alerts/wk on ~3 true events/wk, far too noisy
+# to ship.

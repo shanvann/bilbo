@@ -73,6 +73,8 @@ The monitor section is rendered from two dashboard endpoints — `lib/monitor.py
 - **Presence panel** (`not_present` vs `present`): BIRDEYE and Cloud API macro-F1, accuracy, per-class P/R/F1 vs ground truth.
 - **Eye-state panel** (`eyes_open` vs `eyes_closed`): same shape.
 
+> ⚠ **Ground Truth Definition:** The only authoritative GT is frames marked as reviewed (`reviewed=1`) or corrected via the dashboard (`eye_state_edited=1`). Raw prod labels are **never** a substitute for GT. When computing or interpreting precision, recall, F1, or macro F1 — always restrict to the GT slice. Do not treat unreviewed prod labels as truth even when GT frames are scarce.
+
 > ⚠ The dashboard's GT pairs are computed across **all** reviewed/corrected frames, not just the requested window. The classifier F1/accuracy numbers in the report are therefore lifetime metrics, not windowed. Only the production decision counts, latency, costs, and shadow frame count are scoped by `--range`.
 
 **JSON output** (`--format json`) passes the dashboard responses through verbatim under the top-level `monitor` key, with two sub-objects: `monitor.monitor_stats` and `monitor.safety_stats`. This is intentionally a 1:1 mirror of the dashboard's API contract.

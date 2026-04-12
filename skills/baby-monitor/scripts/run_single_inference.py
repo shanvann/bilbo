@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
-"""Run BIRDEYE inference on a single frame by timestamp.
+"""Re-run BIRDEYE inference on a single frame by timestamp.
 
 Called by the dashboard's /api/run-inference endpoint via subprocess
-(the dashboard venv doesn't have torch/cv2).
+(the dashboard venv intentionally has no torch/cv2). Updates the
+entry's `shadow` audit blob and indexed shadow_birdeye_* columns
+with the new model output. Leaves the user-facing primary fields
+(eye_state, baby_present) untouched so corrections survive a re-run.
+
+This script is a thin wrapper. All the actual work — running BIRDEYE,
+mapping results to the shadow blob shape — lives in
+`lib.local_pipeline.run_birdeye_inference` and `birdeye_result_to_shadow_blob`,
+which `monitor.py` (the live capture pipeline) also calls. Keep this
+file thin so the two paths cannot drift.
 
 Usage: python run_single_inference.py <timestamp>
 Output: JSON on stdout
@@ -15,8 +24,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lib.db import get_db
-from lib.local_pipeline import try_local_analysis
-import lib.local_pipeline as _lp
+from lib.local_pipeline import (
+    birdeye_result_to_shadow_blob,
+    run_birdeye_inference,
+)
 
 
 def main():
@@ -37,44 +48,20 @@ def main():
         print(json.dumps({"ok": False, "error": "frame file not found"}))
         return 1
 
-    # Force reload classifiers to pick up latest model
-    _lp._presence_clf = None
-    _lp._eye_state_clf = None
-    _lp._face_detector = None
-    _lp._face_detector_fallback = None
-    _lp._available = None
-
-    result = try_local_analysis(Path(frame_path))
-
+    result = run_birdeye_inference(Path(frame_path))
     if result is None:
         print(json.dumps({"ok": True, "result": None, "reason": "hard_error"}))
         return 0
 
-    fallback = result.get("fallback")
-    birdeye_state = result.get("state", "Unknown")
-    if not result.get("babyPresent", False):
-        birdeye_state = "not_present"
+    shadow = birdeye_result_to_shadow_blob(result)
 
-    # Build shadow dict
-    prod_state = entry.get("state", "Unknown")
-    if not entry.get("babyPresent", False):
-        prod_state = "not_present"
-    agreed = birdeye_state.lower() == prod_state.lower()
-
-    shadow = {
-        "birdeyeState": birdeye_state,
-        "prodState": prod_state,
-        "agreed": agreed,
-        "presenceConfidence": result.get("presenceConfidence"),
-        "eyeConfidence": result.get("eyeConfidence"),
-        "eyeState": result.get("eyeState"),
-        "birdeyeTimings": result.get("birdeyeTimings"),
-        "fallback": fallback,
-    }
-
-    # Check if correction exists and whether inference now agrees
-    gt_eye = entry.get("eyeState")
+    # Compute retrainAgreed against the user's correction (if any).
+    # This is the only thing this script does that monitor.py doesn't —
+    # the dashboard cares whether the *current* model now agrees with
+    # what a human corrected to, separate from what the model said at
+    # capture time.
     retrain_agreed = None
+    gt_eye = entry.get("eyeState")
     if entry.get("eyeStateEdited") and gt_eye:
         bird_eye = result.get("eyeState")
         if gt_eye == "not_in_bassinet":
@@ -82,8 +69,9 @@ def main():
         elif bird_eye:
             retrain_agreed = (bird_eye == gt_eye)
 
-    # Update entry in DB
     updates = {"shadow": shadow}
+    if result.get("shadowModelVersion"):
+        updates["shadowModelVersion"] = result["shadowModelVersion"]
     if result.get("faceBbox"):
         updates["faceBbox"] = result["faceBbox"]
     if result.get("faceConfidence") is not None:

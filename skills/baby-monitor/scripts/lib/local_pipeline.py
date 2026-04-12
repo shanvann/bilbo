@@ -20,6 +20,15 @@ Fallback triggers (returns None → cloud API):
   - Pipeline dependencies not installed
   - Model files missing or load error
   - Any runtime error during inference
+
+Single source of truth for callers
+----------------------------------
+
+`run_birdeye_inference(frame_path)` and `birdeye_result_to_shadow_blob`
+are the public entry points used by both `monitor.py` (live capture
+pipeline) and `run_single_inference.py` (dashboard re-run button).
+Anything that wants "what does BIRDEYE produce for this frame" must
+go through these so the two paths cannot drift.
 """
 
 import logging
@@ -29,6 +38,7 @@ import time
 from pathlib import Path
 
 from .config import (
+    MODELS_DIR,
     PRESENCE_MODEL,
     EYE_STATE_MODEL,
     FACE_DETECT_MODEL_PT,
@@ -266,3 +276,84 @@ def _build_entry(state, presence, eye_result, timings,
     entry["birdeyeTimings"] = {k: round(v, 3) for k, v in timings.items()}
 
     return entry
+
+
+# ---------------------------------------------------------------------------
+# Shared inference entry points
+# ---------------------------------------------------------------------------
+#
+# These two functions are the SINGLE SOURCE OF TRUTH for "run BIRDEYE on
+# a frame" and "produce the shadow audit blob from a BIRDEYE result".
+# Both monitor.py (live capture) and run_single_inference.py (dashboard
+# re-run button) call them, so the two paths cannot drift on what the
+# model output looks like or how it's mapped to storage.
+
+def _read_deployed_model_version() -> str | None:
+    """Return the version string the `latest` symlink points at, or None."""
+    latest = MODELS_DIR / "latest"
+    if not latest.is_symlink():
+        return None
+    try:
+        return Path(os.readlink(latest)).name
+    except OSError:
+        return None
+
+
+def run_birdeye_inference(frame_path: Path) -> dict | None:
+    """Run BIRDEYE on a frame and return a fully-shaped entry dict.
+
+    This is the single shared inference entry point used by both the
+    live capture pipeline and the dashboard re-run button. Anything
+    that wants "what does BIRDEYE produce for this frame" should call
+    this — do not call ``try_local_analysis`` directly from callers,
+    that's an implementation detail.
+
+    Returns the dict from ``try_local_analysis`` annotated with
+    ``shadowModelVersion`` (the deployed model version from the
+    ``pipeline/models/latest`` symlink). The dict has a ``fallback``
+    key set to a string when BIRDEYE bailed (``no_face_detected``,
+    ``low_confidence``) — callers inspect it to decide whether to fall
+    back to the cloud API for the primary entry fields.
+
+    Returns ``None`` only on hard error (deps missing, model load
+    failure, unreadable frame). On hard error the caller has no
+    BIRDEYE data at all and must fall back to the cloud API.
+    """
+    result = try_local_analysis(frame_path)
+    if result is None:
+        return None
+    version = _read_deployed_model_version()
+    if version:
+        result["shadowModelVersion"] = version
+    return result
+
+
+def birdeye_result_to_shadow_blob(result: dict | None) -> dict:
+    """Map a BIRDEYE inference result to the legacy ``shadow`` sub-dict shape.
+
+    The schema's indexed ``shadow_birdeye_present`` and
+    ``shadow_birdeye_eye`` columns are populated by
+    ``db._derive_shadow_columns()``, which reads from the entry's
+    ``shadow`` sub-dict. Pre-flip this dict was BIRDEYE-vs-cloud
+    comparison data; post-flip it's an immutable audit trail of what
+    the model produced for each frame, kept separate from the
+    user-facing primary fields (which can be corrected via the
+    dashboard without overwriting the model's output).
+
+    Both monitor.py and run_single_inference.py write the same shape
+    so the indexed columns and the dashboard's frame viewer see a
+    consistent structure regardless of which path produced the entry.
+    """
+    if not result:
+        return {}
+    state = result.get("state", "Unknown")
+    if not result.get("babyPresent", False):
+        state = "not_present"
+    return {
+        "birdeyeState": state,
+        "eyeState": result.get("eyeState"),
+        "presenceConfidence": result.get("presenceConfidence"),
+        "eyeConfidence": result.get("eyeConfidence"),
+        "birdeyeTimings": result.get("birdeyeTimings"),
+        "fallback": result.get("fallback"),
+    }

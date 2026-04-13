@@ -404,6 +404,21 @@ def get_monitor_stats(hours: float = 24) -> dict:
     """, (cutoff,)):
         cloud_models[row["model_used"] or "unknown"] = row["cnt"]
 
+    # BIRDEYE model version distribution — which versioned checkpoint
+    # produced the BIRDEYE-decided frames in the window. Post-flip this
+    # is ~99% of non-empty frames. Pre-flip (shadow mode) it's empty
+    # because detection_method was 'vision-api' for every non-empty
+    # frame regardless of shadow-BIRDEYE's output.
+    birdeye_versions: dict[str, int] = {}
+    for row in conn.execute("""
+        SELECT shadow_model_version, COUNT(*) as cnt FROM entries
+        WHERE timestamp >= ? AND detection_method = 'birdeye'
+        GROUP BY shadow_model_version
+        ORDER BY cnt DESC
+    """, (cutoff,)):
+        key = row["shadow_model_version"] or "(unknown)"
+        birdeye_versions[key] = row["cnt"]
+
     cloud_count = methods.get("vision-api", 0) + methods.get("openai-vision", 0)
     birdeye_count = methods.get("birdeye", 0)
     pixel_diff_count = methods.get("pixel-diff", 0)
@@ -430,6 +445,7 @@ def get_monitor_stats(hours: float = 24) -> dict:
             "estSaved": round((birdeye_count + pixel_diff_count) * 0.01, 2),
         },
         "gaps": gap_count,
+        "birdeyeVersions": birdeye_versions,
         "shadow": {
             "total": shadow_row["total"],
             "agreed": shadow_row["agreed"],

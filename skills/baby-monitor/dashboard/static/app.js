@@ -1549,22 +1549,80 @@ async function loadMonitorStats() {
     // Gaps
     document.getElementById('perf-gaps').textContent = d.gaps != null ? d.gaps : '--';
 
-    // Breakdown bar: production pipeline only
+    // Breakdown bars inside #perf-breakdown:
+    //   1. Production pipeline (pixel-diff / birdeye / cloud API decision source)
+    //   2. BIRDEYE model versions (which versioned checkpoint produced the
+    //      birdeye-decided frames — only rendered when there are birdeye frames)
     const breakdown = document.getElementById('perf-breakdown');
     if (d.total > 0) {
-      const cPct = Math.round((d.methods.cloud_api || 0) / d.total * 100);
-      const pPct = Math.round((d.methods.pixel_diff || 0) / d.total * 100);
+      const bCount = d.methods.birdeye || 0;
+      const cCount = d.methods.cloud_api || 0;
+      const pCount = d.methods.pixel_diff || 0;
+      const bPct = Math.round(bCount / d.total * 100);
+      const cPct = Math.round(cCount / d.total * 100);
+      const pPct = Math.round(pCount / d.total * 100);
 
-      breakdown.innerHTML =
-        '<div style="margin-bottom:6px;font-size:0.75rem;color:var(--text-dim)">Production pipeline</div>' +
+      let html =
+        '<div style="margin-bottom:6px;font-size:0.75rem;color:var(--text-dim)">Production decision source</div>' +
         '<div class="perf-bar">' +
-          (pPct > 0 ? '<div class="perf-bar-seg pixel-diff" style="width:' + pPct + '%" title="Pixel-diff ' + pPct + '%">' + (pPct > 5 ? pPct + '%' : '') + '</div>' : '') +
-          (cPct > 0 ? '<div class="perf-bar-seg cloud" style="width:' + cPct + '%" title="Cloud API ' + cPct + '%">' + (cPct > 5 ? cPct + '%' : '') + '</div>' : '') +
+          (pPct > 0 ? '<div class="perf-bar-seg pixel-diff" style="width:' + pPct + '%" title="Pixel-diff ' + pCount + ' (' + pPct + '%)">' + (pPct > 5 ? pPct + '%' : '') + '</div>' : '') +
+          (bPct > 0 ? '<div class="perf-bar-seg birdeye" style="width:' + bPct + '%" title="BIRDEYE ' + bCount + ' (' + bPct + '%)">' + (bPct > 5 ? bPct + '%' : '') + '</div>' : '') +
+          (cPct > 0 ? '<div class="perf-bar-seg cloud" style="width:' + cPct + '%" title="Cloud API ' + cCount + ' (' + cPct + '%)">' + (cPct > 5 ? cPct + '%' : '') + '</div>' : '') +
         '</div>' +
         '<div class="perf-bar-legend">' +
-          '<span><span class="legend-dot" style="background:var(--accent-blue)"></span> Pixel-diff</span>' +
-          '<span><span class="legend-dot" style="background:var(--accent-orange)"></span> Cloud API</span>' +
+          '<span><span class="legend-dot" style="background:var(--accent-blue)"></span> Pixel-diff (' + pCount + ')</span>' +
+          '<span><span class="legend-dot" style="background:var(--accent-green)"></span> BIRDEYE (' + bCount + ')</span>' +
+          '<span><span class="legend-dot" style="background:var(--accent-orange)"></span> Cloud API (' + cCount + ')</span>' +
         '</div>';
+
+      // BIRDEYE model versions breakdown — which versioned checkpoint
+      // produced the birdeye-decided frames. Only render if we have any.
+      const versions = d.birdeyeVersions || {};
+      const versionEntries = Object.entries(versions).sort((a, b) => b[1] - a[1]);
+      if (versionEntries.length > 0 && bCount > 0) {
+        // Top 4 versions + "older" rollup so the bar stays readable when
+        // retraining has shipped many versions in the window.
+        const topN = 4;
+        const top = versionEntries.slice(0, topN);
+        const rest = versionEntries.slice(topN);
+        const restCount = rest.reduce((s, [, n]) => s + n, 0);
+        const shortLabel = (v) => {
+          // v_20260412_141928 → 04/12 14:19  (month/day + time)
+          const m = /^v_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})/.exec(v);
+          return m ? (m[2] + '/' + m[3] + ' ' + m[4] + ':' + m[5]) : v;
+        };
+        const palette = [
+          'var(--accent-green)',
+          'var(--accent-blue)',
+          'var(--accent-blue-light)',
+          'var(--accent-orange)',
+          'var(--text-dim)',
+        ];
+
+        html += '<div style="margin:14px 0 6px;font-size:0.75rem;color:var(--text-dim)">BIRDEYE model versions</div>';
+        html += '<div class="perf-bar">';
+        top.forEach(([ver, n], i) => {
+          const pct = Math.round(n / bCount * 100);
+          if (pct > 0) {
+            html += '<div class="perf-bar-seg" style="width:' + pct + '%;background:' + palette[i] + '" title="' + ver + ' — ' + n + ' frames (' + pct + '% of BIRDEYE)">' + (pct > 8 ? pct + '%' : '') + '</div>';
+          }
+        });
+        if (restCount > 0) {
+          const pct = Math.round(restCount / bCount * 100);
+          html += '<div class="perf-bar-seg" style="width:' + pct + '%;background:' + palette[4] + '" title="' + rest.length + ' older versions — ' + restCount + ' frames">' + (pct > 8 ? pct + '%' : '') + '</div>';
+        }
+        html += '</div>';
+        html += '<div class="perf-bar-legend">';
+        top.forEach(([ver, n], i) => {
+          html += '<span><span class="legend-dot" style="background:' + palette[i] + '"></span> ' + shortLabel(ver) + ' (' + n + ')</span>';
+        });
+        if (restCount > 0) {
+          html += '<span><span class="legend-dot" style="background:' + palette[4] + '"></span> older ×' + rest.length + ' (' + restCount + ')</span>';
+        }
+        html += '</div>';
+      }
+
+      breakdown.innerHTML = html;
     }
   } catch (e) {
     console.error('Monitor stats error:', e);

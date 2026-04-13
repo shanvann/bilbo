@@ -1,6 +1,6 @@
 # BILBO — Baby Intelligent Lookout & Behavior Observer
 
-A baby bassinet monitor that captures a frame every 4 minutes from an IP camera, classifies sleep state with a cloud API (GPT-4o), and trains a local ML model (BIRDEYE) in shadow mode to eventually replace the cloud API. Includes a dashboard for frame review, label correction, model retraining, and performance tracking.
+A baby bassinet monitor that captures a frame every minute from an IP camera, classifies sleep state on-device with a 3-stage MobileNetV3 cascade (BIRDEYE), and falls back to a cloud API (GPT-4o) only when the local cascade can't see a face (~1% of non-empty frames). Includes a dashboard for frame review, label correction, model retraining, and performance tracking.
 
 ## Table of Contents
 
@@ -39,7 +39,7 @@ A baby bassinet monitor that captures a frame every 4 minutes from an IP camera,
 ## Architecture
 
 ```
-launchd (every 4 min) → capture frame (ffmpeg)
+launchd (every 1 min) → capture frame (ffmpeg)
   → Shadow: BIRDEYE classifies frame (~40ms, logged but not used)
   → Production: pixel-diff gate → cloud API (GPT-4o)
   → Compare shadow vs prod → log alignment
@@ -89,7 +89,7 @@ TELEGRAM_CHAT_ID="123456789"
 ### Start Monitoring
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.baby-monitor.plist        # monitor (every 4 min)
+launchctl load ~/Library/LaunchAgents/com.baby-monitor.plist        # monitor (every 1 min)
 launchctl load ~/Library/LaunchAgents/com.baby-monitor-dashboard.plist  # dashboard (persistent)
 launchctl load ~/Library/LaunchAgents/com.baby-monitor-retrain.plist    # daily retrain (12am ET)
 ```
@@ -221,18 +221,15 @@ How to safely deploy a new ML model without risking production quality.
 
 ### Capture Interval
 
-How often the camera grabs a frame determines how quickly we detect a wake-up and how much disk we burn storing images.
+How often the camera grabs a frame determines how quickly we detect a wake-up and how much disk we burn storing images. This value changed over the life of the project as the cost picture changed.
 
-| Interval | Frames/day | Disk/week | Wake detection delay | Cloud API cost |
-|----------|-----------|-----------|---------------------|----------------|
-| **4 min (chosen)** | **360** | **~1.5 GB** | **Up to 4 min** | **~$3.60/day** |
-| 2 min | 720 | ~3.0 GB | Up to 2 min | ~$7.20/day |
-| 1 min | 1,440 | ~6.0 GB | Up to 1 min | ~$14.40/day |
+| Interval | Frames/day | Disk/week | Wake detection delay | Cloud API cost (post-flip) |
+|----------|-----------|-----------|---------------------|----------------------------|
+| 4 min | 360 | ~1.5 GB | Up to 4 min | ~$0.005/day |
+| 2 min | 720 | ~3.0 GB | Up to 2 min | ~$0.01/day |
+| **1 min (chosen)** | **1,440** | **~6.0 GB** | **Up to 1 min** | **~$0.02/day** |
 
-**Decision:** 4-minute intervals during shadow mode. Every non-empty frame hits the cloud API (~$0.01 each), so lower frequency saves cost while building alignment data. Once birdeye is promoted to production, can increase to 1-min (birdeye is free).
-
-- **4 min (chosen)** — balances cloud API cost with acceptable wake detection delay during shadow phase.
-- **1 min** — ideal for production with local-only inference, but too expensive at $14/day during shadow mode.
+**Decision:** 1-minute intervals now that BIRDEYE runs as primary. When the cloud API was on every non-empty frame (~$0.01 each), 4-min intervals were the cost sweet spot — at 1-min they would have cost ~$14/day. Post BIRDEYE-primary flip, the cloud API runs on ~1% of frames as a fallback, so the cost of going to 1-min capture is basically zero and the wake detection latency drops by 4x. The capture interval change also makes the existing `BURST_AWAKE_THRESHOLD = 2 of last 3` wake rule fire ~3 min after a real wake event (was ~12 min at 4-min cadence).
 
 ### Detection Pipeline Order
 
@@ -268,9 +265,9 @@ A single "Awake" frame could be noise (classifier error, motion blur). We need a
 |----------|----------------|---------------|------------|
 | Single frame | Instant | 0 | Low, but noisy (false alarms) |
 | Burst capture (old) | +2 min | **2 min blocking** (sleeps between captures) | High (extra captures, API calls) |
-| **Look-back (chosen)** | +8 min (at 4-min interval) | **0 (non-blocking)** | Low (check last 3 entries) |
+| **Look-back (chosen)** | +3 min (at 1-min interval) | **0 (non-blocking)** | Low (check last 3 entries) |
 
-**Decision:** Look-back confirmation. Requiring 2/3 entries to show "Awake" filters noise without blocking the pipeline. At 4-min intervals, confirmation takes ~8 minutes — acceptable tradeoff for zero blocking.
+**Decision:** Look-back confirmation. Requiring 2/3 entries to show "Awake" filters noise without blocking the pipeline. At 1-min intervals, confirmation takes ~3 minutes of consecutive captures (was ~12 min at the old 4-min cadence). The window is hardcoded at 3 frames in `alerts.check_wake_confirmation` as `[-3:]`; if you want to widen it for lower false-positive risk at the faster capture rate, parameterize that slice and the `BURST_AWAKE_THRESHOLD` config constant together.
 
 ### Frame Retention
 
@@ -278,12 +275,12 @@ Captured frames are needed for retraining classifiers, backtesting detection cha
 
 | Retention | Disk budget | Use case |
 |-----------|------------|----------|
-| 1 day | ~0.4 GB | Debugging only |
-| 3 days | ~1.1 GB | Short-term review |
-| 7 days | ~1.1 GB | Weekly retraining, single-week backtests |
-| **~67 days (chosen)** | **10 GB cap** | **Multi-week backtests + retraining on long history** |
+| 1 day | ~1.5 GB | Debugging only |
+| 3 days | ~4.5 GB | Short-term review |
+| 7 days | ~10.5 GB | Weekly retraining, single-week backtests |
+| **~17 days (chosen)** | **10 GB cap** | **Multi-week backtests + retraining on long history** |
 
-**Decision:** 10 GB cap (raised from 6 GB on 2026-04-09). At 4-min intervals and ~433 KB/frame this holds roughly 67 days of frames, which is enough for multi-week backtest comparisons and for retraining on a long-tail of historical samples. Oldest-first pruning kicks in once the directory exceeds the cap.
+**Decision:** 10 GB cap. At 1-min intervals and ~433 KB/frame this holds roughly 17 days of frames — down from ~67 days at the old 4-min cadence, which is the main tradeoff of the faster sampling rate. Still enough for multi-week backtests and for retraining on a meaningful history. Oldest-first pruning kicks in once the directory exceeds the cap. If you want more retention, either raise `MAX_FRAMES_KB` in `scripts/lib/config.py` or move frames to external storage on a nightly cron.
 
 ### Storage: SQLite vs JSONL
 
@@ -391,7 +388,7 @@ All data files are gitignored:
 - `data/monitor.db` — SQLite database (primary storage)
 - `data/sleep-log.jsonl` — JSONL backup of all entries
 - `data/corrections.jsonl` — JSONL backup of corrections
-- `data/frames/` — captured camera frames (10 GB cap, ~67 days at 4-min intervals)
+- `data/frames/` — captured camera frames (10 GB cap, ~17 days at 1-min intervals)
 - `data/training-state.json` — PID-based training run state
 - `data/head-state.json` — last known head position
 - `*.log` — system and cron logs (rotating, 5MB x 3)

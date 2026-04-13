@@ -4,16 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-BILBO — a baby bassinet monitor. A Python pipeline captures RTSP frames every 4 minutes, classifies sleep state via GPT-4o (production), runs local MobileNetV3 classifiers ("BIRDEYE") in shadow mode, dual-writes to SQLite + JSONL, and serves a Flask dashboard for review/correction/retraining.
+BILBO — a baby bassinet monitor. A Python pipeline captures RTSP frames every minute, runs BIRDEYE (MobileNetV3 cascade) on-device as the primary decider, falls back to GPT-4o as a cloud backstop on ~1% of frames, dual-writes to SQLite + JSONL, and serves a Flask dashboard for review/correction/retraining.
 
-`README.md` is the source of truth for architecture, the SQLite schema, and the design-decision tradeoffs. Read it before making non-trivial changes — especially the **Architecture**, **Database Schema**, and **Design Decisions** sections.
+`README.md` is the reference for the SQLite schema and the design-decision tradeoffs. Read it before touching the DB or revisiting a past tradeoff.
 
-> If `skills/baby-monitor/SKILL.md` and `README.md` disagree (e.g. capture interval, pipeline order), **`README.md` wins**. SKILL.md describes the older birdeye-first design; the current architecture is cloud-first with birdeye in shadow mode.
+> **Pipeline order: this file wins.** README.md and `skills/baby-monitor/SKILL.md` both still describe earlier architectures (README: cloud-primary with BIRDEYE in shadow; SKILL.md: an even older birdeye-first sketch). The current pipeline is the post-flip BIRDEYE-primary one described in **Architecture pointers** below — see commit 7250067. Update README when you next touch it.
 
 ## Layout
 
 - `skills/baby-monitor/` — the monitor pipeline, training, and dashboard. This is where almost all code changes happen.
-  - `scripts/monitor.py` — main pipeline entry point (launchd runs this every 4 min)
+  - `scripts/monitor.py` — main pipeline entry point (launchd runs this every 1 min)
   - `scripts/run_single_inference.py` — runs BIRDEYE on one frame by timestamp; invoked as a subprocess by the dashboard's `/api/run-inference` (the dashboard venv intentionally has no torch/cv2)
   - `scripts/lib/db.py` — **all SQLite read/write goes through here**; do not open `data/monitor.db` directly elsewhere
   - `scripts/lib/cli.py` — argparse wiring and `cmd_last`/`cmd_backtest`/`cmd_status` handlers for `monitor.py`
@@ -90,7 +90,7 @@ python scripts/report.py --range 1h --section monitor  # quick post-deploy check
 ### Scheduling (launchd, NOT OpenClaw cron)
 ```bash
 launchctl list | grep baby-monitor                                                  # status (exit code 0 = ok)
-launchctl load   ~/Library/LaunchAgents/com.baby-monitor.plist             # capture (every 4 min)
+launchctl load   ~/Library/LaunchAgents/com.baby-monitor.plist             # capture (every 1 min)
 launchctl load   ~/Library/LaunchAgents/com.baby-monitor-dashboard.plist   # dashboard (persistent)
 launchctl load   ~/Library/LaunchAgents/com.baby-monitor-retrain.plist     # daily retrain (12am ET)
 launchctl unload <plist>                                                            # to stop

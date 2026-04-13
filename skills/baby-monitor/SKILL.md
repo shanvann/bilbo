@@ -10,7 +10,7 @@ Automated baby bassinet monitoring: RTSP camera → local ML classifiers → clo
 ## Architecture
 
 ```
-macOS launchd (every 4 min) → monitor.py
+macOS launchd (every 1 min) → monitor.py
   → Stage 1: pixel-diff gate (~50ms, ffmpeg)
     → empty bassinet? → log as absent, done (no BIRDEYE, no API call)
     → changed? ↓

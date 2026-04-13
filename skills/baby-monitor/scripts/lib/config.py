@@ -18,7 +18,7 @@ PROMPT_FILE = SKILL_DIR / "references" / "prompt.md"
 ENV_FILE = Path("/Users/shanit/.openclaw/workspace/.env.baby-monitor")
 MODELS_DIR = SKILL_DIR / "pipeline" / "models"
 
-MAX_FRAMES_KB = 10 * 1024 * 1024  # 10 GB (~67 days at 4-min intervals; raised from 6 GB to keep more history for backtesting)
+MAX_FRAMES_KB = 10 * 1024 * 1024  # 10 GB (~17 days at 1-min intervals; was ~67 days at 4-min. Oldest-first pruning kicks in at the cap.)
 REFS_DIR = DATA_DIR / "references"
 
 # ---------------------------------------------------------------------------
@@ -50,9 +50,20 @@ PIXEL_DIFF_TIMEOUT = 10
 # ---------------------------------------------------------------------------
 WAKE_SCORE_THRESHOLD = 4
 WAKE_COOLDOWN_MIN = 30
-WAKE_WINDOW = 6  # number of recent entries to analyze
+WAKE_WINDOW = 24  # number of recent entries to scan for a prior Asleep state
+                  # gating the wake alert. At 1-min capture cadence this is
+                  # ~24 minutes of lookback (was 6 = 24 min at the old 4-min
+                  # cadence). Keeping the time semantic stable across
+                  # sampling-rate changes — if you change the capture
+                  # interval, scale this alongside it.
 
-BURST_AWAKE_THRESHOLD = 2  # minimum Awake readings (out of last 3 entries) to confirm wake
+BURST_AWAKE_THRESHOLD = 2  # minimum Awake readings (out of last 3 entries) to confirm wake.
+                           # Note: the '3' is hardcoded in alerts.check_wake_confirmation
+                           # as `[-3:]`. At 1-min capture cadence this means
+                           # confirmation takes ~3 minutes of consecutive
+                           # captures; at 4-min it was ~12 minutes. If you
+                           # want a wider confirmation window, refactor the
+                           # hardcoded slice to be parameterized.
 
 # ---------------------------------------------------------------------------
 # Edge alert

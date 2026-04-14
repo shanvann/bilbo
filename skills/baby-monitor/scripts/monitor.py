@@ -34,7 +34,8 @@ from pathlib import Path
 # or `python3 scripts/monitor.py` from baby-monitor/
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from lib.config import ENV_FILE, MODEL_CHAIN, load_env, log, set_verbose
+from lib.config import ENV_FILE, MODEL_CHAIN, STATE_CONFIRM_WINDOW, load_env, log, set_verbose
+from lib.state import smooth_state_temporal
 from lib.capture import capture_frame, enforce_disk_limit
 from lib.db import get_db
 from lib.detect import detect_empty_bassinet, make_empty_entry
@@ -56,7 +57,7 @@ from lib.alerts import (
     send_telegram_alert,
     should_burst,
 )
-from lib.storage import append_entry, get_last_entry
+from lib.storage import append_entry, get_last_entry, get_recent_entries
 from lib.cli import (
     cmd_audit, cmd_backfill_shadow, cmd_backtest, cmd_backtest_birdeye,
     cmd_eval_corrections, cmd_last, cmd_list_models, cmd_retrain, cmd_rollback,
@@ -326,6 +327,20 @@ def main():
     # Build flat log entry
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     entry = {"timestamp": now, "frame": str(frame_path), **flat, "alerts": alerts}
+
+    # --- Temporal state smoothing ---
+    # The raw per-frame state (from BIRDEYE's eye-state mapping or the cloud
+    # API) is noisy. The primary `state` field is only allowed to flip to
+    # Awake/Asleep after STATE_CONFIRM_RUN consecutive agreeing raw readings
+    # within the last STATE_CONFIRM_WINDOW baby-present frames. The raw
+    # reading is preserved under `rawState` so history can be re-smoothed
+    # offline if the thresholds change. See lib/state.py.
+    entry["rawState"] = entry.get("state")
+    recent_for_smoothing = get_recent_entries(STATE_CONFIRM_WINDOW - 1)
+    entry["state"] = smooth_state_temporal(entry, recent_for_smoothing)
+    if entry["state"] != entry["rawState"]:
+        log.info("state-smooth: raw=%s -> smoothed=%s",
+                 entry["rawState"], entry["state"])
 
     # --- Shadow experiments ---
     # Run every registered shadow pipeline against this frame. Results are

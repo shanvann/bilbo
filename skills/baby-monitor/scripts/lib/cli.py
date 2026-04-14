@@ -980,6 +980,35 @@ def _reinfer_corrections_against_current_model(
                 continue
             shadow = entry.get("shadow", {})
             bird_present, bird_eye, agreed = _derive_shadow_columns(entry, shadow)
+
+            # IMPORTANT: merge with the existing SQLite row's `data` blob
+            # before writing, so SQLite-only fields survive.  JSONL is
+            # the source of truth for primary + shadow fields, but a few
+            # fields live in SQLite only and would be silently stripped
+            # by a naive `data = json.dumps(entry)` overwrite:
+            #
+            #   - ``experiments`` — written by scripts/lib/experiments.py
+            #     and scripts/experiments_backfill.py
+            #   - ``bboxImpact`` — written by scripts/bbox_impact.py
+            #   - any future field added by an analysis script that
+            #     treats SQLite as primary and skips the JSONL round-trip
+            #
+            # Merge order: existing wins for SQLite-only keys, JSONL
+            # entry wins for anything in JSONL (so the retrain's shadow
+            # / eyeState updates still take effect).
+            existing_row = conn.execute(
+                "SELECT data FROM entries WHERE timestamp = ?", (ts,)
+            ).fetchone()
+            merged = dict(entry)
+            if existing_row and existing_row["data"]:
+                try:
+                    existing_data = json.loads(existing_row["data"])
+                    for k, v in existing_data.items():
+                        if k not in merged:
+                            merged[k] = v
+                except (TypeError, json.JSONDecodeError):
+                    pass
+
             conn.execute("""
                 UPDATE entries SET
                     data = ?,
@@ -992,7 +1021,7 @@ def _reinfer_corrections_against_current_model(
                     shadow_model_version = ?
                 WHERE timestamp = ?
             """, (
-                json.dumps(entry),
+                json.dumps(merged),
                 bird_present,
                 bird_eye,
                 agreed,

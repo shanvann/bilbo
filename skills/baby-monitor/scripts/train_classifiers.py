@@ -461,7 +461,17 @@ def get_val_transform(size=224):
     ])
 
 
-EYE_STATE_INPUT_SIZE = 224
+# Default eye-state input resolution for new training runs. Imported from
+# scripts/lib/config.py so the default auto-tracks whatever the deployed
+# prod pipeline currently expects — if prod flips from 448 back to 224
+# (or up to 560), the training default follows without a second edit here.
+try:
+    from lib.config import EYE_STATE_INPUT_SIZE
+except ImportError:  # running as a script from within scripts/
+    import sys as _sys
+    from pathlib import Path as _P
+    _sys.path.insert(0, str(_P(__file__).resolve().parent))
+    from lib.config import EYE_STATE_INPUT_SIZE
 
 
 # ---------------------------------------------------------------------------
@@ -519,6 +529,7 @@ def train_classifier(
     patience: int = 10,
     class_weights: list[float] | None = None,
     large: bool = False,
+    test_ds: Dataset | None = None,
 ):
     """Train a MobileNetV3 classifier with early stopping."""
     device = "cpu"
@@ -641,6 +652,13 @@ def train_classifier(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(best_state, output_path)
         log.info("Best model saved to %s (epoch %d)", output_path, best_epoch)
+        # Load best weights back into in-memory model for downstream test-set
+        # evaluation. Without this, `model` still holds whatever the last
+        # epoch produced (which may be worse than best_state, especially
+        # after early-stopping patience), and the test metrics would describe
+        # the wrong checkpoint.
+        model.load_state_dict(best_state)
+        model.eval()
 
     # All post-loop metrics describe the SAVED best model, not whichever
     # epoch happened to run last. Swap in the snapshot we took above.
@@ -737,6 +755,64 @@ def train_classifier(
             metrics["asleep_awake_false_alarms"] = f"{closed_as_open}/{total_closed}"
             log.info("False alarms: asleep→awake: %d/%d (%.1f%%)",
                      closed_as_open, total_closed, false_alarm_rate * 100)
+
+    # --- Held-out test-set evaluation ---
+    # The val metrics above are optimistically biased — they describe the
+    # epoch whose val macro_f1 was highest, which means the val set is
+    # being used as the selection criterion. The test set is held out
+    # entirely: it's split off once at the top of training, never used
+    # for selection, and scored exactly once here, right after the best
+    # model has been loaded into `model` above. These are the numbers
+    # that honestly describe generalization to unseen data.
+    if test_ds is not None and len(test_ds) > 0:
+        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+        test_preds: list[int] = []
+        test_labels: list[int] = []
+        test_correct = 0
+        test_total = 0
+        with torch.no_grad():
+            for inputs, targets in test_loader:
+                inputs, targets = inputs.to(device), targets.to(device)
+                outputs = model(inputs)
+                pred = outputs.argmax(1)
+                test_correct += (pred == targets).sum().item()
+                test_total += inputs.size(0)
+                test_preds.extend(pred.cpu().tolist())
+                test_labels.extend(targets.cpu().tolist())
+        test_accuracy = test_correct / max(test_total, 1)
+        test_macro_f1 = _macro_f1(test_preds, test_labels, num_classes)
+        metrics["test_total"] = test_total
+        metrics["test_accuracy"] = round(test_accuracy, 4)
+        metrics["test_macro_f1"] = round(test_macro_f1, 4)
+
+        # Per-class test metrics — small dict, useful for spotting
+        # val-vs-test drift on individual classes.
+        test_per_class = {}
+        for cls_idx, cls_name in enumerate(class_names):
+            tp = sum(1 for t, p in zip(test_labels, test_preds) if t == cls_idx and p == cls_idx)
+            fp = sum(1 for t, p in zip(test_labels, test_preds) if t != cls_idx and p == cls_idx)
+            fn = sum(1 for t, p in zip(test_labels, test_preds) if t == cls_idx and p != cls_idx)
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+            test_per_class[cls_name] = {
+                "precision": round(precision, 3),
+                "recall": round(recall, 3),
+                "f1": round(f1, 3),
+                "support": tp + fn,
+            }
+        metrics["test_per_class"] = test_per_class
+
+        log.info(
+            "Test set (held out, n=%d): accuracy=%.3f  macro_f1=%.3f  "
+            "Δ vs val: acc %+.3f  f1 %+.3f",
+            test_total, test_accuracy, test_macro_f1,
+            test_accuracy - metrics["val_accuracy"],
+            test_macro_f1 - metrics["best_macro_f1"],
+        )
+    elif test_ds is not None:
+        metrics["test_total"] = 0
+        log.warning("Test set is empty after per-classifier filtering — no test metrics recorded")
 
     return metrics
 
@@ -866,6 +942,7 @@ def train_face_detector(
     batch_size: int = 32,
     lr: float = 0.0005,
     patience: int = 12,
+    test_ds: FaceDetectorDataset | None = None,
 ):
     """Train the MobileNetV3-Small face detector with bbox regression."""
     device = "cpu"
@@ -1010,6 +1087,11 @@ def train_face_detector(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(best_state, output_path)
         log.info("Face detector saved to %s (epoch %d)", output_path, best_epoch)
+        # Load best weights back into in-memory model so the test-set
+        # evaluation below describes the SAVED checkpoint, not whichever
+        # last-epoch weights happen to still be in `model`.
+        model.load_state_dict(best_state)
+        model.eval()
 
     metrics = {
         "best_epoch": best_epoch,
@@ -1018,6 +1100,50 @@ def train_face_detector(
         "train_total": len(train_ds),
         "val_total": len(val_ds),
     }
+
+    # --- Held-out test-set evaluation ---
+    # Same honest-generalization reasoning as the classifier path above:
+    # val_ious/conf_acc are biased because combined=0.7*iou+0.3*conf_acc
+    # is the best-epoch selection criterion. Test set is scored once,
+    # after training completes, with the best weights loaded.
+    if test_ds is not None and len(test_ds) > 0:
+        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+        test_ious: list[float] = []
+        test_conf_correct = 0
+        test_conf_total = 0
+        with torch.no_grad():
+            for inputs, targets in test_loader:
+                inputs = inputs.to(device)
+                targets = targets.to(device)
+                outputs = model(inputs)
+                target_bbox = targets[:, :4]
+                target_conf = targets[:, 4]
+                has_face = target_conf > 0.5
+                pred_bbox_all = torch.sigmoid(outputs[:, :4])
+                pred_conf = torch.sigmoid(outputs[:, 4])
+                for i in range(inputs.size(0)):
+                    if has_face[i]:
+                        test_ious.append(_iou(pred_bbox_all[i], target_bbox[i]).item())
+                pred_binary = (pred_conf > 0.5).float()
+                test_conf_correct += (pred_binary == target_conf).sum().item()
+                test_conf_total += inputs.size(0)
+        test_mean_iou = sum(test_ious) / len(test_ious) if test_ious else 0.0
+        test_conf_acc = test_conf_correct / max(test_conf_total, 1)
+        metrics["test_total"] = test_conf_total
+        metrics["test_mean_iou"] = round(test_mean_iou, 4)
+        metrics["test_conf_accuracy"] = round(test_conf_acc, 4)
+        metrics["test_iou_samples"] = len(test_ious)
+        log.info(
+            "Test set (held out, n=%d, pos=%d): mean_iou=%.3f conf_acc=%.3f  "
+            "Δ vs val: iou %+.3f  conf %+.3f",
+            test_conf_total, len(test_ious), test_mean_iou, test_conf_acc,
+            test_mean_iou - best_metrics_snapshot.get("mean_iou", 0),
+            test_conf_acc - best_metrics_snapshot.get("conf_accuracy", 0),
+        )
+    elif test_ds is not None:
+        metrics["test_total"] = 0
+        log.warning("Face detector test set is empty — no test metrics recorded")
+
     return metrics
 
 
@@ -1040,7 +1166,40 @@ def main():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--patience", type=int, default=10)
+    # --- Experimental / shadow-pipeline training knobs ---
+    # Used by the shadow-experiment framework (scripts/lib/experiments.py)
+    # to train alternate eye-state variants without clobbering prod models.
+    parser.add_argument(
+        "--eye-crop-size", type=int, default=EYE_STATE_INPUT_SIZE,
+        help="Input resolution for the eye-state classifier (default: %(default)d). "
+             "Increasing this trains a larger-input variant — must be paired with "
+             "--experiment-tag so the resulting checkpoint lands in a separate "
+             "path and does not overwrite the prod model.",
+    )
+    parser.add_argument(
+        "--experiment-tag", default=None,
+        help="Write the trained checkpoint to pipeline/models/experiments/<TAG>/v_<ts>/ "
+             "instead of the prod pipeline/models/ path. Used to train alternate model "
+             "variants for the shadow-experiment framework. When set, --model must be "
+             "'eye-state' (we don't want an experiment to accidentally retrain presence "
+             "or face-detect).",
+    )
     args = parser.parse_args()
+
+    # Validate experimental mode early, before we load datasets.
+    if args.experiment_tag is not None:
+        if args.model != "eye-state":
+            parser.error(
+                "--experiment-tag requires --model eye-state (got --model="
+                f"{args.model}). Experimental training must not clobber "
+                "the prod presence or face-detect classifiers."
+            )
+        # Tag must be filesystem-safe
+        if not args.experiment_tag.replace("_", "").replace("-", "").isalnum():
+            parser.error(
+                f"--experiment-tag must be alphanumeric + [_-] only (got "
+                f"{args.experiment_tag!r})"
+            )
 
     # Deterministic training: same seed → same model init, same WeightedRandomSampler
     # draw order, same Python/numpy randomness. Required for clean baseline-vs-fix
@@ -1056,7 +1215,14 @@ def main():
 
     sleep_log_path = Path(args.sleep_log)
     frames_dir = Path(args.frames)
-    output_dir = Path(args.output)
+    # Experimental variants write to a parallel directory tree so they
+    # never touch the prod model path or its `latest` symlink.
+    if args.experiment_tag is not None:
+        output_dir = Path(args.output) / "experiments" / args.experiment_tag
+        log.info("Experimental training mode: tag=%s, crop_size=%d, output=%s",
+                 args.experiment_tag, args.eye_crop_size, output_dir)
+    else:
+        output_dir = Path(args.output)
 
     corrections_path = Path(args.corrections) if args.corrections else None
     audit_path = Path(args.audit) if args.audit else None
@@ -1077,7 +1243,9 @@ def main():
 
         train_ds = PresenceDataset(train_entries, frames_dir, get_train_transform())
         val_ds = PresenceDataset(val_entries, frames_dir, get_val_transform())
-        log.info("Presence: train=%d, val=%d", len(train_ds), len(val_ds))
+        test_ds = PresenceDataset(test_entries, frames_dir, get_val_transform())
+        log.info("Presence: train=%d, val=%d, test=%d",
+                 len(train_ds), len(val_ds), len(test_ds))
 
         presence_metrics = train_classifier(
             train_ds, val_ds,
@@ -1088,6 +1256,7 @@ def main():
             batch_size=args.batch_size,
             lr=args.lr,
             patience=args.patience,
+            test_ds=test_ds,
         )
     else:
         presence_metrics = None
@@ -1098,13 +1267,13 @@ def main():
         log.info("Training EYE STATE classifier (eyes_open / eyes_closed)")
         log.info("=" * 60)
 
-        eye_train_ds = EyeStateDataset(train_entries, frames_dir, get_train_transform(EYE_STATE_INPUT_SIZE))
-        val_ds = EyeStateDataset(val_entries, frames_dir, get_val_transform(EYE_STATE_INPUT_SIZE))
+        eye_train_ds = EyeStateDataset(train_entries, frames_dir, get_train_transform(args.eye_crop_size))
+        val_ds = EyeStateDataset(val_entries, frames_dir, get_val_transform(args.eye_crop_size))
 
         # Merge in manually validated face crops if provided
         if args.face_crops:
             face_crops_dir = Path(args.face_crops)
-            face_crop_ds = FaceCropDataset(face_crops_dir, get_train_transform(EYE_STATE_INPUT_SIZE))
+            face_crop_ds = FaceCropDataset(face_crops_dir, get_train_transform(args.eye_crop_size))
             if len(face_crop_ds) > 0:
                 train_ds = CombinedDataset(eye_train_ds, face_crop_ds)
                 log.info("Eye state: %d from sleep-log + %d from face crops = %d total train",
@@ -1115,7 +1284,13 @@ def main():
         else:
             train_ds = eye_train_ds
 
-        log.info("Eye state: train=%d, val=%d", len(train_ds), len(val_ds))
+        # Build the held-out test dataset with the SAME crop size and
+        # transforms as val, but from test_entries. Never seen during
+        # training or best-epoch selection.
+        eye_test_ds = EyeStateDataset(test_entries, frames_dir, get_val_transform(args.eye_crop_size))
+
+        log.info("Eye state: train=%d, val=%d, test=%d",
+                 len(train_ds), len(val_ds), len(eye_test_ds))
 
         # Inverse-frequency class weights, computed from the actual training set.
         # This is the recipe that produced v_20260409_181021 — our best eye-state
@@ -1158,6 +1333,7 @@ def main():
             patience=args.patience,
             class_weights=eye_class_weights,
             large=False,
+            test_ds=eye_test_ds,
         )
     else:
         eye_metrics = None
@@ -1174,17 +1350,27 @@ def main():
         db = get_db()
         all_db_entries = db.get_entries()
 
+        # Use the same time-block split as the other classifiers so all
+        # three share a deterministic, time-separated partition. This
+        # also fixes a latent data-leakage issue with the previous
+        # `i % 5` split, where train and val could contain adjacent
+        # frames from the same ~minute. time_block_split guarantees the
+        # three sets come from disjoint 30-minute windows.
+        face_train_entries, face_val_entries, face_test_entries = time_block_split(all_db_entries)
+
         face_train_ds = FaceDetectorDataset(
-            [e for i, e in enumerate(all_db_entries) if i % 5 != 0],  # 80% train
-            frames_dir,
-            _face_detect_transform_train(),
+            face_train_entries, frames_dir, _face_detect_transform_train(),
         )
         face_val_ds = FaceDetectorDataset(
-            [e for i, e in enumerate(all_db_entries) if i % 5 == 0],  # 20% val
-            frames_dir,
-            _face_detect_transform_val(),
+            face_val_entries, frames_dir, _face_detect_transform_val(),
         )
-        log.info("Face detector: train=%d, val=%d", len(face_train_ds), len(face_val_ds))
+        face_test_ds = FaceDetectorDataset(
+            face_test_entries, frames_dir, _face_detect_transform_val(),
+        )
+        log.info(
+            "Face detector: train=%d, val=%d, test=%d",
+            len(face_train_ds), len(face_val_ds), len(face_test_ds),
+        )
 
         if len(face_train_ds) < 50:
             log.warning("Not enough face detector training data (%d samples), skipping", len(face_train_ds))
@@ -1197,6 +1383,7 @@ def main():
                 batch_size=args.batch_size,
                 lr=0.0005,
                 patience=12,
+                test_ds=face_test_ds,
             )
     else:
         face_metrics = None
@@ -1211,7 +1398,40 @@ def main():
     for pt_file in output_dir.glob("*.pt"):
         shutil.copy2(pt_file, version_dir / pt_file.name)
 
-    # Update "latest" symlink
+    # --- meta.json sidecar ---
+    # scripts/lib/config.py reads eye_state_crop_size from this file on
+    # import. If we don't write it here, flipping the `latest` symlink
+    # below would silently revert the runtime to the 224 default even
+    # when the new weights were trained at a different size — silent
+    # production regression on every retrain. This file MUST be written
+    # before the symlink is flipped.
+    try:
+        existing_meta: dict = {}
+        prior_latest = output_dir / "latest"
+        if prior_latest.exists():
+            prior_meta_path = prior_latest / "meta.json"
+            if prior_meta_path.exists():
+                try:
+                    existing_meta = json.loads(prior_meta_path.read_text())
+                except (OSError, ValueError):
+                    existing_meta = {}
+        new_meta = {
+            **existing_meta,
+            "eye_state_crop_size": int(args.eye_crop_size),
+            "deployed_version": version_id,
+            "deployed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "trained_by": "train_classifiers.py",
+            "models_trained": args.model,
+        }
+        if args.experiment_tag:
+            new_meta["experiment_tag"] = args.experiment_tag
+        (version_dir / "meta.json").write_text(json.dumps(new_meta, indent=2) + "\n")
+        log.info("Wrote meta.json sidecar (eye_state_crop_size=%d)", args.eye_crop_size)
+    except Exception as e:
+        log.warning("Failed to write meta.json sidecar: %s", e)
+
+    # Update "latest" symlink — AFTER meta.json is in place so there's
+    # no window where the runtime reads the new dir without the sidecar.
     latest_link = output_dir / "latest"
     if latest_link.is_symlink() or latest_link.exists():
         latest_link.unlink()

@@ -106,9 +106,15 @@ launchctl load ~/Library/LaunchAgents/com.baby-monitor-retrain.plist    # daily 
 | `scripts/lib/classifiers.py` | BIRDEYE — presence + eye state classifiers |
 | `scripts/lib/local_pipeline.py` | BIRDEYE orchestration |
 | `scripts/lib/training_state.py` | PID-based training state (cross-process) |
-| `scripts/train_classifiers.py` | Train classifiers with corrections/audit data |
+| `scripts/train_classifiers.py` | Train classifiers with corrections/audit data. `--eye-crop-size` and `--experiment-tag` let you train eye-state variants at different input resolutions without clobbering the prod model. |
+| `scripts/bbox_impact.py` | Measure eye-state accuracy on predicted vs corrected bboxes (manual-run, caches into the `state` table for the dashboard) |
+| `scripts/lib/experiments.py` | Shadow pipeline framework — `Experiment` base class, `EyeStateShadowExperiment` generic class, manifest-driven registry. New shadows are added by editing `experiments.json`, not Python source. |
+| `scripts/lib/experiments.json` | Data-driven shadow experiment manifest. Edited atomically by `promote_experiment.py` during a flip. |
+| `scripts/experiments_backfill.py` | Run registered shadow experiments against historical frames so the dashboard has immediate comparison data after a new experiment lands. |
+| `scripts/promote_experiment.py` | **One-command shadow → prod promotion.** Bundles the 12-step flip (snapshot, copy, meta update, metrics patch, stale-key cleanup, manifest edit, backfill, reinfer, launchd reload). Rollback is the same command pointed at the legacy snapshot tag. See `docs/shadow-to-prod-playbook.md`. |
 | `dashboard/app.py` | Flask dashboard with training APIs |
 | `references/prompt.md` | Cloud API prompt (includes head position) |
+| `docs/shadow-to-prod-playbook.md` | Full lifecycle walkthrough: train → register → backfill → observe → promote → rollback. **Read this before shipping a new eye-state model.** |
 
 **CLI modes:**
 ```bash
@@ -123,6 +129,34 @@ monitor.py --rollback VERSION        # revert to previous model
 monitor.py --backtest --birdeye      # test birdeye accuracy
 monitor.py --status                  # system health
 monitor.py --last 10                 # recent log entries
+
+bbox_impact.py                       # A/B eye-state on predicted vs corrected bbox, caches into `state`
+bbox_impact.py --limit 20 --verbose  # iterate during development
+bbox_impact.py --dry-run             # compute without persisting
+bbox_impact.py --force               # re-run on frames already cached against the current model
+
+# Shadow experiment framework
+experiments_backfill.py                         # Run all registered shadow experiments against historical frames
+experiments_backfill.py --name eye_state_hires_448_retrained --force  # Re-run a single experiment
+experiments_backfill.py --hours 24 --limit 50 --verbose                # Iterate during dev
+experiments_backfill.py --dry-run                                      # Compute without persisting
+```
+
+**Training an experimental eye-state variant (for the shadow framework):**
+```bash
+python scripts/train_classifiers.py \
+  --sleep-log data/sleep-log.jsonl \
+  --frames data/frames \
+  --output pipeline/models \
+  --face-crops pipeline/output/bootstrap/face_crops \
+  --corrections data/corrections.jsonl \
+  --model eye-state \
+  --eye-crop-size 448 \
+  --experiment-tag eye_state_448
+# Writes to pipeline/models/experiments/eye_state_448/v_<ts>/ with a parallel
+# `latest` symlink. Never touches the prod pipeline/models/latest path.
+# The shadow Experiment class for this variant lives in scripts/lib/experiments.py
+# and auto-loads from pipeline/models/experiments/eye_state_448/latest/ on first use.
 ```
 
 **Training:**
@@ -202,6 +236,31 @@ Live at `http://localhost:5555`. Runs as a persistent launchd service.
 ## Design Decisions
 
 Key tradeoffs and the reasoning behind them.
+
+### Eye-state classifier input resolution — flipped to 448 on 2026-04-14
+
+The eye-state classifier originally ran at 224×224 input (the torchvision MobileNetV3-Small default). The bbox-impact analysis on April 13 showed that the `eyes_open` class was the pipeline's accuracy bottleneck — 66-80% depending on the subset — while `eyes_closed` was at 88-99%. The shadow-experiment infra was built, and a separately-trained 448×448 model was run alongside prod for a day.
+
+On the adversarial subset (82 frames where the user had to correct the label), the 448 model hit 86.6% vs prod's 52.4% — a **+34 point absolute improvement** on the cases that matter most. On the broader comparison (1206 frames in a 7-day window) the gap was +11.1 pts, heavily weighted toward `eyes_open`:
+
+| Class | n | Prod 224 | Shadow 448 | Δ |
+|---|---|---|---|---|
+| `eyes_open` (needs iris/pupil resolution) | 144 | 80.6% | **95.8%** | **+15.2** |
+| `eyes_closed` (eyelash line already resolvable at 224) | 55 | 90.9% | 90.9% | 0.0 |
+
+The physics matched the hypothesis: `eyes_open` recognition needs enough pixels on the iris, `eyes_closed` is already above the resolution floor for the eyelash/lid features the model relies on. Latency went from ~15 ms to ~43 ms per inference — still well under budget given the 1-minute capture cadence.
+
+**Decision:** flipped. `EYE_STATE_INPUT_SIZE = 448` lives in `scripts/lib/config.py`. The prod path in `scripts/lib/local_pipeline.py` passes this to `EyeStateClassifier.classify()`. The old 224 weights are preserved at `pipeline/models/experiments/eye_state_224_legacy/latest/eye_state_classifier.pt` and run as an **inverted shadow experiment** — the dashboard's Shadow Experiments card now reports "new 448 prod vs old 224 legacy" so any regression on future data would become visible before anyone notices a missed wake alert.
+
+**Rollback** is a single command — literally the same promotion flow pointed at the legacy snapshot:
+
+```bash
+python scripts/promote_experiment.py --tag eye_state_224_legacy
+```
+
+No retraining, no data migration, no source-file edits. The promotion script handles every step of the flip (12 steps: snapshot, copy, meta update, SQL patch, manifest edit, backfill, reinfer, launchd reload) and always preserves the current prod as a new rollback snapshot before overwriting, which means rollback-of-rollback is also a single command. See `docs/shadow-to-prod-playbook.md` for the full lifecycle.
+
+**Under the hood** the pipeline's input resolution is read from `pipeline/models/latest/meta.json`, a sidecar written alongside the weights. `config.EYE_STATE_INPUT_SIZE` reads that file on import — a fallback default of 224 kicks in if the sidecar is missing. This means: (a) flipping is a file-write, not a source edit, (b) rollback via the `latest` symlink automatically reverts the crop size because the meta.json in the old version dir is self-contained, (c) `train_classifiers.py` must write meta.json into every version dir it creates — otherwise flipping the symlink would silently revert the runtime to 224. That last invariant is enforced in the training script now (was added 2026-04-14 after a retrain briefly regressed prod by stripping the sidecar).
 
 ### Shadow vs Production
 
@@ -296,6 +355,8 @@ How to store and query monitoring data efficiently.
 - **JSONL only** — simple, grep-friendly, but O(n) for every query. At 1440 frames/day, the file grows fast.
 - **SQLite + JSONL (chosen)** — indexed queries, atomic writes, SQL aggregation for dashboard stats. JSONL backup preserved for raw access and disaster recovery.
 
+**Important subtlety — some fields live in SQLite only.** The JSONL file captures only the primary pipeline fields written by `monitor.py` at capture time. Secondary fields written by analysis scripts or the shadow-experiment framework (notably `bboxImpact`, `experiments`, and `faceBboxCorrected`) live in SQLite only, because they're derived after the fact and don't need append-only durability. Any code path that writes back to the `data` column **must merge with the existing SQLite blob**, not overwrite it — otherwise the SQLite-only fields are silently stripped. The retrain re-inference loop in `scripts/lib/cli.py::_reinfer_corrections_against_current_model` does this merge explicitly; treat that as the canonical pattern for any future SQLite-write path.
+
 ## Database Schema
 
 Primary storage: `data/monitor.db` (SQLite, WAL mode)
@@ -323,7 +384,7 @@ Main table — one row per captured frame.
 | shadow_prod_state | TEXT | What prod pipeline returned |
 | shadow_agreed | INTEGER | 1=aligned, 0=misaligned, NULL=no shadow |
 | shadow_timings_total | REAL | Birdeye inference time in seconds |
-| data | JSON | Full entry as JSON (all fields) |
+| data | JSON | Full entry as JSON (all fields). Notable keys inside: `faceBbox` (BIRDEYE's predicted normalized bbox), `faceBboxCorrected` (user-drawn bbox from the dashboard, treated as ground truth), `bboxImpact` (cached output of `scripts/bbox_impact.py` — A/B eye-state result on both bboxes, present on frames that have been analyzed), `experiments` (map of registered shadow-experiment name → result dict, written by `scripts/lib/experiments.py` on every capture tick and by `scripts/experiments_backfill.py` for historical frames). |
 | created_at | TEXT | Row creation timestamp |
 
 ### corrections
@@ -355,7 +416,7 @@ One row per training run — model provenance and metrics.
 | label_sources | JSON | {"cloud-api": 530, "correction": 35, "audit": 10} |
 | split | JSON | {"train": 435, "val": 99, "test": 41} |
 | config | JSON | Hyperparameters (epochs, lr, batch_size, etc.) |
-| metrics | JSON | Per-classifier: accuracy, loss, F1, miss rates |
+| metrics | JSON | Per-classifier sub-dict. Val-set fields (`val_accuracy`, `best_macro_f1`, `best_val_loss`, `per_class`, `train_total`, `val_total`) are optimistically biased because val is used for best-epoch selection. Held-out test fields (`test_total`, `test_accuracy`, `test_macro_f1`, `test_per_class`) describe the saved best checkpoint on an unseen split and are the honest generalization numbers. Face detector carries `test_mean_iou` + `test_conf_accuracy` instead of `test_accuracy`. Train/val/test splits are deterministic via `time_block_split` with SEED=42 and 30-min blocks. See `skills/baby-monitor/SKILL.md` for the full schema. |
 | models_trained | TEXT | "all", "presence", "eye-state" |
 | duration_seconds | REAL | Wall-clock training duration (NULL for runs before 2026-04-09) |
 | started_at | TEXT | When training began (ISO 8601 UTC) |
@@ -369,6 +430,7 @@ Key-value store for runtime state.
 | head | {"x": 0.5, "y": 0.3, ...} | Last known head position for birdeye crop |
 | alert | {"lastEdgeAlert": "..."} | Alert cooldown timestamps |
 | training | {"status": "running", "pid": 12345, ...} | Training process state |
+| bbox_impact | {"count": N, "accuracyOnPredicted": ..., "accuracyOnCorrected": ..., "delta": ..., "flipRate": ..., "perClass": {...}, "modelVersion": "..."} | Aggregate from `scripts/bbox_impact.py`. Read by the dashboard's Face Detection column to show whether corrected bboxes produce better eye-state predictions. Manual-refresh only — never touched by the live pipeline. |
 
 ## Workspace Files
 

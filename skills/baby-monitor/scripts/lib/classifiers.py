@@ -231,9 +231,27 @@ class EyeStateClassifier:
         self.model.to(device)
         self.model.eval()
 
-    def classify(self, crop: np.ndarray) -> EyeStateResult:
+    def classify(self, crop: np.ndarray, crop_size: int = 224) -> EyeStateResult:
+        # crop_size defaults to 224 (what the model was trained at). Passing
+        # a larger value is used by the shadow-experiment framework to
+        # evaluate this same model at higher input resolutions without
+        # touching the prod path — the adaptive pool in MobileNetV3-Small
+        # handles arbitrary spatial extents at the cost of moving away from
+        # the training distribution. Results at non-224 sizes are a valid
+        # infra smoke test but not a fair accuracy benchmark until the
+        # weights are retrained at the new size.
         rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-        tensor = _EYE_STATE_INFERENCE_TRANSFORM(rgb).unsqueeze(0).to(self.device)
+        if crop_size == 224:
+            tensor = _EYE_STATE_INFERENCE_TRANSFORM(rgb).unsqueeze(0).to(self.device)
+        else:
+            ad_hoc_transform = transforms.Compose([
+                transforms.ToPILImage(),
+                transforms.Resize((crop_size, crop_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225]),
+            ])
+            tensor = ad_hoc_transform(rgb).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
             logits = self.model(tensor)

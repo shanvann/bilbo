@@ -1,0 +1,11 @@
+{
+  "_comment": "Shadow experiment registry. Edited automatically by scripts/promote_experiment.py during a flip — do not hand-edit unless you know the promotion script is not running. Each top-level key (eye_state, etc.) is a classifier stage; the value is a list of shadows to run for that stage. See scripts/lib/experiments.py for the loader and the EyeStateShadowExperiment class docstring for the per-entry schema.",
+  "eye_state": [
+    {
+      "name": "eye_state_224_legacy",
+      "description": "Previous prod model (224×224 input) — rollback comparison",
+      "crop_size": 224,
+      "experiment_tag": "eye_state_224_legacy"
+    }
+  ]
+}

@@ -46,16 +46,19 @@ Both `monitor.py` (live capture pipeline) and `run_single_inference.py` (dashboa
 Three classifiers in cascade, all MobileNetV3-Small except the legacy YuNet fallback:
 - **Presence** — fixed bassinet-center crop → `present` / `not_present`
 - **Face detector** — bassinet crop → face bbox or None. Trainable MobileNetV3 (`pipeline/models/face_detector.pt`) is the primary; YuNet ONNX fallback runs if the trainable detector misses. If both fail, falls back to a head-position crop seeded by the cloud API's last known head coordinates.
-- **Eye state** — tight face crop (from the face detector's bbox) → `eyes_open` / `eyes_closed`
+- **Eye state** — tight face crop (from the face detector's bbox) → `eyes_open` / `eyes_closed`. **Input size is 448×448 since the 2026-04-14 flip** (was 224×224); controlled by `scripts/lib/config.py::EYE_STATE_INPUT_SIZE`. The prod checkpoint must be trained at this size — a mismatch is silent but produces degraded predictions because learned feature positions land in the wrong spatial cells.
 
 Head position is adaptive: when BIRDEYE falls back to the cloud API, the API returns the head's approximate location in `data/head-state.json`, which BIRDEYE uses to center its crop on the next tick.
 
+**Rollback for the 448 flip:** copy `pipeline/models/experiments/eye_state_224_legacy/latest/eye_state_classifier.pt` over `pipeline/models/latest/eye_state_classifier.pt`, set `EYE_STATE_INPUT_SIZE = 224`, reload launchd. The snapshot is preserved for exactly this purpose and is also running as an inverted shadow experiment (`eye_state_224_legacy`) so the dashboard continuously monitors the current-prod-vs-rollback gap.
+
 | Metric | Value |
 |---|---|
-| Eye-state macro-F1 vs reviewed/corrected ground truth | 0.91 |
-| Presence macro-F1 vs reviewed/corrected ground truth | 0.99 |
+| Eye-state macro-F1 on held-out test (448, v_20260413_171025) | 1.000 (13/13 eyes_open, 90/90 eyes_closed, small val set) |
+| Eye-state accuracy on the adversarial correction subset (448 vs prior 224) | 86.6% vs 52.4% (+34.2 pts on n=82) |
+| Presence macro-F1 vs reviewed/corrected ground truth | ~0.99 |
 | Frames handled locally (no cloud API call) | ~99% of non-empty |
-| Total inference latency | ~80-100ms on CPU |
+| Total inference latency | ~130-135ms on CPU (was ~80-100ms at 224) |
 | Daily cloud API cost (post-flip) | ~$0.01/day (was ~$1.17/day) |
 
 ### Related skill
@@ -124,9 +127,15 @@ Labels come from the cloud API's annotations in sleep-log.jsonl (no manual label
 skills/baby-monitor/
 ├── scripts/                        # All source code
 │   ├── monitor.py                  # Main pipeline (cron entry point)
-│   ├── train_classifiers.py        # Training script
+│   ├── train_classifiers.py        # Training script (--eye-crop-size + --experiment-tag for shadow variants, writes meta.json into every version dir)
+│   ├── promote_experiment.py       # One-command shadow → prod flip, rollback is the same command pointed at the legacy snapshot. See docs/shadow-to-prod-playbook.md
+│   ├── bbox_impact.py              # A/B eye-state on predicted vs corrected bboxes (manual-run, caches into state.bbox_impact for the dashboard)
+│   ├── experiments_backfill.py     # Run registered shadow experiments against historical frames
+│   ├── run_single_inference.py     # Dashboard re-run button entry (subprocessed by Flask)
 │   ├── requirements.txt            # All Python deps
 │   └── lib/
+│       ├── experiments.py          # Shadow pipeline framework — Experiment base class, EyeStateShadowExperiment (manifest-driven), run_all()
+│       ├── experiments.json        # Manifest for registered shadow experiments (edited atomically by promote_experiment.py)
 │       ├── config.py               # Paths, constants, classifier config
 │       ├── classifiers.py          # BIRDEYE — presence + eye state classifiers
 │       ├── local_pipeline.py       # BIRDEYE orchestration and fallback logic
@@ -165,6 +174,27 @@ skills/baby-monitor/
 | `presenceConfidence` | 0.0–1.0 | Birdeye Classifier 1 confidence |
 | `eyeConfidence` | 0.0–1.0 | Birdeye Classifier 2 confidence |
 | `eyeState` | eyes_open, eyes_closed, face_not_visible | Birdeye raw eye classification |
+| `faceBbox` | `{"x1": 0.57, "y1": 0.09, "x2": 0.76, "y2": 0.40}` | Normalized bbox from BIRDEYE's face detector (relative to the bassinet crop) |
+| `faceBboxCorrected` | same shape as `faceBbox` | User-drawn bbox from the dashboard's face-box tool; treated as ground truth by `bbox_impact.py` |
+| `bboxImpact` | `{"onPredicted": {...}, "onCorrected": {...}, "groundTruth": ..., "modelVersion": ...}` | Per-frame cache from `bbox_impact.py` — measurement only, never overwrites `eyeState` |
+| `experiments` | `{"<experiment_name>": {"state": ..., "eyeState": ..., "eyeConfidence": ..., "modelVersion": ..., "latencyMs": ..., "ranAt": ...}}` | Per-frame shadow pipeline results, one entry per registered experiment in `scripts/lib/experiments.py`. Written by `monitor.py` at capture time and by `experiments_backfill.py` for historical frames. Read-only observers — never touch `eyeState` or `state`. SQLite-only field: any write path that touches the `data` column must merge, not overwrite. |
+
+### training_runs metrics schema (per classifier)
+
+Each per-classifier sub-dict inside `training_runs.metrics` carries both
+val-set and test-set metrics. Val is used for best-epoch selection
+(optimistically biased); test is held out and scored exactly once with
+the saved best weights, so it's the honest generalization number.
+
+| Key | Meaning |
+|---|---|
+| `train_total` | Number of training samples the Dataset class produced after per-classifier filtering |
+| `val_total` | Same, for the validation set |
+| `test_total` | Same, for the held-out test set. Added 2026-04-13; older runs backfilled via one-shot helper, see the git log. |
+| `val_accuracy` / `best_macro_f1` | Val-set best-epoch metrics |
+| `test_accuracy` / `test_macro_f1` | Test-set metrics on the saved best checkpoint (populated by training runs after 2026-04-13) |
+| `test_per_class` | `{cls: {precision, recall, f1, support}}` on the test set |
+| For the face detector only: `test_mean_iou`, `test_conf_accuracy`, `test_iou_samples` | Same scoring as the val IoU / confidence metrics but on held-out test |
 | `headPosition` | `{"x": 0.35, "y": 0.22, "visible": true}` | From cloud API (when called) |
 | `birdeyeTimings` | `{"presence": 0.02, "eye_state": 0.02, "total": 0.05}` | Per-stage timing |
 | `sleepPosition` | Back, Side, Stomach, Unknown | Cloud API only |

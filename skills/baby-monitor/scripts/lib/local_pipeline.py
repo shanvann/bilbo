@@ -41,6 +41,7 @@ from .config import (
     MODELS_DIR,
     PRESENCE_MODEL,
     EYE_STATE_MODEL,
+    EYE_STATE_INPUT_SIZE,
     FACE_DETECT_MODEL_PT,
     FACE_DETECT_PT_CONFIDENCE_THRESHOLD,
 )
@@ -203,7 +204,11 @@ def try_local_analysis(frame_path: Path) -> dict | None:
     # --- Stage 3: eye state (face crop, 2-class) ---
     t2 = time.monotonic()
     face_crop = crop_face(bassinet_crop, face_result.bbox)
-    eye_result = eye_clf.classify(face_crop)
+    # Use the prod crop size from config (flipped 2026-04-14 from 224 → 448).
+    # Passing it explicitly keeps the call site honest about which resolution
+    # the deployed checkpoint was trained at — a mismatch here is silent but
+    # catastrophic (features land in the wrong spatial positions).
+    eye_result = eye_clf.classify(face_crop, crop_size=EYE_STATE_INPUT_SIZE)
     timings["eye_state"] = time.monotonic() - t2
 
     log.info("%s: eye_state %.3fs  state=%s conf=%.3f probs=%s (face crop)",

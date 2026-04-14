@@ -657,6 +657,47 @@ function renderViewer() {
     eyeEl.classList.remove('disagree');
   }
 
+  // --- Shadow-experiment labels ---
+  // One label per registered shadow experiment with a result on this
+  // frame. Each label is a direct child of .viewer-meta (not wrapped in
+  // a container) so the flex layout treats it as its own flex item,
+  // matching the existing BIRDEYE labels. Compared against prod's
+  // eyeState (= the user-facing label the entry currently shows) to
+  // flag disagreement — same semantics as the BIRDEYE labels above.
+  //
+  // Previously-injected experiment spans are stripped on every render
+  // before we insert fresh ones, so scrolling through the viewer can't
+  // accumulate stale labels from a prior frame.
+  const metaContainer = document.querySelector('#block-detail-viewer .viewer-meta');
+  if (metaContainer) {
+    metaContainer.querySelectorAll('.viewer-experiment-label').forEach((n) => n.remove());
+  }
+  const marker = document.getElementById('viewer-experiments-marker');
+  const expDict = e.experiments;
+  if (metaContainer && marker && expDict && typeof expDict === 'object') {
+    for (const name of Object.keys(expDict)) {
+      const r = expDict[name] || {};
+      const rEye = r.eyeState;
+      if (!rEye) continue;
+      const lbl = labelMap[rEye] || rEye;
+      const conf = r.eyeConfidence != null ? ' (' + Math.round(r.eyeConfidence * 100) + '%)' : '';
+      const ver = r.modelVersion ? ' · ' + r.modelVersion : '';
+      const lat = r.latencyMs != null ? ' · ' + Math.round(r.latencyMs) + 'ms' : '';
+      // Disagrees with prod eyeState → mark red. Same semantics as the
+      // BIRDEYE eye label's .disagree class.
+      const disagree = rEye !== eyeState;
+      // Abbreviate long experiment names so the row stays readable —
+      // the tooltip carries the full name + model version + latency.
+      const shortName = name.length > 28 ? name.slice(0, 26) + '…' : name;
+
+      const span = document.createElement('span');
+      span.className = 'viewer-birdeye-label viewer-experiment-label' + (disagree ? ' disagree' : '');
+      span.title = name + ver + lat;
+      span.textContent = 'shadow(' + shortName + '): ' + lbl + conf;
+      marker.parentNode.insertBefore(span, marker.nextSibling);
+    }
+  }
+
   // Eye state dropdown
   const stateSelect = document.getElementById('viewer-state');
   stateSelect.value = eyeState;
@@ -1080,6 +1121,111 @@ function renderFaceDetectionColumn() {
   html += '<span class="safety-headline-value">' + face.detected + ' / ' + face.total + '</span></div>';
   html += '</div>';
 
+  // --- IoU vs dashboard-drawn corrections ---
+  // This is the "how tight are the model's bboxes" metric, measured on
+  // frames where the user has drawn a corrected bbox. A corrected bbox is
+  // treated as ground truth. Two scopes: within the selected time range
+  // (tracks current model behavior) and all-time (larger N, may mix model
+  // versions). We prefer the windowed one when it has enough pairs and
+  // fall back to allTime otherwise.
+  if (face.iou) {
+    const iouWindowed = face.iou.windowed || {n: 0};
+    const iouAll = face.iou.allTime || {n: 0};
+    const useWindowed = iouWindowed.n >= 10;
+    const iou = useWindowed ? iouWindowed : iouAll;
+    const scopeLabel = useWindowed ? 'in window' : 'all time';
+
+    html += '<div class="safety-source-label" title="IoU between BIRDEYE predicted bbox and your dashboard-drawn corrected bbox. Corrected bbox is treated as ground truth.">IoU vs corrections <span style="font-weight:400;color:var(--text-muted);font-size:0.75rem">(' + scopeLabel + ')</span></div>';
+
+    if (iou.n === 0) {
+      html += '<div class="safety-empty" style="padding:8px 0">No corrected bboxes yet. Use the face-box draw tool on a frame to start populating this.</div>';
+    } else {
+      html += '<div class="train-details">';
+      html += '<div class="train-row"><span title="Mean Intersection-over-Union across all frames where you corrected the face bbox">Mean IoU</span><span class="train-val ' + _safetyClass(iou.mean, [0.40, 0.65]) + '">'
+        + (iou.mean * 100).toFixed(1) + '%</span></div>';
+      html += '<div class="train-row"><span title="Median (p50) IoU — less sensitive to outliers than mean">Median</span><span class="train-val">'
+        + (iou.p50 * 100).toFixed(1) + '%</span></div>';
+      html += '<div class="train-row"><span title="Worst-decile IoU — the 10% of frames where the model is furthest from your correction">p10 (worst tail)</span><span class="train-val">'
+        + (iou.p10 * 100).toFixed(1) + '%</span></div>';
+
+      const over50Pct = iou.n > 0 ? iou.over50 / iou.n : 0;
+      const over75Pct = iou.n > 0 ? iou.over75 / iou.n : 0;
+      html += '<div class="train-row"><span title="Fraction of frames where IoU ≥ 0.5 — conventional usable-detection threshold">Usable (≥0.5)</span><span class="train-val ' + _safetyClass(over50Pct, [0.70, 0.90]) + '">'
+        + iou.over50 + ' / ' + iou.n + ' (' + Math.round(over50Pct * 100) + '%)</span></div>';
+      html += '<div class="train-row"><span title="Fraction of frames where IoU ≥ 0.75 — tight enough for a reliable downstream eye-state crop">Tight (≥0.75)</span><span class="train-val ' + _safetyClass(over75Pct, [0.40, 0.75]) + '">'
+        + iou.over75 + ' / ' + iou.n + ' (' + Math.round(over75Pct * 100) + '%)</span></div>';
+      html += '</div>';
+      // Footnote: if we fell back to allTime, show both counts so it's
+      // obvious that the window is insufficient rather than the model is bad.
+      if (!useWindowed && iouAll.n > 0) {
+        html += '<div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px">'
+          + '(only ' + iouWindowed.n + ' corrected bboxes in the current range — showing all-time aggregate instead)</div>';
+      }
+    }
+  }
+
+  // --- Bbox impact on downstream eye-state ---
+  // Does running eye-state on the corrected bbox produce a better answer
+  // than running it on BIRDEYE's predicted bbox? Same model, two crops.
+  // Computed offline by scripts/bbox_impact.py. The per-class split is
+  // the part worth reading — the aggregate can hide opposite deltas per
+  // class (which is exactly what happened on the first run of this).
+  if (face.bboxImpact && face.bboxImpact.count > 0) {
+    const bi = face.bboxImpact;
+    const predPct = Math.round(bi.accuracyOnPredicted * 100);
+    const corrPct = Math.round(bi.accuracyOnCorrected * 100);
+    const deltaPts = Math.round(bi.delta * 1000) / 10; // one decimal
+    const deltaSign = deltaPts >= 0 ? '+' : '';
+    const deltaColor = deltaPts > 0.5 ? 'var(--accent-green)'
+                      : deltaPts < -0.5 ? 'var(--accent-red)'
+                      : 'var(--text-muted)';
+    const flipPct = Math.round(bi.flipRate * 100);
+
+    html += '<div class="safety-source-label" title="Eye-state accuracy when run on BIRDEYE\'s predicted bbox vs your corrected bbox. Same eye-state model, two crops. Computed by scripts/bbox_impact.py.">Bbox impact on eye-state</div>';
+    html += '<div class="train-details">';
+    html += '<div class="train-row"><span title="Eye-state accuracy when the classifier reads from BIRDEYE\'s predicted bbox crop">On predicted bbox</span><span class="train-val">'
+      + predPct + '% (' + Math.round(bi.accuracyOnPredicted * bi.count) + '/' + bi.count + ')</span></div>';
+    html += '<div class="train-row"><span title="Eye-state accuracy when the classifier reads from your dashboard-drawn corrected bbox crop">On corrected bbox</span><span class="train-val">'
+      + corrPct + '% (' + Math.round(bi.accuracyOnCorrected * bi.count) + '/' + bi.count + ')</span></div>';
+    html += '<div class="train-row"><span title="Accuracy delta: positive means corrected bbox helped, negative means it hurt">Δ (corrected − predicted)</span><span class="train-val" style="color:' + deltaColor + ';font-weight:600">'
+      + deltaSign + deltaPts.toFixed(1) + ' pts</span></div>';
+    html += '<div class="train-row"><span title="Fraction of frames where the eye-state prediction changed between the two bboxes — a measure of how much the bbox geometry matters regardless of which one is right">Flip rate</span><span class="train-val">'
+      + flipPct + '%</span></div>';
+    html += '</div>';
+
+    // Per-class breakdown — this is the load-bearing part of the whole
+    // analysis. The aggregate is easy to misread; the per-class view is
+    // where the real signal lives.
+    if (bi.perClass) {
+      html += '<div class="safety-source-label" style="margin-top:10px;font-size:0.7rem">Per-class (this is the number to read)</div>';
+      html += '<div class="train-details">';
+      for (const cls of Object.keys(bi.perClass)) {
+        const pc = bi.perClass[cls];
+        const clsDelta = Math.round(pc.delta * 1000) / 10;
+        const clsSign = clsDelta >= 0 ? '+' : '';
+        const clsColor = clsDelta > 0.5 ? 'var(--accent-green)'
+                        : clsDelta < -0.5 ? 'var(--accent-red)'
+                        : 'var(--text-muted)';
+        html += '<div class="train-row"><span>' + cls + ' (n=' + pc.n + ')</span><span class="train-val" style="color:' + clsColor + '">'
+          + Math.round(pc.accuracyOnPredicted * 100) + '% → '
+          + Math.round(pc.accuracyOnCorrected * 100) + '% '
+          + '<span style="font-weight:600">' + clsSign + clsDelta.toFixed(1) + '</span></span></div>';
+      }
+      html += '</div>';
+    }
+
+    // Staleness + how to refresh
+    const ranAt = bi.ranAt ? new Date(bi.ranAt).toLocaleString('en-US', {
+      timeZone: 'America/New_York', month: 'short', day: 'numeric',
+      hour: 'numeric', minute: '2-digit', hour12: true
+    }) : '?';
+    const versionMatches = bi.modelVersion === (safetyData && safetyData.deployedVersion);
+    const staleWarning = !versionMatches
+      ? '<span style="color:var(--accent-red);font-weight:600"> · STALE (run on ' + bi.modelVersion + ')</span>'
+      : '';
+    html += '<div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px">ran ' + ranAt + staleWarning + ' · refresh: <code>python scripts/bbox_impact.py --force</code></div>';
+  }
+
   // --- Confidence distribution ---
   if (face.confidence) {
     const c = face.confidence;
@@ -1098,14 +1244,34 @@ function renderFaceDetectionColumn() {
   if (faceMetrics) {
     html += '<div class="safety-source-label" style="margin-top:14px">Training Validation</div>';
     html += '<div class="train-details">';
+
+    // Dataset split counts — match the presence/eye-state layout
+    if (faceMetrics.train_total != null || faceMetrics.val_total != null) {
+      const trainN = faceMetrics.train_total != null ? faceMetrics.train_total : '—';
+      const valN = faceMetrics.val_total != null ? faceMetrics.val_total : '—';
+      const testN = faceMetrics.test_total != null ? faceMetrics.test_total : '—';
+      html += '<div class="train-row"><span title="Number of labeled frames used for train / val / test after per-classifier filtering. For face-detect, a frame qualifies when it has a face bbox label.">Train / Val / Test</span><span class="train-val">'
+        + trainN + ' / ' + valN + ' / ' + testN + '</span></div>';
+    }
+
     if (faceMetrics.mean_iou != null) {
-      html += '<div class="train-row"><span title="Mean Intersection-over-Union on positive validation samples (face present)">Mean IoU</span><span class="train-val">'
+      html += '<div class="train-row"><span title="Mean Intersection-over-Union on positive validation samples (face present)">Mean IoU (val)</span><span class="train-val">'
         + (faceMetrics.mean_iou * 100).toFixed(1) + '%</span></div>';
     }
     if (faceMetrics.conf_accuracy != null) {
-      html += '<div class="train-row"><span title="Binary accuracy: correctly predicting face present vs absent">Conf Accuracy</span><span class="train-val">'
+      html += '<div class="train-row"><span title="Binary accuracy: correctly predicting face present vs absent (on val set)">Conf Accuracy (val)</span><span class="train-val">'
         + (faceMetrics.conf_accuracy * 100).toFixed(1) + '%</span></div>';
     }
+    // Held-out test metrics — populated by future training runs
+    if (faceMetrics.test_mean_iou != null) {
+      html += '<div class="train-row"><span title="Mean IoU on held-out test set — not used for model selection, so this is the honest generalization number">Mean IoU (test)</span><span class="train-val">'
+        + (faceMetrics.test_mean_iou * 100).toFixed(1) + '%</span></div>';
+    }
+    if (faceMetrics.test_conf_accuracy != null) {
+      html += '<div class="train-row"><span title="Binary present/absent accuracy on held-out test set">Conf Accuracy (test)</span><span class="train-val">'
+        + (faceMetrics.test_conf_accuracy * 100).toFixed(1) + '%</span></div>';
+    }
+
     if (faceMetrics.best_epoch != null) {
       html += '<div class="train-row"><span title="Best epoch / total epochs before early stopping">Epochs</span><span class="train-val">'
         + faceMetrics.best_epoch + ' / ' + faceMetrics.total_epochs + '</span></div>';
@@ -1114,14 +1280,131 @@ function renderFaceDetectionColumn() {
       html += '<div class="train-row"><span title="Combined SmoothL1 bbox + BCE confidence loss on validation set">Val loss</span><span class="train-val">'
         + faceMetrics.val_loss + '</span></div>';
     }
-    if (faceMetrics.train_total != null) {
-      html += '<div class="train-row"><span>Train / Val</span><span class="train-val">'
-        + faceMetrics.train_total + ' / ' + faceMetrics.val_total + '</span></div>';
-    }
     html += '</div>';
   }
 
   el.innerHTML = html;
+}
+
+function renderExperiments() {
+  // Shadow experiment metrics. The card hides itself when no experiment
+  // has any data, so freshly registered experiments aren't visible until
+  // the first frame has been processed (live or backfilled).
+  const card = document.getElementById('experiments-card');
+  const container = document.getElementById('experiments-container');
+  if (!card || !container) return;
+
+  const experiments = safetyData && safetyData.experiments;
+  if (!experiments) {
+    card.style.display = 'none';
+    return;
+  }
+  // Filter to experiments with at least one frame of data
+  const names = Object.keys(experiments).filter(n => (experiments[n].count || 0) > 0);
+  if (names.length === 0) {
+    card.style.display = 'none';
+    return;
+  }
+  card.style.display = '';
+
+  let html = '';
+  for (const name of names) {
+    const exp = experiments[name];
+    const desc = exp.description || '';
+    const count = exp.count || 0;
+    const gtCount = exp.groundTruthCount || 0;
+    const agree = exp.agreementWithProd;
+    const agreeDenom = exp.agreementDenom || 0;
+    const accExp = exp.accuracyVsGT;
+    const accProd = exp.accuracyProdVsGT;
+    const delta = exp.deltaVsProd;
+    const lat = exp.avgLatencyMs;
+    const ver = exp.modelVersion || '?';
+    const perClass = exp.perClass || {};
+
+    // Stale flag: cached model version doesn't match the latest deployed
+    // version of the experiment's underlying checkpoint. We can't read that
+    // directly from the API right now, so we just show the version inline
+    // and let the user spot drift.
+    html += '<div class="experiment-block" style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:12px">';
+    html += '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">';
+    html += '<span style="font-weight:600;font-size:0.95rem">' + name + '</span>';
+    html += '<span style="font-size:0.7rem;color:var(--text-muted)">model ' + ver + ' · n=' + count + '</span>';
+    html += '</div>';
+    html += '<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:8px">' + desc + '</div>';
+
+    // Top-line numbers — three columns
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px">';
+
+    // Agreement with prod
+    html += '<div>';
+    html += '<div style="font-size:0.7rem;color:var(--text-muted)" title="Fraction of frames where this experiment\'s eyeState matches what BIRDEYE prod predicted at capture time. Tells you how often the experiment changes the answer.">Agreement w/ prod</div>';
+    if (agree != null) {
+      html += '<div style="font-size:1.1rem;font-weight:600">' + Math.round(agree * 100) + '%</div>';
+      html += '<div style="font-size:0.65rem;color:var(--text-muted)">' + Math.round(agree * agreeDenom) + ' / ' + agreeDenom + ' frames</div>';
+    } else {
+      html += '<div style="font-size:1.1rem;color:var(--text-muted)">—</div>';
+    }
+    html += '</div>';
+
+    // Accuracy vs GT (experiment)
+    html += '<div>';
+    html += '<div style="font-size:0.7rem;color:var(--text-muted)" title="Experiment\'s accuracy on frames you have reviewed or corrected — the closest thing to ground truth available.">Accuracy vs GT (exp)</div>';
+    if (accExp != null) {
+      html += '<div style="font-size:1.1rem;font-weight:600">' + Math.round(accExp * 100) + '%</div>';
+      html += '<div style="font-size:0.65rem;color:var(--text-muted)">' + Math.round(accExp * gtCount) + ' / ' + gtCount + ' frames</div>';
+    } else {
+      html += '<div style="font-size:1.1rem;color:var(--text-muted)">—</div>';
+    }
+    html += '</div>';
+
+    // Delta vs prod
+    html += '<div>';
+    html += '<div style="font-size:0.7rem;color:var(--text-muted)" title="Experiment accuracy minus prod accuracy on the same ground-truth set. Positive = experiment is better.">Δ vs prod (GT)</div>';
+    if (delta != null) {
+      const deltaPts = Math.round(delta * 1000) / 10;
+      const deltaSign = deltaPts >= 0 ? '+' : '';
+      const deltaColor = deltaPts > 0.5 ? 'var(--accent-green)'
+                        : deltaPts < -0.5 ? 'var(--accent-red)'
+                        : 'var(--text-muted)';
+      html += '<div style="font-size:1.1rem;font-weight:600;color:' + deltaColor + '">' + deltaSign + deltaPts.toFixed(1) + ' pts</div>';
+      if (accProd != null) {
+        html += '<div style="font-size:0.65rem;color:var(--text-muted)">prod was ' + Math.round(accProd * 100) + '%</div>';
+      }
+    } else {
+      html += '<div style="font-size:1.1rem;color:var(--text-muted)">—</div>';
+    }
+    html += '</div>';
+
+    html += '</div>';
+
+    // Per-class breakdown
+    if (perClass && Object.keys(perClass).length > 0) {
+      html += '<div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:4px">Per-class (where the real story usually lives)</div>';
+      html += '<div class="train-details">';
+      for (const cls of Object.keys(perClass)) {
+        const pc = perClass[cls];
+        const clsDelta = Math.round(pc.delta * 1000) / 10;
+        const clsSign = clsDelta >= 0 ? '+' : '';
+        const clsColor = clsDelta > 0.5 ? 'var(--accent-green)'
+                        : clsDelta < -0.5 ? 'var(--accent-red)'
+                        : 'var(--text-muted)';
+        html += '<div class="train-row"><span>' + cls + ' (n=' + pc.n + ')</span><span class="train-val" style="color:' + clsColor + '">'
+          + Math.round(pc.accuracyProd * 100) + '% → '
+          + Math.round(pc.accuracyExp * 100) + '% '
+          + '<span style="font-weight:600">' + clsSign + clsDelta.toFixed(1) + '</span></span></div>';
+      }
+      html += '</div>';
+    }
+
+    // Latency footer
+    if (lat != null) {
+      html += '<div style="font-size:0.65rem;color:var(--text-muted);margin-top:6px">avg latency: ' + lat + ' ms / frame</div>';
+    }
+    html += '</div>';
+  }
+
+  container.innerHTML = html;
 }
 
 function renderClassifiers() {
@@ -1129,6 +1412,7 @@ function renderClassifiers() {
   renderClassifierColumn('classifier-presence', 'presence');
   renderFaceDetectionColumn();
   renderClassifierColumn('classifier-eye', 'eye_state');
+  renderExperiments();
 
   // Meta line: model version, deployed version, training status, rollback
   const metaEl = document.getElementById('classifiers-meta');
@@ -1325,15 +1609,44 @@ function renderClassifierColumn(elId, type) {
     html += '<div class="safety-source-label" style="margin-top:14px">Training Validation</div>';
     html += '<div class="train-details">';
 
-    html += '<div class="train-row"><span title="% of validation samples correctly classified during training">Val accuracy</span><span class="train-val">'
+    // --- Dataset split counts ---
+    // train_total / val_total come from the Dataset class's length after
+    // per-classifier filtering. test_total is written by future training
+    // runs that evaluate on the held-out test split; older runs show "—"
+    // until a retrain lands or the backfill script patches them.
+    const trainN = metrics.train_total != null ? metrics.train_total : '—';
+    const valN = metrics.val_total != null ? metrics.val_total : '—';
+    const testN = metrics.test_total != null ? metrics.test_total : '—';
+    html += '<div class="train-row"><span title="Number of labeled frames used for train / val / test after per-classifier filtering. Splits are time-block deterministic (SEED=42, 30-min blocks). Test is held out — val is used for best-epoch selection.">Train / Val / Test</span><span class="train-val">'
+      + trainN + ' / ' + valN + ' / ' + testN + '</span></div>';
+
+    html += '<div class="train-row"><span title="% of validation samples correctly classified during training (val set is used for best-epoch selection, so this is optimistically biased)">Val accuracy</span><span class="train-val">'
       + (metrics.val_accuracy * 100).toFixed(1) + '%'
       + delta(metrics.val_accuracy, pm.val_accuracy, '%', true)
       + '</span></div>';
 
     if (metrics.best_macro_f1 != null) {
-      html += '<div class="train-row"><span title="Macro-averaged F1 on validation set. Best-model selection criterion.">Macro F1</span><span class="train-val">'
+      html += '<div class="train-row"><span title="Macro-averaged F1 on validation set. Best-model selection criterion.">Macro F1 (val)</span><span class="train-val">'
         + (metrics.best_macro_f1 * 100).toFixed(1) + '%'
         + delta(metrics.best_macro_f1, pm.best_macro_f1, '%', true)
+        + '</span></div>';
+    }
+
+    // --- Held-out test metrics ---
+    // Populated by training runs that evaluate on test_entries at the
+    // end of training. This is the honest generalization signal — the
+    // val metrics above are optimistically biased because val is used
+    // for best-epoch selection.
+    if (metrics.test_accuracy != null) {
+      html += '<div class="train-row"><span title="Test-set accuracy on the held-out split — not used for model selection, so this is the honest generalization number. Diverges from val accuracy when the model has overfit.">Test accuracy</span><span class="train-val">'
+        + (metrics.test_accuracy * 100).toFixed(1) + '%'
+        + delta(metrics.test_accuracy, pm.test_accuracy, '%', true)
+        + '</span></div>';
+    }
+    if (metrics.test_macro_f1 != null) {
+      html += '<div class="train-row"><span title="Macro-F1 on held-out test set — compare against val macro-F1 to see how much best-epoch selection is overfitting to val.">Macro F1 (test)</span><span class="train-val">'
+        + (metrics.test_macro_f1 * 100).toFixed(1) + '%'
+        + delta(metrics.test_macro_f1, pm.test_macro_f1, '%', true)
         + '</span></div>';
     }
 
@@ -1537,7 +1850,7 @@ async function loadMonitorStats() {
       document.getElementById('perf-cloud-cost').textContent = '--';
     }
 
-    // Shadow latency (avg + p99)
+    // Prod latency (avg + p99) — BIRDEYE is prod since the cascade flip
     if (d.timing) {
       document.getElementById('perf-latency').innerHTML =
         Math.round(d.timing.avg * 1000) + 'ms avg' +
@@ -1802,6 +2115,69 @@ async function loadAll() {
     'Last refreshed: ' + new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York' });
 }
 
+// --- Tab switching ---
+// The main content is split into three tabs: Monitor (live watching),
+// Models (pending corrections, BIRDEYE classifiers, shadow experiments,
+// pipeline stats), and Events (recent events table). Active tab is
+// persisted in localStorage and reflected in the URL hash so links and
+// reloads land on the right view.
+function setActiveTab(name, opts) {
+  const push = opts && opts.push;
+  const buttons = document.querySelectorAll('.tab-btn');
+  const panels = document.querySelectorAll('.tab-panel');
+  let matched = false;
+  buttons.forEach((b) => {
+    const isActive = b.dataset.tab === name;
+    b.classList.toggle('active', isActive);
+    b.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    if (isActive) matched = true;
+  });
+  panels.forEach((p) => {
+    const isActive = p.dataset.tab === name;
+    p.classList.toggle('active', isActive);
+    // [hidden] is used so inactive panels are also removed from the
+    // accessibility tree. The CSS rule for .tab-panel.active overrides it.
+    if (isActive) {
+      p.removeAttribute('hidden');
+    } else {
+      p.setAttribute('hidden', '');
+    }
+  });
+  if (!matched) return;
+  try {
+    localStorage.setItem('bilbo:tab', name);
+  } catch (e) { /* storage blocked or full — ignore */ }
+  if (push && window.location.hash !== '#' + name) {
+    history.replaceState(null, '', '#' + name);
+  }
+}
+
+function initTabs() {
+  const validTabs = ['monitor', 'models', 'events'];
+  // Pick initial tab: URL hash > localStorage > default
+  let initial = 'monitor';
+  const fromHash = (window.location.hash || '').replace('#', '');
+  if (validTabs.includes(fromHash)) {
+    initial = fromHash;
+  } else {
+    try {
+      const stored = localStorage.getItem('bilbo:tab');
+      if (validTabs.includes(stored)) initial = stored;
+    } catch (e) { /* ignore */ }
+  }
+  setActiveTab(initial, { push: true });
+
+  document.querySelectorAll('.tab-btn').forEach((btn) => {
+    btn.addEventListener('click', () => setActiveTab(btn.dataset.tab, { push: true }));
+  });
+
+  window.addEventListener('hashchange', () => {
+    const name = (window.location.hash || '').replace('#', '');
+    if (validTabs.includes(name)) setActiveTab(name, { push: false });
+  });
+}
+
+initTabs();
 initTimelineNav();
 document.getElementById('perf-range').addEventListener('change', loadMonitorStats);
 document.getElementById('safety-range').addEventListener('change', loadSafetyStats);

@@ -43,6 +43,7 @@ from lib.local_pipeline import (
     birdeye_result_to_shadow_blob,
     run_birdeye_inference,
 )
+from lib.experiments import run_all as run_experiments
 from lib.alerts import (
     check_alerts,
     check_edge_alert,
@@ -325,6 +326,26 @@ def main():
     # Build flat log entry
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     entry = {"timestamp": now, "frame": str(frame_path), **flat, "alerts": alerts}
+
+    # --- Shadow experiments ---
+    # Run every registered shadow pipeline against this frame. Results are
+    # stored under entry["experiments"][<name>] alongside the primary
+    # fields. Experiments are read-only observers — they never mutate the
+    # primary state/eyeState, and any experiment that raises is logged but
+    # does not abort the tick. See scripts/lib/experiments.py for the
+    # framework and the currently-registered experiments.
+    try:
+        experiment_results = run_experiments(
+            frame_path, entry, prod_result=birdeye_result
+        )
+        if experiment_results:
+            entry["experiments"] = experiment_results
+            log.info(
+                "pipeline: experiments ran (%d): %s",
+                len(experiment_results), list(experiment_results.keys()),
+            )
+    except Exception as e:  # noqa: BLE001
+        log.warning("pipeline: experiments framework failed: %s", e)
 
     # Log to JSONL
     if args.dry_run:

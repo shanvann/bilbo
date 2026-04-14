@@ -138,6 +138,52 @@ def init_db():
 _EYE_LABELS = ("eyes_open", "eyes_closed")
 
 
+def _bbox_iou(a: dict, b: dict) -> float:
+    """Intersection-over-union for two normalized bboxes.
+
+    Both dicts are {"x1","y1","x2","y2"} in [0, 1] coordinates relative to
+    the same reference frame (the bassinet crop).  Returns 0.0 when either
+    box is degenerate or the boxes don't overlap.
+    """
+    ix1 = max(a["x1"], b["x1"])
+    iy1 = max(a["y1"], b["y1"])
+    ix2 = min(a["x2"], b["x2"])
+    iy2 = min(a["y2"], b["y2"])
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    a_area = max(0.0, a["x2"] - a["x1"]) * max(0.0, a["y2"] - a["y1"])
+    b_area = max(0.0, b["x2"] - b["x1"]) * max(0.0, b["y2"] - b["y1"])
+    union = a_area + b_area - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _summarize_iou(values: list[float]) -> dict:
+    """Reduce a list of IoU scores to the summary the dashboard renders.
+
+    n/mean/p50/p10 give shape; over50 and over75 are the conventional
+    "detection is usable" / "detection is tight" thresholds from the
+    object-detection literature.  Empty input returns a zeroed shape so
+    the frontend can render the card without branching on null.
+    """
+    n = len(values)
+    if n == 0:
+        return {"n": 0, "mean": None, "p50": None, "p10": None,
+                "over50": 0, "over75": 0}
+    sorted_vals = sorted(values)
+    mean = sum(sorted_vals) / n
+    p50 = sorted_vals[n // 2]
+    p10 = sorted_vals[max(0, int(n * 0.1) - 1)]
+    return {
+        "n": n,
+        "mean": round(mean, 3),
+        "p50": round(p50, 3),
+        "p10": round(p10, 3),
+        "over50": sum(1 for v in sorted_vals if v >= 0.5),
+        "over75": sum(1 for v in sorted_vals if v >= 0.75),
+    }
+
+
 def _derive_shadow_columns(entry: dict, shadow: dict) -> tuple[int | None, str | None, int | None]:
     """Derive the three indexed shadow columns from the in-memory entry + shadow dict.
 
@@ -878,6 +924,7 @@ def get_safety_stats(hours: float = 168) -> dict:
     face_total = 0
     face_detected = 0
     face_confidences = []
+    ious_windowed = []
     for row in face_rows:
         entry = json.loads(row["data"])
         face_total += 1
@@ -887,6 +934,10 @@ def get_safety_stats(hours: float = 168) -> dict:
             fc = entry.get("faceConfidence")
             if fc is not None:
                 face_confidences.append(fc)
+            # IoU vs user-drawn correction, when available.
+            fb_corr = entry.get("faceBboxCorrected")
+            if fb_corr and isinstance(fb_corr, dict) and "x1" in fb_corr:
+                ious_windowed.append(_bbox_iou(fb, fb_corr))
 
     face_stats = {
         "total": face_total,
@@ -902,6 +953,65 @@ def get_safety_stats(hours: float = 168) -> dict:
             "max": round(sc[-1], 3),
             "p50": round(sc[len(sc) // 2], 3),
         }
+
+    # IoU vs dashboard-drawn corrections.  Two scopes:
+    #   windowed — only frames inside the current range selector; small N but
+    #              tracks the deployed model's current behavior
+    #   allTime  — every frame ever corrected; larger N but mixes model versions
+    # The dashboard shows both so a short window isn't silently blank when
+    # the user just hasn't reviewed much lately.
+    all_iou_rows = conn.execute("""
+        SELECT data FROM entries
+        WHERE data LIKE '%faceBboxCorrected%'
+          AND data LIKE '%faceBbox%'
+          AND baby_present = 1
+    """).fetchall()
+    ious_all = []
+    for row in all_iou_rows:
+        try:
+            e = json.loads(row["data"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        fb = e.get("faceBbox")
+        fb_corr = e.get("faceBboxCorrected")
+        if (fb and isinstance(fb, dict) and "x1" in fb
+                and fb_corr and isinstance(fb_corr, dict) and "x1" in fb_corr):
+            ious_all.append(_bbox_iou(fb, fb_corr))
+
+    face_stats["iou"] = {
+        "windowed": _summarize_iou(ious_windowed),
+        "allTime": _summarize_iou(ious_all),
+    }
+
+    # Bbox-impact analysis: does running eye-state on the corrected bbox
+    # produce a better answer than running it on BIRDEYE's predicted bbox?
+    # Computed offline by scripts/bbox_impact.py and cached in the state
+    # table so we don't block API calls on torch inference. May be absent
+    # if the script has never been run.
+    bbox_impact = get_state("bbox_impact")
+    if bbox_impact:
+        face_stats["bboxImpact"] = bbox_impact
+
+    # Shadow experiments: iterate the registry and aggregate per-experiment
+    # stats. Wrapped in try/except so a broken experiment module can never
+    # kill the entire safety-stats endpoint — the dashboard's other panels
+    # must keep rendering even if experiments fail to load.
+    experiment_stats_by_name: dict[str, dict] = {}
+    try:
+        from .experiments import get_registry as _get_experiment_registry
+        for exp in _get_experiment_registry():
+            stats = get_experiment_stats(exp.name, hours)
+            # Include descriptive metadata from the Experiment instance so
+            # the dashboard card doesn't have to fetch it separately.
+            experiment_stats_by_name[exp.name] = {
+                **stats,
+                "description": exp.description,
+            }
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger("monitor").warning(
+            "get_safety_stats: experiments framework failed: %s", e
+        )
 
     return {
         "hours": hours,
@@ -927,6 +1037,152 @@ def get_safety_stats(hours: float = 168) -> dict:
             "cloudVsGT": build_panel(cloud_eye_pairs, eye_classes) if cloud_eye_pairs else None,
         },
         "faceDetection": face_stats,
+        "experiments": experiment_stats_by_name,
+    }
+
+
+def get_experiment_stats(name: str, hours: float = 168) -> dict:
+    """Aggregate metrics for a single shadow experiment over a time window.
+
+    Produces the same shape the dashboard Experiments card expects:
+
+    - ``count``: frames where the experiment produced a result
+    - ``agreementWithProd``: fraction where experiment's eyeState matches
+      prod's eyeState (both must have a binary eye label to count)
+    - ``accuracyVsGT`` / ``accuracyProdVsGT``: for frames where the user has
+      reviewed or corrected the label, how often each pipeline matches it
+    - ``deltaVsProd``: (experiment accuracy - prod accuracy) on the GT set;
+      >0 means the experiment is better, <0 means worse
+    - ``perClass``: same split, keyed by ground-truth class
+    - ``avgLatencyMs``: mean experiment latency
+    - ``modelVersion``: most recent model version the experiment reported
+
+    Returns a dict with ``count=0`` and null metrics when the experiment has
+    no data in the window — safe for the dashboard to render as empty state.
+    """
+    conn = get_connection()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+    rows = conn.execute(
+        """
+        SELECT timestamp, eye_state, eye_state_edited, reviewed, baby_present,
+               shadow_birdeye_eye, data
+        FROM entries
+        WHERE timestamp >= ?
+          AND baby_present = 1
+          AND data LIKE '%experiments%'
+        """,
+        (cutoff,),
+    ).fetchall()
+
+    count = 0
+    count_no_prod = 0  # experiment ran but prod BIRDEYE didn't (pre-flip)
+    agree_prod = 0
+    agree_prod_denom = 0
+    gt_count = 0
+    correct_exp = 0
+    correct_prod = 0
+    latencies: list[float] = []
+    last_version: str | None = None
+    per_class: dict[str, dict] = {}
+
+    for row in rows:
+        try:
+            data = json.loads(row["data"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        experiments = data.get("experiments") or {}
+        exp_result = experiments.get(name)
+        if not isinstance(exp_result, dict):
+            continue
+
+        exp_eye = exp_result.get("eyeState")
+        # Prod prediction: must come from the BIRDEYE audit column
+        # (shadow_birdeye_eye). Do NOT fall back to data.eyeState — on
+        # reviewed/corrected frames that field holds the user-confirmed
+        # ground-truth label, not a prediction, and using it as a proxy
+        # for prod would artificially inflate prod's accuracy to 100%.
+        prod_eye = row["shadow_birdeye_eye"]
+        if not prod_eye:
+            # Pre-BIRDEYE-flip frames: no prod prediction to compare
+            # against. Still count the experiment as having run but
+            # exclude from agreement/GT comparisons.
+            count_no_prod += 1
+            lat = exp_result.get("latencyMs")
+            if isinstance(lat, (int, float)):
+                latencies.append(lat)
+            if exp_result.get("modelVersion"):
+                last_version = exp_result["modelVersion"]
+            continue
+
+        count += 1
+
+        if exp_eye in ("eyes_open", "eyes_closed") and prod_eye in ("eyes_open", "eyes_closed"):
+            agree_prod_denom += 1
+            if exp_eye == prod_eye:
+                agree_prod += 1
+
+        lat = exp_result.get("latencyMs")
+        if isinstance(lat, (int, float)):
+            latencies.append(lat)
+        if exp_result.get("modelVersion"):
+            last_version = exp_result["modelVersion"]
+
+        # Ground-truth comparison — only frames where the user EXPLICITLY
+        # CORRECTED the eye-state label (eye_state_edited=1). On review-only
+        # frames (reviewed=1 without a correction), the stored eye_state is
+        # whatever prod said at capture time, so comparing prod to it would
+        # tautologically score 100% — the frame was only in the GT set
+        # because prod wasn't wrong enough for the user to change it.
+        # Restricting to corrections gives us a fair adversarial test set.
+        if not row["eye_state_edited"]:
+            continue
+        gt = row["eye_state"] if row["eye_state"] in ("eyes_open", "eyes_closed") else None
+        if not gt:
+            continue
+        gt_count += 1
+        if exp_eye == gt:
+            correct_exp += 1
+        if prod_eye == gt:
+            correct_prod += 1
+
+        bucket = per_class.setdefault(
+            gt, {"n": 0, "correctExp": 0, "correctProd": 0}
+        )
+        bucket["n"] += 1
+        if exp_eye == gt:
+            bucket["correctExp"] += 1
+        if prod_eye == gt:
+            bucket["correctProd"] += 1
+
+    for cls_bucket in per_class.values():
+        n = cls_bucket["n"]
+        cls_bucket["accuracyExp"] = round(cls_bucket["correctExp"] / n, 3) if n else 0.0
+        cls_bucket["accuracyProd"] = round(cls_bucket["correctProd"] / n, 3) if n else 0.0
+        cls_bucket["delta"] = round(cls_bucket["accuracyExp"] - cls_bucket["accuracyProd"], 3)
+
+    return {
+        "name": name,
+        "count": count,
+        "countNoProd": count_no_prod,  # frames where exp ran but BIRDEYE didn't
+        "windowHours": hours,
+        "agreementWithProd": (
+            round(agree_prod / agree_prod_denom, 3) if agree_prod_denom else None
+        ),
+        "agreementDenom": agree_prod_denom,
+        "groundTruthCount": gt_count,
+        "accuracyVsGT": round(correct_exp / gt_count, 3) if gt_count else None,
+        "accuracyProdVsGT": round(correct_prod / gt_count, 3) if gt_count else None,
+        "deltaVsProd": (
+            round((correct_exp - correct_prod) / gt_count, 3) if gt_count else None
+        ),
+        "avgLatencyMs": (
+            round(sum(latencies) / len(latencies), 2) if latencies else None
+        ),
+        "modelVersion": last_version,
+        "perClass": per_class,
     }
 
 

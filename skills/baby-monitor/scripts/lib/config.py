@@ -115,6 +115,51 @@ FACE_DETECT_MODEL_PT = _MODEL_BASE / "face_detector.pt"
 FACE_DETECT_PT_CONFIDENCE_THRESHOLD = 0.5
 
 # ---------------------------------------------------------------------------
+# Model-adjacent metadata (sidecar JSON next to the weights)
+# ---------------------------------------------------------------------------
+#
+# Some pipeline parameters are coupled to the deployed model — changing the
+# model without changing them silently produces degraded predictions. The
+# canonical example is the eye-state classifier's input resolution: the
+# MobileNetV3-Small backbone accepts any spatial extent via its adaptive
+# pool, so a 448-trained checkpoint will HAPPILY run at 224 input and vice
+# versa, but the learned feature positions don't match and accuracy drops.
+#
+# To keep promotion / rollback atomic with the weights, these parameters
+# live in ``pipeline/models/latest/meta.json`` alongside the checkpoint
+# files. The `latest` symlink is the single source of truth — switching
+# versions swaps the meta automatically.
+#
+# Shape of meta.json:
+#     {
+#       "eye_state_crop_size": 448,
+#       "deployed_at": "2026-04-14T15:28:01Z",
+#       "source": "eye_state_448 experiment",
+#       "notes": "flipped from 224 after shadow showed +34 pts on corrections"
+#     }
+#
+# Only ``eye_state_crop_size`` is read by the pipeline today; other fields
+# are captured for archaeology and the promote_experiment script.
+import json as _json
+def _load_model_meta() -> dict:
+    meta_path = _MODEL_BASE / "meta.json"
+    if not meta_path.exists():
+        return {}
+    try:
+        return _json.loads(meta_path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+_MODEL_META = _load_model_meta()
+
+# Eye-state classifier input resolution (square). Read from the sidecar so
+# a promotion can change it without editing Python source. Defaults to 224
+# when the sidecar is absent — this is the conservative assumption because
+# 224 was the torchvision default and all checkpoints before
+# 2026-04-14 were trained at it.
+EYE_STATE_INPUT_SIZE: int = int(_MODEL_META.get("eye_state_crop_size", 224))
+
+# ---------------------------------------------------------------------------
 # Legacy alert rules (currently disabled)
 # ---------------------------------------------------------------------------
 ALERT_RULES = {

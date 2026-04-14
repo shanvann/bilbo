@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Baby Monitor Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=15">
+  <link rel="stylesheet" href="/static/style.css?v=21">
 </head>
 <body>
   <!-- Top Bar: Compact Status -->
@@ -35,6 +35,15 @@
 
   <!-- Main Content -->
   <main>
+    <!-- Tab bar -->
+    <nav class="tab-bar" role="tablist" aria-label="Dashboard sections">
+      <button type="button" class="tab-btn active" role="tab" aria-selected="true" data-tab="monitor" id="tab-monitor">Monitor</button>
+      <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="models" id="tab-models">Models</button>
+      <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="events" id="tab-events">Events</button>
+    </nav>
+
+    <!-- =============== Monitor tab =============== -->
+    <div class="tab-panel active" role="tabpanel" data-tab="monitor" aria-labelledby="tab-monitor">
     <!-- Live Frame (hero) -->
     <section class="card live-frame-card">
       <div class="live-frame-container">
@@ -122,6 +131,12 @@
             <span id="viewer-birdeye-presence" class="viewer-birdeye-label" style="display:none"></span>
             <span id="viewer-birdeye-face" class="viewer-birdeye-label" style="display:none"></span>
             <span id="viewer-birdeye-eye" class="viewer-birdeye-label" style="display:none"></span>
+            <!-- Shadow-experiment labels are injected dynamically by
+                 renderViewer() as direct children of .viewer-meta (class
+                 `viewer-experiment-label`), one per registered experiment
+                 with a result on this frame. They are inserted right
+                 here — the marker keeps the DOM order stable. -->
+            <span id="viewer-experiments-marker" style="display:none"></span>
             <select id="viewer-state" class="detail-select viewer-state-select">
               <option value="eyes_open">Eyes Open</option>
               <option value="eyes_closed">Eyes Closed</option>
@@ -139,6 +154,10 @@
     </section>
 
 
+    </div><!-- /monitor-panel -->
+
+    <!-- =============== Models tab =============== -->
+    <div class="tab-panel" role="tabpanel" data-tab="models" aria-labelledby="tab-models" hidden>
     <!-- Pending Corrections -->
     <details class="card" id="corrections-card">
       <summary><h2 style="display:inline">Pending Corrections
@@ -201,6 +220,14 @@
       </div>
     </section>
 
+    <!-- Shadow Experiments: per-experiment shadow-pipeline metrics -->
+    <section class="card" id="experiments-card" style="display:none">
+      <h2>Shadow Experiments
+        <span class="subtitle">current model = prod BIRDEYE</span>
+      </h2>
+      <div id="experiments-container"></div>
+    </section>
+
     <!-- Pipeline -->
     <section class="card">
       <h2>Pipeline
@@ -222,8 +249,8 @@
         </div>
         <div class="perf-item">
           <div class="perf-value" id="perf-latency">--</div>
-          <div class="perf-label">Shadow Latency</div>
-          <div class="perf-desc">Birdeye avg inference time</div>
+          <div class="perf-label">Prod Latency</div>
+          <div class="perf-desc">BIRDEYE avg inference time (now prod)</div>
         </div>
         <div class="perf-item">
           <div class="perf-value" id="perf-gaps">--</div>
@@ -234,6 +261,10 @@
       <div class="perf-breakdown" id="perf-breakdown"></div>
     </section>
 
+    </div><!-- /models-panel -->
+
+    <!-- =============== Events tab =============== -->
+    <div class="tab-panel" role="tabpanel" data-tab="events" aria-labelledby="tab-events" hidden>
     <!-- Recent Events Table -->
     <section class="card">
       <h2>Recent Events
@@ -256,6 +287,7 @@
         </table>
       </div>
     </section>
+    </div><!-- /events-panel -->
 
   </main>
 
@@ -269,6 +301,6 @@
     </div>
   </footer>
 
-  <script src="/static/app.js?v=15"></script>
+  <script src="/static/app.js?v=21"></script>
 </body>
 </html>

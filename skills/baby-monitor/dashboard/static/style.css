@@ -165,6 +165,66 @@ main {
   gap: 20px;
 }
 
+/* Tabs */
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  padding: 0 4px;
+  /* Negative bottom margin so the flex gap above doesn't double up
+     with the border spacing. */
+  margin-bottom: -4px;
+}
+
+.tab-btn {
+  background: transparent;
+  color: var(--text-dim);
+  border: none;
+  padding: 12px 18px;
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 500;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  /* Sit on top of the .tab-bar's bottom border so the active underline
+     replaces it cleanly. */
+  margin-bottom: -1px;
+  transition: color 0.12s, border-color 0.12s;
+}
+
+.tab-btn:hover {
+  color: var(--text);
+}
+
+.tab-btn.active {
+  color: var(--accent-blue-light);
+  border-bottom-color: var(--accent-blue);
+}
+
+.tab-btn:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: -4px;
+  border-radius: 4px;
+}
+
+/* Each tab's content lives in its own flex column, matching the
+   main-level layout so cards space evenly inside. Inactive panels
+   use [hidden] which also sets display:none — the active panel
+   overrides it with `display: flex`. */
+.tab-panel {
+  display: none;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.tab-panel.active {
+  display: flex;
+}
+
+.tab-panel[hidden] {
+  display: none;
+}
+
 .card {
   background: var(--bg-card);
   border-radius: var(--radius);

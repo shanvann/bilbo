@@ -191,6 +191,11 @@ def api_timeline():
             "reviewed": e.get("reviewed", False),
             "frame": e.get("frame"),
             "alerts": e.get("alerts", []),
+            # Shadow-experiment results (dict keyed by experiment name).
+            # Projected through so the Block Detail viewer can render each
+            # registered shadow's eye-state prediction next to the prod
+            # BIRDEYE labels. Absent on frames where no experiment ran.
+            "experiments": e.get("experiments"),
         })
 
     # Also include feed events from CSV

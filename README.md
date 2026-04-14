@@ -19,6 +19,7 @@ A baby bassinet monitor that captures a frame every minute from an IP camera, cl
   - [Detection Pipeline Order](#detection-pipeline-order)
   - [Local vs Cloud Analysis](#local-vs-cloud-analysis)
   - [Wake Confirmation](#wake-confirmation)
+  - [Temporal State Smoothing — added 2026-04-14](#temporal-state-smoothing--added-2026-04-14)
   - [Frame Retention](#frame-retention)
   - [Storage: SQLite vs JSONL](#storage-sqlite-vs-jsonl)
 - [Workspace Files](#workspace-files)
@@ -44,6 +45,7 @@ launchd (every 1 min) → capture frame (ffmpeg)
   → Production: pixel-diff gate → cloud API (GPT-4o)
   → Compare shadow vs prod → log alignment
   → Dual-write: SQLite (primary) + JSONL (backup)
+  → Temporal smoothing: 4-of-6 consecutive eyes_open/closed → Awake/Asleep (carry forward otherwise)
   → Wake detection: 2/3 of last 3 entries Awake? → Telegram alert
   → Head position from cloud API → saved for birdeye's next crop
 ```
@@ -327,6 +329,26 @@ A single "Awake" frame could be noise (classifier error, motion blur). We need a
 | **Look-back (chosen)** | +3 min (at 1-min interval) | **0 (non-blocking)** | Low (check last 3 entries) |
 
 **Decision:** Look-back confirmation. Requiring 2/3 entries to show "Awake" filters noise without blocking the pipeline. At 1-min intervals, confirmation takes ~3 minutes of consecutive captures (was ~12 min at the old 4-min cadence). The window is hardcoded at 3 frames in `alerts.check_wake_confirmation` as `[-3:]`; if you want to widen it for lower false-positive risk at the faster capture rate, parameterize that slice and the `BURST_AWAKE_THRESHOLD` config constant together.
+
+### Temporal State Smoothing — added 2026-04-14
+
+The primary `state` field was originally derived per-frame from the eye-state classifier (`eyes_open → Awake`, `eyes_closed → Asleep`). That's brittle: one mis-classified frame or a one-second REM blink would flip the state and make the timeline look like dozens of tiny wake-ups between real sleep blocks. The wake alert had its own 2-of-3 look-back confirmation on top, but the stored `state` itself — the thing the dashboard Timeline, Events feed, and SQL aggregations read — was still raw per-frame.
+
+| Approach | False flip rate | Implementation |
+|---|---|---|
+| Per-frame (old) | High — every noisy frame flips `state` | Single-frame `eyes_open → Awake` mapping at capture time |
+| Smooth at read time (dashboard only) | Low — but every consumer needs to re-implement | Timeline code walks history each render |
+| **Smooth at write time (chosen)** | **Low — one consistent definition across all readers** | `lib/state.py::smooth_state_temporal` runs before persistence |
+
+**Decision:** smooth at write time, in `monitor.py` right before the entry hits SQLite / JSONL. The rule: within the last `STATE_CONFIRM_WINDOW = 6` baby-present frames (including the current one), a run of `STATE_CONFIRM_RUN = 4` consecutive `eyes_open` readings confirms `Awake`; same for `eyes_closed → Asleep`. Otherwise carry forward the previous smoothed state; degrade to `Unknown` only if there's no Awake/Asleep in history to carry. Non-present frames and intermediate classes (`face_not_visible`, `low_confidence`) break the run, as do cloud-API fallback frames that don't populate `eyeState`.
+
+**Preserving the raw signal.** Each entry now carries a `rawState` field holding the per-frame (unsmoothed) state. Nothing in the live pipeline reads it — it exists solely so `scripts/backfill_state.py` can re-smooth historical entries when the thresholds change, without feeding already-smoothed `state` back into the smoother. The frame-level `eyeState` classifier label is never touched by the smoother and is still the thing the dashboard shows in the block-detail view and the thing the user corrects per-frame.
+
+**One-time backfill.** `scripts/backfill_state.py` walks the DB in timestamp order and rewrites `state` + `rawState` on every entry using the same smoothing function. Non-destructive to `eyeState`, `eye_state_edited`, and all user corrections. Run once after deploying the smoothing change, or any time the window/run thresholds are adjusted.
+
+**Interaction with the wake alert.** The 2-of-3 wake confirmation in `alerts.check_wake_confirmation` is now strictly weaker than the smoothing rule — a smoothed `Awake` already implies at least 4 consecutive `eyes_open` in the look-back window. The wake check is kept because it still enforces the prior-Asleep gate and the cooldown, but the quorum itself is trivially satisfied on any Asleep→Awake transition. Not a bug, just a note for anyone reading the alert path and wondering why it looks redundant.
+
+**Why a write-time rule and not a render-time rule.** The dashboard, the report skill, the SQLite aggregation queries used by the Pipeline/Events panels, and any future consumer of `entries.state` would otherwise each have to re-derive the same rule. Centralizing at write time means there's exactly one definition of Awake/Asleep in the system, and it lives in one 60-line module.
 
 ### Frame Retention
 

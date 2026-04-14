@@ -64,6 +64,26 @@ BURST_AWAKE_THRESHOLD = 2  # minimum Awake readings (out of last 3 entries) to c
                            # captures; at 4-min it was ~12 minutes. If you
                            # want a wider confirmation window, refactor the
                            # hardcoded slice to be parameterized.
+                           # NOTE: after the 2026-04-14 state-smoothing change
+                           # (STATE_CONFIRM_* below), the primary `state` field
+                           # is itself temporally confirmed (4-of-6 consecutive),
+                           # so this 2-of-3 check is now trivially satisfied on
+                           # any Asleep→Awake transition. Kept as a second
+                           # guard and a cooldown/prior-Asleep gate.
+
+# ---------------------------------------------------------------------------
+# Temporal state smoothing (added 2026-04-14)
+# ---------------------------------------------------------------------------
+# The raw per-frame Awake/Asleep reading (from BIRDEYE's eyeState mapping or
+# the cloud API's state field) is noisy — a single mis-classified frame or a
+# brief eye-open blink during REM can flip the primary state. The primary
+# `state` field is now only allowed to flip to Awake/Asleep when
+# STATE_CONFIRM_RUN consecutive raw readings agree within the last
+# STATE_CONFIRM_WINDOW baby-present frames. Between flips, the previous
+# smoothed state is carried forward. The raw per-frame reading is preserved
+# in `rawState` for future re-smoothing or backfill.
+STATE_CONFIRM_WINDOW = 6
+STATE_CONFIRM_RUN = 4
 
 # ---------------------------------------------------------------------------
 # Edge alert

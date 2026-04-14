@@ -26,7 +26,9 @@ macOS launchd (every 1 min) → monitor.py
         → confident? → log entry, done (~99% of non-empty frames)
   → Stage 3 (fallback only): cloud API (gpt-4o, ~2-5s, ~1% of non-empty frames)
     → full analysis, returns head position → saved for next tick's adaptive crop
-  → wake confirmation: 2/3 of last 3 entries Awake? → Telegram alert
+  → temporal state smoothing: 4 consecutive eyes_open/closed in last 6 present frames → Awake/Asleep
+    → else carry forward previous smoothed state (or Unknown); raw per-frame state preserved in `rawState`
+  → wake confirmation: 2/3 of last 3 entries Awake? → Telegram alert (now trivially satisfied post-smoothing)
   → edge detection: DISABLED post-flip — see github issue #3
 ```
 
@@ -170,7 +172,8 @@ skills/baby-monitor/
 | `detectionMethod` | `birdeye`, `pixel-diff`, `vision-api` | Which stage resolved the frame |
 | `modelUsed` | `local/mobilenet+mobilenet`, `openai/gpt-4o`, `n/a` | Model that produced the result |
 | `babyPresent` | `true` / `false` | |
-| `state` | Asleep, Awake, Unknown, not_present | |
+| `state` | Asleep, Awake, Unknown, not_present | **Temporally smoothed** (2026-04-14). Only flips to Awake/Asleep after 4 consecutive agreeing `eyeState` readings (`eyes_open` / `eyes_closed`) in the last 6 baby-present frames. Between flips, the previous smoothed state is carried forward. See `lib/state.py` + `STATE_CONFIRM_WINDOW` / `STATE_CONFIRM_RUN` in `lib/config.py`. |
+| `rawState` | Asleep, Awake, Unknown, not_present | Unsmoothed per-frame state — what BIRDEYE's eye-state mapping or the cloud API returned for this frame alone. Preserved so history can be re-smoothed offline if the window/run thresholds change. Added 2026-04-14. |
 | `presenceConfidence` | 0.0–1.0 | Birdeye Classifier 1 confidence |
 | `eyeConfidence` | 0.0–1.0 | Birdeye Classifier 2 confidence |
 | `eyeState` | eyes_open, eyes_closed, face_not_visible | Birdeye raw eye classification |
@@ -200,9 +203,20 @@ the saved best weights, so it's the honest generalization number.
 | `sleepPosition` | Back, Side, Stomach, Unknown | Cloud API only |
 | `alerts` | list of strings | Safety alerts triggered |
 
+### Temporal state smoothing (2026-04-14)
+
+The primary `state` field is temporally smoothed before persistence. The raw per-frame eye-state classification (`eyes_open` / `eyes_closed`) is noisy — a single mis-classified frame or a brief REM blink can flip a point-in-time reading. The rule in `lib/state.py`:
+
+- Within the last 6 baby-present frames (including the current one), a run of **4 consecutive `eyes_open`** readings → `state = Awake`. Same for `eyes_closed` → `Asleep`.
+- Otherwise, the previous smoothed state is carried forward. With no prior Awake/Asleep in history, state degrades to `Unknown`.
+- Cloud-API fallback frames (no `eyeState`) and intermediate classes (`face_not_visible`, `low_confidence`) break the consecutive run.
+- Window / run thresholds: `STATE_CONFIRM_WINDOW = 6`, `STATE_CONFIRM_RUN = 4` in `lib/config.py`.
+
+The unsmoothed per-frame reading is preserved in `rawState` so history can be re-smoothed offline if the thresholds change (`scripts/backfill_state.py`).
+
 ### Active wake alerts
 
-When the baby is detected as "Awake" after being "Asleep", the pipeline confirms by checking the last 3 entries. If 2+ show Awake → sends Telegram alert with inline feedback buttons. 30-min cooldown between alerts, reset when baby is removed.
+When the baby is detected as "Awake" after being "Asleep", the pipeline confirms by checking the last 3 entries. If 2+ show Awake → sends Telegram alert with inline feedback buttons. 30-min cooldown between alerts, reset when baby is removed. **Note:** since the primary `state` is now temporally confirmed (4-of-6 consecutive), the 2-of-3 wake check is trivially satisfied on any Asleep→Awake transition and acts mainly as the prior-Asleep gate + cooldown enforcer.
 
 ```bash
 python3 scripts/monitor.py --feedback <alert_id> yes|no   # record feedback

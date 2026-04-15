@@ -939,10 +939,15 @@ footer {
 /* Daily bassinet chart */
 .bassinet-chart {
   display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 4px;
+}
+.bassinet-bars-row {
+  display: flex;
   align-items: flex-end;
   gap: 6px;
   height: 160px;
-  padding: 0 4px;
 }
 .bassinet-bar-group {
   flex: 1;

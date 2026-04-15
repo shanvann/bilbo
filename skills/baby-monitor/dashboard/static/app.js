@@ -932,7 +932,11 @@ async function loadBassinetChart() {
     // Asleep sits at the top so the "good sleep" color is the most
     // visually prominent slice. Tiny slices (< 0.1h) are rolled into
     // the title tooltip only so they don't create a 1px stripe.
-    let html = '';
+    //
+    // Bars sit inside a horizontal row wrapper so the legend (appended
+    // after it) stacks below the bars rather than becoming a flex
+    // sibling to the right.
+    let html = '<div class="bassinet-bars-row">';
     for (const d of data.days) {
       const total = d.inHours + d.outHours;
       const stackPct = total > 0 ? (total / maxHours * 100) : 0;

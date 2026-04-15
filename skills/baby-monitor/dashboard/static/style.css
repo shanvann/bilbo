@@ -474,6 +474,7 @@ footer {
   border-radius: 3px;
 }
 .legend-dot.asleep { background: rgba(74, 158, 255, 0.8); }
+.legend-dot.unknown-present { background: rgba(74, 158, 255, 0.2); }
 .legend-dot.awake { background: rgba(74, 158, 255, 0.3); }
 .legend-dot.absent { background: rgba(255, 152, 0, 0.6); }
 
@@ -971,6 +972,9 @@ footer {
   color: rgba(255,255,255,0.8);
 }
 .bassinet-bar-seg.in { background: var(--accent-blue); }
+.bassinet-bar-seg.asleep { background: rgba(74, 158, 255, 0.8); }
+.bassinet-bar-seg.awake { background: rgba(74, 158, 255, 0.35); }
+.bassinet-bar-seg.unknown-in { background: rgba(74, 158, 255, 0.18); }
 .bassinet-bar-seg.out { background: rgba(255, 152, 0, 0.5); }
 .bassinet-bar-label {
   font-size: 0.65rem;

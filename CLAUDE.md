@@ -54,7 +54,9 @@ python scripts/monitor.py --audit --sample 50   # spot-check shadow vs prod disa
 python scripts/monitor.py --list-models         # versioned model history + metrics
 python scripts/monitor.py --rollback VERSION    # revert to a previous model
 python scripts/monitor.py --retrain             # retrain with pending corrections
-python scripts/monitor.py --backfill-shadow --hours 168 --only-stale  # re-run BIRDEYE on historical frames after deploying a new model (--only-stale skips entries already tagged with the deployed version; supports --limit, --dry-run)
+python scripts/monitor.py --backfill-shadow --hours 168 --only-stale  # re-run BIRDEYE on historical frames after deploying a new model and write into the SHADOW AUDIT DICT ONLY (--only-stale skips entries already tagged with the deployed version; supports --limit, --dry-run)
+python scripts/backfill_birdeye_primary.py --start 2026-04-02T00:00:00Z  # re-run BIRDEYE and write into the PRIMARY eyeState/face fields for a time window — use this one if you want the temporal state smoother to re-fire over refreshed signal (pair with backfill_state.py afterwards). Skips eye_state_edited=1 rows by default.
+python scripts/backfill_state.py  # re-smooth `state` over the primary eyeState signal for the whole DB (cheap, re-runnable)
 ```
 
 ### Training (`scripts/train_classifiers.py`)

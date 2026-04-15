@@ -103,7 +103,7 @@ Logs: `data/system.log` (rotating, 5MB x 3), `data/cron-stdout.log`, `data/cron-
 | `monitor.py --backtest --alerts` | Test wake alert accuracy |
 | `monitor.py --alert-stats` | Show alert precision from user feedback |
 | `monitor.py --feedback ID yes\|no` | Record user feedback for an alert |
-| `monitor.py --backfill-shadow --hours N [--only-stale] [--limit N] [--dry-run]` | Re-run BIRDEYE shadow inference on historical entries (use after deploying a new model). `--only-stale` skips entries already tagged with the deployed version. |
+| `monitor.py --backfill-shadow --hours N [--only-stale] [--limit N] [--dry-run]` | Re-run BIRDEYE inference on historical entries and write results into the **audit-trail `shadow` dict only** — does NOT touch the user-facing primary fields. Use after deploying a new model when you want the shadow audit brought up to date with the new weights. `--only-stale` skips entries already tagged with the deployed version. For a primary-field refresh (i.e. to rescue `eyeState` on pre-BIRDEYE-primary-flip frames so the state smoother has signal), use `scripts/backfill_birdeye_primary.py` instead. |
 | `monitor.py --verbose` | Print all log messages to stderr |
 | `run_single_inference.py <ts>` | Re-run BIRDEYE on the frame for one timestamp and update its `shadow` audit fields (does NOT touch user-facing primary fields or corrections). Thin wrapper around `lib.local_pipeline.run_birdeye_inference` and `birdeye_result_to_shadow_blob` — same shared helpers `monitor.py` uses, so the two paths cannot drift. Called by the dashboard's `/api/run-inference` button via subprocess. |
 
@@ -133,6 +133,8 @@ skills/baby-monitor/
 │   ├── promote_experiment.py       # One-command shadow → prod flip, rollback is the same command pointed at the legacy snapshot. See docs/shadow-to-prod-playbook.md
 │   ├── bbox_impact.py              # A/B eye-state on predicted vs corrected bboxes (manual-run, caches into state.bbox_impact for the dashboard)
 │   ├── experiments_backfill.py     # Run registered shadow experiments against historical frames
+│   ├── backfill_birdeye_primary.py # Re-run BIRDEYE over a time window and write into the **primary** eyeState/faceBbox/presence+eye-confidence fields (NOT just the shadow audit). Skips `eye_state_edited=1` rows. Use when deploying a new model and you want the temporal state smoother to re-fire over refreshed eye-state signal. Pair with `backfill_state.py` afterwards.
+│   ├── backfill_state.py           # Walk the DB in timestamp order and re-run `smooth_state_temporal` on every entry, rewriting `state` + seeding `rawState`. Re-runnable if `STATE_CONFIRM_WINDOW`/`STATE_CONFIRM_RUN` change.
 │   ├── run_single_inference.py     # Dashboard re-run button entry (subprocessed by Flask)
 │   ├── requirements.txt            # All Python deps
 │   └── lib/

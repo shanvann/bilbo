@@ -201,12 +201,23 @@ async function loadTimeline() {
     const barEl = document.getElementById('timeline-bar');
     barEl.innerHTML = '';
 
-    // Merge consecutive entries with same state category into blocks
-    // Treat Unknown as Asleep for timeline display (vision model noise)
+    // Merge consecutive entries with same state category into blocks.
+    // Asleep / Unknown / Awake are rendered as distinct blocks — no more
+    // Asleep+Unknown collapsing. Unknown means the temporal smoother
+    // couldn't confirm a state from the last 6 frames, and is worth
+    // seeing on the timeline instead of being silently shown as Asleep.
     function stateCategory(e) {
       if (!e.babyPresent) return 'absent';
       if (e.state === 'Awake') return 'awake';
-      return 'asleep'; // Asleep + Unknown both show as sleep
+      if (e.state === 'Asleep') return 'asleep';
+      return 'unknown-present';
+    }
+
+    function stateLabel(e) {
+      if (!e.babyPresent) return 'Out of bassinet';
+      if (e.state === 'Asleep') return 'Asleep';
+      if (e.state === 'Awake') return 'Awake';
+      return 'Unknown (in bassinet)';
     }
 
     const merged = [];
@@ -222,7 +233,7 @@ async function loadTimeline() {
         merged[merged.length - 1].entries.push(e);
       } else {
         merged.push({ cat, start: eTime, end: nextTime,
-          label: !e.babyPresent ? 'Out of bassinet' : (e.state || 'In bassinet'),
+          label: stateLabel(e),
           entries: [e] });
       }
     }
@@ -917,14 +928,18 @@ async function loadBassinetChart() {
     // Find max total hours for scaling
     const maxHours = Math.max(...data.days.map(d => d.inHours + d.outHours), 1);
 
+    // Stack segments bottom → top: out, awake, unknown-in, asleep.
+    // Asleep sits at the top so the "good sleep" color is the most
+    // visually prominent slice. Tiny slices (< 0.1h) are rolled into
+    // the title tooltip only so they don't create a 1px stripe.
     let html = '';
     for (const d of data.days) {
       const total = d.inHours + d.outHours;
       const stackPct = total > 0 ? (total / maxHours * 100) : 0;
-      const inPct = total > 0 ? (d.inHours / total * 100) : 0;
-      const outPct = 100 - inPct;
 
-      // Format date as "Mon 4/7"
+      function fmtHrs(h) { return h >= 1 ? h + 'h' : ''; }
+      function segFlex(h) { return total > 0 ? stackPct * (h / total) : 0; }
+
       const dt = new Date(d.date + 'T12:00:00');
       const dayName = dt.toLocaleDateString('en-US', { weekday: 'short' });
       const monthDay = (dt.getMonth() + 1) + '/' + dt.getDate();
@@ -932,14 +947,24 @@ async function loadBassinetChart() {
       html += '<div class="bassinet-bar-group">';
       html += '<div class="bassinet-bar-stack" style="height:100%">';
       html += '<div style="flex:' + (100 - stackPct) + '"></div>'; // spacer
-      if (outPct > 0 && d.outHours > 0) {
-        html += '<div class="bassinet-bar-seg out" style="flex:' + (stackPct * outPct / 100) + '" title="Out: ' + d.outHours + 'h">'
-          + (d.outHours >= 1 ? d.outHours + 'h' : '') + '</div>';
+
+      if (d.outHours > 0) {
+        html += '<div class="bassinet-bar-seg out" style="flex:' + segFlex(d.outHours)
+          + '" title="Out of bassinet: ' + d.outHours + 'h">' + fmtHrs(d.outHours) + '</div>';
       }
-      if (inPct > 0 && d.inHours > 0) {
-        html += '<div class="bassinet-bar-seg in" style="flex:' + (stackPct * inPct / 100) + '" title="In: ' + d.inHours + 'h (' + d.inPct + '%)">'
-          + (d.inHours >= 1 ? d.inHours + 'h' : '') + '</div>';
+      if (d.awakeHours > 0) {
+        html += '<div class="bassinet-bar-seg awake" style="flex:' + segFlex(d.awakeHours)
+          + '" title="Awake in bassinet: ' + d.awakeHours + 'h">' + fmtHrs(d.awakeHours) + '</div>';
       }
+      if (d.unknownInHours > 0) {
+        html += '<div class="bassinet-bar-seg unknown-in" style="flex:' + segFlex(d.unknownInHours)
+          + '" title="Unknown (in bassinet): ' + d.unknownInHours + 'h">' + fmtHrs(d.unknownInHours) + '</div>';
+      }
+      if (d.asleepHours > 0) {
+        html += '<div class="bassinet-bar-seg asleep" style="flex:' + segFlex(d.asleepHours)
+          + '" title="Asleep: ' + d.asleepHours + 'h">' + fmtHrs(d.asleepHours) + '</div>';
+      }
+
       html += '</div>';
       html += '<div class="bassinet-bar-label">' + dayName + '<br>' + monthDay + '</div>';
       html += '</div>';
@@ -948,8 +973,10 @@ async function loadBassinetChart() {
     html += '</div>';
     // Legend
     html += '<div class="bassinet-chart-legend">';
-    html += '<span><span class="legend-dot" style="background:var(--accent-blue)"></span> In Bassinet</span>';
-    html += '<span><span class="legend-dot" style="background:rgba(255,152,0,0.5)"></span> Out of Bassinet</span>';
+    html += '<span><span class="legend-dot" style="background:rgba(74,158,255,0.8)"></span> Asleep</span>';
+    html += '<span><span class="legend-dot" style="background:rgba(74,158,255,0.18)"></span> Unknown (in bassinet)</span>';
+    html += '<span><span class="legend-dot" style="background:rgba(74,158,255,0.35)"></span> Awake</span>';
+    html += '<span><span class="legend-dot" style="background:rgba(255,152,0,0.5)"></span> Out of bassinet</span>';
     html += '</div>';
 
     chartEl.innerHTML = html;
@@ -1681,7 +1708,13 @@ function renderClassifierColumn(elId, type) {
 async function loadEvents() {
   try {
     const count = document.getElementById('events-count').value;
-    const res = await fetch('/api/events?count=' + count);
+    const type = document.getElementById('events-type').value;
+    const hours = document.getElementById('events-range').value;
+    const res = await fetch(
+      '/api/events?count=' + count
+      + '&type=' + encodeURIComponent(type)
+      + '&hours=' + encodeURIComponent(hours)
+    );
     const data = await res.json();
     const events = data.events || [];
 
@@ -2182,6 +2215,8 @@ initTimelineNav();
 document.getElementById('perf-range').addEventListener('change', loadMonitorStats);
 document.getElementById('safety-range').addEventListener('change', loadSafetyStats);
 document.getElementById('events-count').addEventListener('change', loadEvents);
+document.getElementById('events-type').addEventListener('change', loadEvents);
+document.getElementById('events-range').addEventListener('change', loadEvents);
 document.getElementById('bassinet-days').addEventListener('change', loadBassinetChart);
 loadAll();
 setInterval(loadAll, REFRESH_INTERVAL_SEC * 1000);

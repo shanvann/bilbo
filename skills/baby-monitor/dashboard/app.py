@@ -343,8 +343,10 @@ def api_bassinet_daily():
         end=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
 
-    # Accumulate per-day in/out durations
-    daily = {}  # date_str → {"in": seconds, "out": seconds}
+    # Accumulate per-day durations, split in-bassinet time by state.
+    # `in` is the legacy total (asleep + awake + unknown_in) and is kept
+    # for any consumer that still wants a single in-vs-out breakdown.
+    daily = {}
     for i in range(len(raw) - 1):
         e = raw[i]
         next_e = raw[i + 1]
@@ -356,22 +358,35 @@ def api_bassinet_daily():
 
         date_str = ts.astimezone(et).strftime("%Y-%m-%d")
         if date_str not in daily:
-            daily[date_str] = {"in": 0, "out": 0}
+            daily[date_str] = {
+                "asleep": 0, "awake": 0, "unknown_in": 0, "out": 0,
+            }
 
-        if e.get("babyPresent"):
-            daily[date_str]["in"] += dur
-        else:
+        if not e.get("babyPresent"):
             daily[date_str]["out"] += dur
+            continue
+
+        state = e.get("state")
+        if state == "Asleep":
+            daily[date_str]["asleep"] += dur
+        elif state == "Awake":
+            daily[date_str]["awake"] += dur
+        else:
+            daily[date_str]["unknown_in"] += dur
 
     result = []
     for date_str in sorted(daily.keys()):
         d = daily[date_str]
-        total = d["in"] + d["out"]
+        in_total = d["asleep"] + d["awake"] + d["unknown_in"]
+        total = in_total + d["out"]
         result.append({
             "date": date_str,
-            "inHours": round(d["in"] / 3600, 1),
+            "asleepHours": round(d["asleep"] / 3600, 1),
+            "awakeHours": round(d["awake"] / 3600, 1),
+            "unknownInHours": round(d["unknown_in"] / 3600, 1),
+            "inHours": round(in_total / 3600, 1),
             "outHours": round(d["out"] / 3600, 1),
-            "inPct": round(d["in"] / total * 100) if total > 0 else 0,
+            "inPct": round(in_total / total * 100) if total > 0 else 0,
         })
 
     return jsonify({"days": result})
@@ -422,9 +437,22 @@ def api_diapers():
 
 @app.route("/api/events")
 def api_events():
-    """Recent state transitions."""
+    """Recent state transitions.
+
+    Query params:
+      - hours: lookback window in hours. 0 (or omitted) means "all time".
+        Defaults to 72 to preserve prior behavior for callers that don't
+        pass the param.
+      - count: max rows to return after filtering (most recent first).
+      - type: one of all|placed|removed|fell_asleep|woke|other.
+    """
     db = get_db()
-    entries = db.get_entries(hours=72)  # look back 3 days for events
+    hours_arg = request.args.get("hours", "72")
+    try:
+        hours_val = float(hours_arg)
+    except ValueError:
+        hours_val = 72.0
+    entries = db.get_entries(hours=hours_val if hours_val > 0 else None)
     events = []
     prev = None
 
@@ -464,12 +492,36 @@ def api_events():
         })
         prev = e
 
-    # Add durations between consecutive events
+    # Add durations between consecutive events. Done on the full unfiltered
+    # list so each event's duration means "time until the next chronological
+    # event" regardless of whether those neighbors survive the filter.
     for i in range(len(events) - 1):
         ts1 = parse_ts(events[i]["timestamp"])
         ts2 = parse_ts(events[i + 1]["timestamp"])
         if ts1 and ts2:
             events[i]["duration"] = humanize_duration(ts2 - ts1)
+
+    # Optional type filter. The named categories match the same string
+    # predicates the frontend badge logic uses, plus an "other" bucket for
+    # the `{prev_state} -> {curr_state}` catch-all.
+    type_filter = request.args.get("type", "all")
+    if type_filter != "all":
+        def _matches(t: str) -> bool:
+            if type_filter == "placed":
+                return "Placed" in t
+            if type_filter == "removed":
+                return "Removed" in t
+            if type_filter == "fell_asleep":
+                return "Fell asleep" in t
+            if type_filter == "woke":
+                return "Woke" in t
+            if type_filter == "other":
+                # Anything that didn't hit one of the named cases — the
+                # generic "A → B" events.
+                return not any(s in t for s in
+                               ("Placed", "Removed", "Fell asleep", "Woke"))
+            return True
+        events = [e for e in events if _matches(e["type"])]
 
     # Return N most recent, most recent first
     count = int(request.args.get("count", 20))

@@ -34,8 +34,16 @@ from pathlib import Path
 # or `python3 scripts/monitor.py` from baby-monitor/
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from lib.config import ENV_FILE, MODEL_CHAIN, STATE_CONFIRM_WINDOW, load_env, log, set_verbose
-from lib.state import smooth_state_temporal
+from lib.config import (
+    ENV_FILE,
+    MODEL_CHAIN,
+    STATE_CONFIRM_WINDOW,
+    UNKNOWN_ABSORB_MAX_MINUTES,
+    load_env,
+    log,
+    set_verbose,
+)
+from lib.state import smooth_state_temporal, unknown_prefix_to_absorb
 from lib.capture import capture_frame, enforce_disk_limit
 from lib.db import get_db
 from lib.detect import detect_empty_bassinet, make_empty_entry
@@ -353,6 +361,18 @@ def main():
         log.info("state-smooth: raw=%s -> smoothed=%s",
                  entry["rawState"], entry["state"])
 
+    # --- Unknown → Awake absorption ---
+    # When we just confirmed Awake, retroactively flip any immediately-
+    # preceding contiguous Unknown+babyPresent run whose total span is
+    # < UNKNOWN_ABSORB_MAX_MINUTES. Fetch a history window comfortably
+    # larger than the absorption budget so the helper's span check can
+    # fail-closed on runs longer than the budget. The absorption rewrites
+    # historical rows via db.update_entry; it does not touch the current
+    # entry (which is already Awake from smoothing).
+    _absorb_history_n = max(STATE_CONFIRM_WINDOW, int(UNKNOWN_ABSORB_MAX_MINUTES) + 5)
+    _absorb_history = _db_for_smoothing.get_recent_entries(_absorb_history_n)
+    _to_absorb = unknown_prefix_to_absorb(entry, _absorb_history)
+
     # --- Shadow experiments ---
     # Run every registered shadow pipeline against this frame. Results are
     # stored under entry["experiments"][<name>] alongside the primary
@@ -381,6 +401,18 @@ def main():
         db = get_db()
         db.insert_entry(entry)  # SQLite primary
         log.info("pipeline: logged entry at %s", now)
+
+        # Apply Unknown→Awake absorption to the historical rows the
+        # helper identified. We do this AFTER persisting the current
+        # entry so the DB state is always consistent even if the
+        # update_entry calls fail partway through — worst case the
+        # historical Unknowns stay Unknown, which is what they were.
+        if _to_absorb:
+            log.info("state-smooth: absorbing %d Unknown frames -> Awake "
+                     "(span ending at %s)",
+                     len(_to_absorb), entry["timestamp"])
+            for _u in _to_absorb:
+                db.update_entry(_u["timestamp"], {"state": "Awake"})
     elapsed = time.monotonic() - t_start
 
     # --- Safety alerts ---

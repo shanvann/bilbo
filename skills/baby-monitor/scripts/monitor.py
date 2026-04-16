@@ -57,7 +57,7 @@ from lib.alerts import (
     send_telegram_alert,
     should_burst,
 )
-from lib.storage import append_entry, get_last_entry, get_recent_entries
+from lib.storage import append_entry
 from lib.cli import (
     cmd_audit, cmd_backfill_shadow, cmd_backtest, cmd_backtest_birdeye,
     cmd_eval_corrections, cmd_last, cmd_list_models, cmd_retrain, cmd_rollback,
@@ -291,7 +291,7 @@ def main():
             # matches the previous frame, infer "Asleep" (baby hasn't moved,
             # likely sleeping). Kept from the pre-flip pipeline.
             if flat.get("state") == "Unknown" and flat.get("babyPresent"):
-                prev = get_last_entry()
+                prev = get_db().get_last_entry()
                 if prev and prev.get("babyPresent") and prev.get("sleepPosition") == flat.get("sleepPosition"):
                     if flat.get("sleepPosition") != "Unknown":
                         log.info("heuristic: state Unknown -> Asleep (position unchanged: %s)",

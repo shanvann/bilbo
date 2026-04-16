@@ -17,7 +17,7 @@ from .config import (
     WAKE_COOLDOWN_MIN,
     WAKE_WINDOW,
 )
-from .storage import get_recent_entries
+from .db import get_db
 from .vision import _build_ssl_context
 
 log = logging.getLogger("monitor")
@@ -87,7 +87,7 @@ def should_burst(current_entry: dict) -> bool:
         return False
 
     # Check that baby was sleeping recently (not just placed awake)
-    recent = get_recent_entries(WAKE_WINDOW)
+    recent = get_db().get_recent_entries(WAKE_WINDOW)
     recent_present = [e for e in recent if e.get("babyPresent")]
     if not recent_present:
         return False
@@ -124,11 +124,14 @@ def check_wake_confirmation(current_entry: dict) -> dict | None:
 
     Returns alert dict if confirmed (2+ of last 3 entries show Awake), None otherwise.
     """
-    recent = get_recent_entries(3)
-    # Include the current entry (not yet in JSONL)
-    all_entries = recent + [current_entry]
-    # Take the last 3 baby-present entries
-    present = [e for e in all_entries if e.get("babyPresent")][-3:]
+    # By the time check_wake_confirmation runs, monitor.py has already
+    # persisted `current_entry` via db.insert_entry — so it's already in
+    # the result of get_recent_entries(). Fetch a slightly larger window
+    # so "last 3 baby-present" can survive an interleaved not_present
+    # frame without shrinking. Don't re-append current_entry; that used
+    # to double-count it when the JSONL path was in use.
+    recent = get_db().get_recent_entries(6)
+    present = [e for e in recent if e.get("babyPresent")][-3:]
     all_states = [e.get("state", "Unknown") for e in present]
 
     awake_count = all_states.count("Awake")

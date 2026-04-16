@@ -29,16 +29,6 @@ ET = timezone(timedelta(hours=-4))  # America/New_York (EDT)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def load_jsonl():
-    entries = []
-    with open(SLEEP_LOG) as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                entries.append(json.loads(line))
-    return entries
-
-
 def load_csv_rows():
     rows = []
     with open(ACTIVITY_CSV, newline="") as f:
@@ -219,9 +209,13 @@ def api_timeline():
 @app.route("/api/sleep-stats")
 def api_sleep_stats():
     days = int(request.args.get("days", 7))
-    entries = load_jsonl()
+    # Windowed SQLite query instead of slurping the entire JSONL. The old
+    # load_jsonl() parsed all ~8k rows on every request and then discarded
+    # anything outside the cutoff; this is the same data via an indexed
+    # timestamp range.
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=days)
+    entries = get_db().get_entries(hours=days * 24)
 
     # Build sleep segments: consecutive entries where babyPresent and state is
     # Asleep or Unknown (Unknown between Asleep entries counts as sleep)

@@ -335,8 +335,19 @@ def main():
     # within the last STATE_CONFIRM_WINDOW baby-present frames. The raw
     # reading is preserved under `rawState` so history can be re-smoothed
     # offline if the thresholds change. See lib/state.py.
+    #
+    # History lookup goes through SQLite, not JSONL. lib.storage's JSONL
+    # reader uses a fixed 600-bytes-per-entry byte budget which silently
+    # undercounts when entries are larger (they are now — ~1.4 KB with the
+    # shadow dict + experiments dict + faceBbox). Asking for 5 history
+    # frames was returning only 2, so the 4-of-6 rule could never fire.
+    # db.get_recent_entries uses a proper LIMIT query and is authoritative
+    # on the dual-write invariant anyway.
     entry["rawState"] = entry.get("state")
-    recent_for_smoothing = get_recent_entries(STATE_CONFIRM_WINDOW - 1)
+    _db_for_smoothing = get_db()
+    recent_for_smoothing = _db_for_smoothing.get_recent_entries(
+        STATE_CONFIRM_WINDOW - 1
+    )
     entry["state"] = smooth_state_temporal(entry, recent_for_smoothing)
     if entry["state"] != entry["rawState"]:
         log.info("state-smooth: raw=%s -> smoothed=%s",

@@ -32,7 +32,19 @@ def get_last_entry() -> dict | None:
 
 
 def get_recent_entries(n: int) -> list[dict]:
-    """Read the last N entries from JSONL."""
+    """Read the last N entries from JSONL.
+
+    Uses an adaptive read-size: start with 2 KB per entry, and if we
+    didn't end up with at least N complete entries, double and retry
+    (up to the file size). This avoids a prior bug where the fixed
+    600-bytes-per-entry budget silently under-returned once JSONL
+    entries grew past ~600 bytes (post shadow-dict / experiments dict,
+    real entries are ~1.4 KB).
+
+    A partial first line (from seeking mid-line) is dropped by the
+    json parser and *not* counted as a complete entry, so the loop
+    keeps expanding until we actually have N parseable rows.
+    """
     if not JSONL_FILE.exists():
         return []
     try:
@@ -41,18 +53,30 @@ def get_recent_entries(n: int) -> list[dict]:
             size = f.tell()
             if size == 0:
                 return []
-            # Read enough for N entries (~500 bytes each)
-            read_size = min(size, n * 600)
-            f.seek(max(0, size - read_size))
-            chunk = f.read().decode("utf-8", errors="replace")
-            lines = chunk.strip().splitlines()
-            entries = []
-            for line in lines[-n:]:
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-            return entries
+
+            per_entry = 2048  # pessimistic — real entries are ~1.4 KB now
+            while True:
+                read_size = min(size, n * per_entry)
+                f.seek(max(0, size - read_size))
+                chunk = f.read().decode("utf-8", errors="replace")
+                raw_lines = chunk.strip().splitlines()
+
+                entries: list[dict] = []
+                # Parse back-to-front so we can bail as soon as we have
+                # N entries. Any line that fails to parse is a partial
+                # (usually only the very first one after a mid-line seek).
+                for line in raw_lines[-(n + 2):]:
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+
+                if len(entries) >= n or read_size >= size:
+                    return entries[-n:]
+
+                # Didn't get enough parseable entries — expand the
+                # window and try again. Capped at the file size above.
+                per_entry *= 2
     except Exception as e:
         log.debug("get_recent_entries: failed: %s", e)
         return []

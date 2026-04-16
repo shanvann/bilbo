@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 from .config import PIXEL_DIFF_THRESHOLD, PIXEL_DIFF_TIMEOUT
-from .storage import get_last_entry
+from .db import get_db
 
 log = logging.getLogger("monitor")
 
@@ -48,11 +48,11 @@ def detect_empty_bassinet(frame_path: Path) -> tuple[bool, float]:
 
     Returns (is_empty, diff_score).
     Only returns is_empty=True if:
-      1. Previous JSONL entry exists and was empty (babyPresent=false)
+      1. Previous SQLite entry exists and was empty (babyPresent=false)
       2. Diff score between current and previous frame is below threshold
     On any error or uncertainty, returns (False, score) -> API will be called.
     """
-    prev = get_last_entry()
+    prev = get_db().get_last_entry()
     if not prev:
         log.debug("pixel-diff: no previous entry, skipping detection")
         return False, -1

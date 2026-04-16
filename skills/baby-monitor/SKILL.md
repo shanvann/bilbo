@@ -216,6 +216,8 @@ The primary `state` field is temporally smoothed before persistence. The raw per
 
 The unsmoothed per-frame reading is preserved in `rawState` so history can be re-smoothed offline if the thresholds change (`scripts/backfill_state.py`).
 
+**History lookup goes through SQLite, not JSONL.** The live path in `monitor.py` calls `db.get_recent_entries(STATE_CONFIRM_WINDOW - 1)` (SQL `LIMIT` query) rather than `storage.get_recent_entries` (JSONL tail read). This is load-bearing: the JSONL reader used a fixed 600-bytes-per-entry budget that silently under-returned once real entries grew to ~1.4 KB (post shadow + experiments dicts), so asking for 5 history frames was yielding only 2, the 4-of-6 rule could never fire, and every present frame cascaded into Unknown for ~24 hours before the bug was caught (2026-04-15). `storage.get_recent_entries` now uses an adaptive read-size that doubles on underflow, but the SKILL is clear on the architectural rule: **read paths must use SQLite via `lib/db.py`**; JSONL is only the append-only backup.
+
 ### Active wake alerts
 
 When the baby is detected as "Awake" after being "Asleep", the pipeline confirms by checking the last 3 entries. If 2+ show Awake → sends Telegram alert with inline feedback buttons. 30-min cooldown between alerts, reset when baby is removed. **Note:** since the primary `state` is now temporally confirmed (4-of-6 consecutive), the 2-of-3 wake check is trivially satisfied on any Asleep→Awake transition and acts mainly as the prior-Asleep gate + cooldown enforcer.

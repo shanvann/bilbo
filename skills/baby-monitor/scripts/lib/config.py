@@ -85,6 +85,16 @@ BURST_AWAKE_THRESHOLD = 2  # minimum Awake readings (out of last 3 entries) to c
 STATE_CONFIRM_WINDOW = 6
 STATE_CONFIRM_RUN = 4
 
+# Post-smoothing Unknown absorption: when a new Awake state is confirmed,
+# any immediately-preceding contiguous run of Unknown (baby-present) frames
+# whose total span is less than this many minutes is retroactively
+# reclassified as Awake. Rationale: if BIRDEYE briefly lost the face (e.g.
+# hand covering eyes, crib shift) and then caught 4 consecutive eyes_open,
+# the gap was almost certainly "awake but momentarily unreadable".
+# Asymmetric by design — the Unknown → Asleep direction is not applied,
+# because pre-wake ambiguity is a weaker signal than the wake itself.
+UNKNOWN_ABSORB_MAX_MINUTES = 15
+
 # ---------------------------------------------------------------------------
 # Edge alert
 # ---------------------------------------------------------------------------

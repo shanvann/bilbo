@@ -20,6 +20,7 @@ A baby bassinet monitor that captures a frame every minute from an IP camera, cl
   - [Local vs Cloud Analysis](#local-vs-cloud-analysis)
   - [Wake Confirmation](#wake-confirmation)
   - [Temporal State Smoothing — added 2026-04-14](#temporal-state-smoothing--added-2026-04-14)
+  - [Unknown → Awake absorption (added 2026-04-15)](#unknown--awake-absorption-added-2026-04-15)
   - [Frame Retention](#frame-retention)
   - [Storage: SQLite vs JSONL](#storage-sqlite-vs-jsonl)
 - [Workspace Files](#workspace-files)
@@ -353,6 +354,25 @@ The primary `state` field was originally derived per-frame from the eye-state cl
 **Why a write-time rule and not a render-time rule.** The dashboard, the report skill, the SQLite aggregation queries used by the Pipeline/Events panels, and any future consumer of `entries.state` would otherwise each have to re-derive the same rule. Centralizing at write time means there's exactly one definition of Awake/Asleep in the system, and it lives in one 60-line module.
 
 **History lookup must go through SQLite (incident 2026-04-15).** The live smoother in `monitor.py` calls `db.get_recent_entries(n)` — an indexed `LIMIT` query — to fetch the previous `STATE_CONFIRM_WINDOW - 1` frames. For ~24 hours before this was discovered it was calling `lib.storage.get_recent_entries(n)` instead, which tails the JSONL file with a fixed `n * 600` byte budget. Real entries had grown to ~1,455 bytes (shadow dict + experiments dict + faceBbox), so asking for 5 history frames was returning only 2 — the 4-of-6 consecutive rule could never fire, every present frame fell through to carry-forward, and carry-forward cascaded into `Unknown` indefinitely. The timeline showed 498 consecutive Unknown blocks in what should have been a clear Asleep stretch. The fix was twofold: (1) switch the live smoother's history read to SQLite (matches the architectural rule `read paths must use SQLite via lib/db.py`, which is already in the dual-write notes), and (2) make `storage.get_recent_entries` adaptive — double the read window on underflow — so the other callers (`alerts.should_burst`, `alerts.check_wake_confirmation`) stop silently getting fewer rows than they asked for. The lesson is less about the byte budget and more about **silent undercounts are the worst kind of bug in a smoothing rule**: the consumer can't tell the difference between "history had no matching run" and "history was truncated before the rule could see the run." Anything downstream of a rolling-window rule should assert that the window it received is the size it requested. Same-day follow-up: all runtime JSONL readers migrated to SQLite — `alerts.should_burst` / `check_wake_confirmation`, `detect.detect_empty_bassinet`, the cloud-fallback position heuristic in `monitor.py`, and `dashboard/app.py::api_sleep_stats` (which was previously slurping the entire JSONL on every request). JSONL read paths now exist only in training (`train_classifiers.py`) and historical backtest/audit tools (`cli.py`), both of which intentionally want the append-only log as ground truth.
+
+### Unknown → Awake absorption (added 2026-04-15)
+
+The temporal smoother's 4-of-6 consecutive-eye-state rule produces a lot of tolerable `Unknown` frames between confirmed states — every time BIRDEYE's face detector briefly loses the baby (hand over eyes, crib shift, face pressed into mattress, eye-state confidence dip), the run breaks and subsequent frames carry forward the previous state. When the previous state was also Unknown (e.g., long periods of face_not_visible during fussy play), the timeline shows large Unknown stretches that are almost certainly awake time from a human observer's perspective.
+
+The post-smoothing rule: **when a new `Awake` state is confirmed, any immediately-preceding contiguous run of `Unknown` + `babyPresent` frames whose total span is less than `UNKNOWN_ABSORB_MAX_MINUTES` (default 15) is retroactively reclassified as `Awake`.**
+
+| Approach | Accuracy | Complexity | Downgrade risk |
+|---|---|---|---|
+| None (Unknown stays Unknown) | Dashboard under-reports awake time | Zero | None, but data is misleading |
+| Symmetric (also Unknown → Asleep) | Over-applies to pre-wake ambiguity | Medium | Real "woke up briefly then back to sleep" gets laundered |
+| **Asymmetric Unknown → Awake only (chosen)** | Matches the observable signal — the wake is strong, the pre-wake ambiguity is unreliable | Low | Only risk is under-absorbing, which preserves the raw signal |
+
+**Where it runs.** The helper `unknown_prefix_to_absorb` in `lib/state.py` takes a candidate "current" entry and the recent history window, walks backward through contiguous Unknown+present frames, measures the span, and returns the rows to rewrite if the span is within budget. It's called from two places:
+
+- `monitor.py` (live path): after the current entry is persisted, it fetches a history window larger than the absorption budget (`max(STATE_CONFIRM_WINDOW, UNKNOWN_ABSORB_MAX_MINUTES + 5)` rows ≈ 20 minutes), calls the helper, and rewrites each absorbed historical row via `db.update_entry`. The write is post-insert so a failure partway through leaves the DB consistent at the pre-absorption state.
+- `scripts/backfill_state.py` (historical): after the pass-1 forward-smoothing sweep, a pass-2 single-pass walk accumulates contiguous Unknown runs and flushes them to Awake when a terminating Awake is within budget. A pass-3 diff against stored state builds the SQL update batch.
+
+**Boundaries that break the run.** Asleep, Awake, not_present, or any non-Unknown state stops the backward walk. A baby-removal (`not_present`) in the middle of the window means only the post-removal Unknown frames can be absorbed, not anything before the removal. `eye_state_edited = 1` corrections are stored in the `eye_state` column but not read by the absorber — the absorber operates on the derived `state` field only, so user eye-state corrections already propagate through the smoother on re-smooth.
 
 ### Frame Retention
 

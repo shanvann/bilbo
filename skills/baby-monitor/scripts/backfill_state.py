@@ -29,8 +29,12 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
-from lib.config import DATA_DIR, STATE_CONFIRM_WINDOW
-from lib.state import smooth_state_temporal
+from lib.config import (
+    DATA_DIR,
+    STATE_CONFIRM_WINDOW,
+    UNKNOWN_ABSORB_MAX_MINUTES,
+)
+from lib.state import _parse_ts, smooth_state_temporal
 
 
 def main():
@@ -51,12 +55,12 @@ def main():
     ).fetchall()
     print(f"scanned {len(rows)} entries from {args.db}")
 
+    # --- Pass 1: smooth every entry ---
     # Rolling window of already-smoothed entries. We feed smoothed `state`
     # back into the window so carry-forward behaves identically to the live
     # path (which reads history from DB where `state` is already smoothed).
     window: list[dict] = []
-    updates: list[tuple[str, str, str]] = []  # (timestamp, smoothed_state, data_json)
-    changed_by_direction: dict[str, int] = {}
+    all_entries: list[tuple[str, dict, str]] = []  # (timestamp, entry, stored_state)
 
     for row in rows:
         entry = json.loads(row["data"])
@@ -74,21 +78,48 @@ def main():
         smoothed = smooth_state_temporal(entry, window_slice)
         entry["state"] = smoothed
 
+        window.append(entry)
+        all_entries.append((row["timestamp"], entry, stored_state))
+
+    # --- Pass 2: Unknown → Awake absorption ---
+    # Walk forward, accumulate contiguous Unknown+babyPresent runs, and when
+    # we hit a terminating Awake, check whether the run's span is within
+    # UNKNOWN_ABSORB_MAX_MINUTES. If so, flip each Unknown in the run to
+    # Awake in-place (mutating the entry dict in all_entries).
+    n_absorbed = 0
+    pending_run: list[tuple[str, dict]] = []
+    for ts, entry, _ in all_entries:
+        smoothed = entry["state"]
+        is_unk_present = (smoothed == "Unknown" and entry.get("babyPresent"))
+
+        if is_unk_present:
+            pending_run.append((ts, entry))
+            continue
+
+        if smoothed == "Awake" and pending_run:
+            first_ts = _parse_ts(pending_run[0][0])
+            curr_ts = _parse_ts(ts)
+            if first_ts and curr_ts:
+                span_min = (curr_ts - first_ts).total_seconds() / 60.0
+                if span_min < UNKNOWN_ABSORB_MAX_MINUTES:
+                    for _u_ts, u_entry in pending_run:
+                        u_entry["state"] = "Awake"
+                        n_absorbed += 1
+        pending_run = []
+
+    # --- Pass 3: compare against stored_state and build update list ---
+    updates: list[tuple[str, str, str]] = []
+    changed_by_direction: dict[str, int] = {}
+    for ts, entry, stored_state in all_entries:
+        smoothed = entry["state"]
         if smoothed != stored_state:
             direction = f"{stored_state} -> {smoothed}"
             changed_by_direction[direction] = changed_by_direction.get(direction, 0) + 1
             if args.verbose:
-                print(f"  {row['timestamp']}  raw={raw_state}  {direction}")
-            updates.append((entry["timestamp"], smoothed, json.dumps(entry)))
-        elif entry.get("rawState") != stored_state and not entry.get("rawState"):
-            # Shouldn't happen — rawState was just seeded — but be safe.
-            updates.append((entry["timestamp"], smoothed, json.dumps(entry)))
+                print(f"  {ts}  raw={entry.get('rawState')}  {direction}")
+            updates.append((ts, smoothed, json.dumps(entry)))
 
-        # Append the post-smoothing entry to the window so downstream frames
-        # see the same history the live pipeline would have seen.
-        window.append(entry)
-
-    print(f"\nchanges: {len(updates)} entries")
+    print(f"\nchanges: {len(updates)} entries (including {n_absorbed} absorbed Unknown→Awake)")
     for direction, count in sorted(changed_by_direction.items(), key=lambda x: -x[1]):
         print(f"  {direction:40s} {count}")
 

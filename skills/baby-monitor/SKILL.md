@@ -28,8 +28,13 @@ macOS launchd (every 1 min) → monitor.py
     → full analysis, returns head position → saved for next tick's adaptive crop
   → temporal state smoothing: 4 consecutive eyes_open/closed in last 6 present frames → Awake/Asleep
     → else carry forward previous smoothed state (or Unknown); raw per-frame state preserved in `rawState`
-  → wake confirmation: 2/3 of last 3 entries Awake? → Telegram alert (now trivially satisfied post-smoothing)
+  → wake confirmation: 2/3 of last 3 entries Awake (after prior Asleep)? → Telegram alert (now trivially satisfied post-smoothing)
+  → asleep confirmation: 2/3 of last 3 entries Asleep (after prior Awake)? → Telegram alert
   → edge detection: DISABLED post-flip — see github issue #3
+
+macOS launchd (every 2 min) → watchdog.py
+  → newest entries.timestamp older than WATCHDOG_ALERT_AFTER_MIN? → Telegram alert
+  → recovered after outage? → Telegram "captures resumed" ping
 ```
 
 **Important:** The monitoring pipeline runs via macOS launchd — NOT via OpenClaw cron. This avoids dependency on Anthropic or any LLM for monitoring.
@@ -70,16 +75,19 @@ Head position is adaptive: when BIRDEYE falls back to the cloud API, the API ret
 
 - RTSP stream URL + OpenAI key: `/Users/shanit/.openclaw/workspace/.env.baby-monitor`
 - Vision prompt: `references/prompt.md`
-- Launchd plist: `~/Library/LaunchAgents/com.baby-monitor.plist` (60s interval)
+- Launchd plists: `~/Library/LaunchAgents/com.baby-monitor.plist` (60s interval), `com.baby-monitor-watchdog.plist` (120s interval), `com.baby-monitor-dashboard.plist` (persistent), `com.baby-monitor-retrain.plist` (daily, currently disabled)
 - Classifier models: `pipeline/models/presence_classifier.pt`, `pipeline/models/eye_state_classifier.pt`
 - Head state: `data/head-state.json`
+- Watchdog state: `data/watchdog-state.json` (outage/recovery state machine for the capture watchdog)
 
 ## Scheduling (launchd)
 
 ```bash
-launchctl list | grep baby-monitor                                       # status (exit 0 = ok)
-launchctl unload ~/Library/LaunchAgents/com.baby-monitor.plist  # stop
-launchctl load ~/Library/LaunchAgents/com.baby-monitor.plist    # start
+launchctl list | grep baby-monitor                                          # status (exit 0 = ok)
+launchctl unload ~/Library/LaunchAgents/com.baby-monitor.plist              # stop monitor
+launchctl load   ~/Library/LaunchAgents/com.baby-monitor.plist              # start monitor
+launchctl load   ~/Library/LaunchAgents/com.baby-monitor-watchdog.plist     # capture watchdog (every 2 min)
+launchctl load   ~/Library/LaunchAgents/com.baby-monitor-dashboard.plist    # dashboard (persistent)
 ```
 
 Logs: `data/system.log` (rotating, 5MB x 3), `data/cron-stdout.log`, `data/cron-stderr.log`
@@ -106,6 +114,12 @@ Logs: `data/system.log` (rotating, 5MB x 3), `data/cron-stdout.log`, `data/cron-
 | `monitor.py --backfill-shadow --hours N [--only-stale] [--limit N] [--dry-run]` | Re-run BIRDEYE inference on historical entries and write results into the **audit-trail `shadow` dict only** — does NOT touch the user-facing primary fields. Use after deploying a new model when you want the shadow audit brought up to date with the new weights. `--only-stale` skips entries already tagged with the deployed version. For a primary-field refresh (i.e. to rescue `eyeState` on pre-BIRDEYE-primary-flip frames so the state smoother has signal), use `scripts/backfill_birdeye_primary.py` instead. |
 | `monitor.py --verbose` | Print all log messages to stderr |
 | `run_single_inference.py <ts>` | Re-run BIRDEYE on the frame for one timestamp and update its `shadow` audit fields (does NOT touch user-facing primary fields or corrections). Thin wrapper around `lib.local_pipeline.run_birdeye_inference` and `birdeye_result_to_shadow_blob` — same shared helpers `monitor.py` uses, so the two paths cannot drift. Called by the dashboard's `/api/run-inference` button via subprocess. |
+
+### watchdog.py — capture-staleness watchdog
+
+Independent launchd job (`com.baby-monitor-watchdog`, 120s interval) — runs alongside the monitor, not from inside it. Reads the newest `entries.timestamp` via `db.get_last_entry()`. If the age exceeds `WATCHDOG_ALERT_AFTER_MIN` minutes (default 5), it sends a Telegram alert and persists `outage_started_at` / `last_alert_at` in `data/watchdog-state.json`. While an outage is ongoing, sends one reminder per `WATCHDOG_REMINDER_AFTER_MIN` (default 60). On recovery (newest timestamp is fresh again), sends a single "captures resumed after N min" ping and clears the state file.
+
+Catches: RTSP outage, monitor crash, launchd stall on the capture job, Wi-Fi disassociation. Doesn't catch: laptop off/unplugged — nothing on this machine runs in that case. The right fix for that is a push-style cloud heartbeat; not built yet.
 
 ### train_classifiers.py — retrain BIRDEYE models
 
@@ -135,6 +149,7 @@ skills/baby-monitor/
 │   ├── experiments_backfill.py     # Run registered shadow experiments against historical frames
 │   ├── backfill_birdeye_primary.py # Re-run BIRDEYE over a time window and write into the **primary** eyeState/faceBbox/presence+eye-confidence fields (NOT just the shadow audit). Skips `eye_state_edited=1` rows. Use when deploying a new model and you want the temporal state smoother to re-fire over refreshed eye-state signal. Pair with `backfill_state.py` afterwards.
 │   ├── backfill_state.py           # Walk the DB in timestamp order and re-run `smooth_state_temporal` on every entry, rewriting `state` + seeding `rawState`. Re-runnable if `STATE_CONFIRM_WINDOW`/`STATE_CONFIRM_RUN` change.
+│   ├── watchdog.py                 # Capture-staleness watchdog — own launchd job (every 2 min), Telegram alert when newest entry is stale, state in data/watchdog-state.json
 │   ├── run_single_inference.py     # Dashboard re-run button entry (subprocessed by Flask)
 │   ├── requirements.txt            # All Python deps
 │   └── lib/
@@ -158,7 +173,10 @@ skills/baby-monitor/
 │   ├── head-state.json             # Last known head position
 │   ├── frames/                     # Captured JPEG frames (6GB cap, ~7 days)
 │   ├── system.log                  # Pipeline log (rotating)
-│   └── alert-state.json            # Wake alert cooldown
+│   ├── alert-state.json            # Wake + asleep alert cooldowns (lastActiveWakeAlert, lastAsleepAlert)
+│   ├── watchdog-state.json         # Capture-watchdog outage/recovery state machine
+│   ├── watchdog-stdout.log         # Watchdog launchd stdout
+│   └── watchdog-stderr.log         # Watchdog launchd stderr (this is where the watchdog log lines actually land)
 ├── references/
 │   ├── prompt.md                   # Cloud API vision prompt
 │   └── baby-profile.md            # Baby profile
@@ -220,9 +238,13 @@ The unsmoothed per-frame reading is preserved in `rawState` so history can be re
 
 **Unknown → Awake absorption (2026-04-15).** After smoothing, if the new `state` is `Awake`, any immediately-preceding contiguous run of `Unknown` + `babyPresent` frames whose total span is less than `UNKNOWN_ABSORB_MAX_MINUTES` (default 15) is retroactively re-flipped to `Awake`. The rationale: if BIRDEYE briefly lost the face (hand over eyes, crib shift, face pressed into mattress) and then caught 4 consecutive `eyes_open`, the ambiguous gap was almost certainly "awake but momentarily unreadable", not a period of actual sleep. The rule is **asymmetric by design** — the analogous Unknown → Asleep direction is not applied because pre-wake ambiguity is a weaker signal than the wake itself and the cost of mis-labeling ambiguous time as sleep is higher. The absorption helper lives in `lib/state.py::unknown_prefix_to_absorb`, the live path applies it after `db.insert_entry` by rewriting historical rows via `db.update_entry`, and `scripts/backfill_state.py` applies it in a second pass after the forward smoothing sweep.
 
-### Active wake alerts
+### Active wake + asleep alerts
 
-When the baby is detected as "Awake" after being "Asleep", the pipeline confirms by checking the last 3 entries. If 2+ show Awake → sends Telegram alert with inline feedback buttons. 30-min cooldown between alerts, reset when baby is removed. **Note:** since the primary `state` is now temporally confirmed (4-of-6 consecutive), the 2-of-3 wake check is trivially satisfied on any Asleep→Awake transition and acts mainly as the prior-Asleep gate + cooldown enforcer.
+When the baby's smoothed state transitions to "Awake" after being "Asleep" (or vice versa), the pipeline confirms by checking the last 3 entries. If 2+ agree, sends a Telegram alert. Wake alerts include inline feedback buttons; asleep alerts are plain text. Each direction has its own 30-min cooldown (`lastActiveWakeAlert`, `lastAsleepAlert` in `data/alert-state.json`); both reset together when baby is removed (`babyPresent=False`) so the next placement session starts fresh.
+
+The asleep alert is **gated on a prior `Awake` in the lookback window** so it only fires on awake→asleep drift, not on "baby placed already-asleep" (which the caretaker just did and doesn't need a ping for).
+
+**Note:** since the primary `state` is now temporally confirmed (4-of-6 consecutive), the 2-of-3 confirmation is trivially satisfied on any state transition and acts mainly as the prior-state gate + cooldown enforcer.
 
 ```bash
 python3 scripts/monitor.py --feedback <alert_id> yes|no   # record feedback

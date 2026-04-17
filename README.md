@@ -30,7 +30,8 @@ A baby bassinet monitor that captures a frame every minute from an IP camera, cl
 
 - **Tracks sleep state** — Asleep, Awake, Unknown — via cloud API (GPT-4o) as production, with BIRDEYE (two MobileNetV3-Small classifiers) running as shadow for validation
 - **Shadow pipeline** — BIRDEYE runs on every frame in parallel with the cloud API. Results are logged and compared but not used for decisions until alignment reaches 95%
-- **Detects wake-ups** — confirms by checking last 3 entries (2/3 must show Awake), then sends a Telegram alert with feedback buttons
+- **Detects wake-ups and sleep-onset** — confirms by checking last 3 entries (2/3 agreeing), then sends a Telegram alert. Wake alerts include feedback buttons; asleep alerts fire only on awake→asleep transitions (skipped on placed-already-asleep).
+- **Capture watchdog** — independent launchd job (every 2 min) that pings Telegram if no new frame has been written in `WATCHDOG_ALERT_AFTER_MIN` minutes. Catches RTSP outages, monitor crashes, launchd stalls; doesn't catch laptop-off (nothing runs at all).
 - **Safety alerts** — immediate notification if baby is pressed against the bassinet side
 - **Dashboard** — live camera feed, timeline, frame-by-frame review with eye state correction, block-level labeling, model performance metrics, training stats, retrain button
 - **Continuous improvement** — corrections from dashboard feed back into retraining. Model versions are tracked with metrics, rollback support, and post-retrain re-inference
@@ -47,8 +48,13 @@ launchd (every 1 min) → capture frame (ffmpeg)
   → Compare shadow vs prod → log alignment
   → Dual-write: SQLite (primary) + JSONL (backup)
   → Temporal smoothing: 4-of-6 consecutive eyes_open/closed → Awake/Asleep (carry forward otherwise)
-  → Wake detection: 2/3 of last 3 entries Awake? → Telegram alert
+  → Wake detection: 2/3 of last 3 entries Awake (after prior Asleep)? → Telegram alert
+  → Asleep detection: 2/3 of last 3 entries Asleep (after prior Awake)? → Telegram alert
   → Head position from cloud API → saved for birdeye's next crop
+
+launchd (every 2 min) → watchdog.py
+  → newest DB timestamp older than WATCHDOG_ALERT_AFTER_MIN? → Telegram alert
+  → recovered after outage? → Telegram "captures resumed" ping
 ```
 
 ```
@@ -92,9 +98,10 @@ TELEGRAM_CHAT_ID="123456789"
 ### Start Monitoring
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.baby-monitor.plist        # monitor (every 1 min)
+launchctl load ~/Library/LaunchAgents/com.baby-monitor.plist           # monitor (every 1 min)
 launchctl load ~/Library/LaunchAgents/com.baby-monitor-dashboard.plist  # dashboard (persistent)
 launchctl load ~/Library/LaunchAgents/com.baby-monitor-retrain.plist    # daily retrain (12am ET)
+launchctl load ~/Library/LaunchAgents/com.baby-monitor-watchdog.plist   # capture watchdog (every 2 min)
 ```
 
 ## Skills
@@ -115,6 +122,7 @@ launchctl load ~/Library/LaunchAgents/com.baby-monitor-retrain.plist    # daily 
 | `scripts/lib/experiments.json` | Data-driven shadow experiment manifest. Edited atomically by `promote_experiment.py` during a flip. |
 | `scripts/experiments_backfill.py` | Run registered shadow experiments against historical frames so the dashboard has immediate comparison data after a new experiment lands. |
 | `scripts/promote_experiment.py` | **One-command shadow → prod promotion.** Bundles the 12-step flip (snapshot, copy, meta update, metrics patch, stale-key cleanup, manifest edit, backfill, reinfer, launchd reload). Rollback is the same command pointed at the legacy snapshot tag. See `docs/shadow-to-prod-playbook.md`. |
+| `scripts/watchdog.py` | Independent capture-staleness watchdog (own launchd job, every 2 min). Reads newest `entries.timestamp` via SQLite; if older than `WATCHDOG_ALERT_AFTER_MIN` minutes, sends a Telegram alert and tracks state in `data/watchdog-state.json`. Sends a recovery ping when captures resume. Reuses `lib.alerts.send_telegram_alert` so the urllib + ssl path is the same as wake/asleep alerts. |
 | `dashboard/app.py` | Flask dashboard with training APIs |
 | `references/prompt.md` | Cloud API prompt (includes head position) |
 | `docs/shadow-to-prod-playbook.md` | Full lifecycle walkthrough: train → register → backfill → observe → promote → rollback. **Read this before shipping a new eye-state model.** |
@@ -331,6 +339,24 @@ A single "Awake" frame could be noise (classifier error, motion blur). We need a
 
 **Decision:** Look-back confirmation. Requiring 2/3 entries to show "Awake" filters noise without blocking the pipeline. At 1-min intervals, confirmation takes ~3 minutes of consecutive captures (was ~12 min at the old 4-min cadence). The window is hardcoded at 3 frames in `alerts.check_wake_confirmation` as `[-3:]`; if you want to widen it for lower false-positive risk at the faster capture rate, parameterize that slice and the `BURST_AWAKE_THRESHOLD` config constant together.
 
+**Asleep alert (mirror).** `alerts.should_alert_asleep` + `alerts.check_asleep_confirmation` are symmetric to the wake pair: 2/3 of last 3 frames `Asleep` confirms a sleep-onset transition, gated on a prior `Awake` in the `WAKE_WINDOW` lookback so the alert fires only on awake→asleep drift, not on a baby placed already-asleep (which the caretaker just did anyway). Independent 30-min cooldown via `lastAsleepAlert` in `alert-state.json`; both cooldowns reset together on `babyPresent=False` so the next placement session starts fresh.
+
+### Capture Watchdog
+
+Yesterday's monitoring outage (2026-04-16: 16h44m gap) was invisible until the next morning, because nothing alerts when the monitor itself stops working — wake/asleep alerts depend on the monitor running. The watchdog closes that loop.
+
+| Approach | Detects | Doesn't detect | Cost |
+|----------|---------|----------------|------|
+| In-monitor self-check | Single capture failures | Monitor crashed entirely; launchd not firing | Free (already in pipeline) |
+| **Independent launchd job (chosen)** | RTSP outage, monitor crash, launchd stall | Laptop off/unplugged | Tiny (one SQL `MAX(timestamp)` query every 2 min) |
+| Push-style cloud heartbeat | All of the above + laptop off | Cloud down | Higher (need a cloud endpoint) |
+
+**Decision:** Independent launchd job (`com.baby-monitor-watchdog`) running every 2 min. It reads the newest `entries.timestamp` from SQLite, and if it's older than `WATCHDOG_ALERT_AFTER_MIN` (default 5 min), it sends a Telegram alert. State machine in `data/watchdog-state.json` tracks `outage_started_at` / `last_alert_at` so a multi-hour outage gets one initial ping, one reminder per `WATCHDOG_REMINDER_AFTER_MIN` (default 60 min), and one "captures resumed" ping on recovery — no spam, but no silent multi-hour gaps either.
+
+The "laptop off" failure mode is left uncovered. The right fix for that is a push-style heartbeat to a cloud endpoint that alerts when it stops hearing from the monitor; out of scope for the current iteration. Mitigated separately by `pmset -a sleep 0 disksleep 0 autopoweroff 0 standby 0` so the laptop won't enter idle sleep while plugged in.
+
+**Side-note on durability of `caffeinate`-based sleep prevention.** Until 2026-04-17 the only thing keeping the laptop awake was a long-running `caffeinate -dims` process — fragile (dies on reboot or session end). Switched to `pmset -a` settings so sleep is disabled at the system level regardless of process state.
+
 ### Temporal State Smoothing — added 2026-04-14
 
 The primary `state` field was originally derived per-frame from the eye-state classifier (`eyes_open → Awake`, `eyes_closed → Asleep`). That's brittle: one mis-classified frame or a one-second REM blink would flip the state and make the timeline look like dozens of tiny wake-ups between real sleep blocks. The wake alert had its own 2-of-3 look-back confirmation on top, but the stored `state` itself — the thing the dashboard Timeline, Events feed, and SQL aggregations read — was still raw per-frame.
@@ -499,6 +525,7 @@ All data files are gitignored:
 - `data/frames/` — captured camera frames (10 GB cap, ~17 days at 1-min intervals)
 - `data/training-state.json` — PID-based training run state
 - `data/head-state.json` — last known head position
+- `data/watchdog-state.json` — capture-watchdog outage/recovery state machine
 - `*.log` — system and cron logs (rotating, 5MB x 3)
 - `*.pt` — trained model weights
 - `venv/` — Python 3.12 virtualenv

@@ -3,6 +3,7 @@
 import json
 import logging
 import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from .config import (
     ALERT_LABELS,
     ALERT_RULES,
     ALERT_STATE_FILE,
+    ASLEEP_COOLDOWN_MIN,
     BURST_AWAKE_THRESHOLD,
     EDGE_ALERT_COOLDOWN_MIN,
     JSONL_FILE,
@@ -116,6 +118,80 @@ def should_burst(current_entry: dict) -> bool:
     return True
 
 
+def should_alert_asleep(current_entry: dict) -> bool:
+    """Mirror of should_burst, for Asleep-transition alerts.
+
+    Triggers when:
+      - Baby is present and smoothed state is "Asleep"
+      - Previous entries show baby was "Awake" recently (drifted off,
+        not placed-already-asleep)
+      - Not in cooldown from a recent asleep alert
+    """
+    if not current_entry.get("babyPresent"):
+        return False
+    if current_entry.get("state") != "Asleep":
+        return False
+
+    recent = get_db().get_recent_entries(WAKE_WINDOW)
+    recent_present = [e for e in recent if e.get("babyPresent")]
+    if not recent_present:
+        return False
+    states = [e.get("state", "Unknown") for e in recent_present]
+    if "Awake" not in states:
+        log.debug("asleep-alert: Asleep detected but no prior Awake in window, skipping")
+        return False
+
+    if ALERT_STATE_FILE.exists():
+        try:
+            alert_state = json.loads(ALERT_STATE_FILE.read_text())
+            last_alert = alert_state.get("lastAsleepAlert")
+            if last_alert:
+                last_ts = datetime.fromisoformat(last_alert.replace("Z", "+00:00")).replace(tzinfo=None)
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                elapsed_min = (now - last_ts).total_seconds() / 60
+                if elapsed_min < ASLEEP_COOLDOWN_MIN:
+                    log.info("asleep-alert: Asleep detected but in cooldown (%.0f min since last alert)",
+                             elapsed_min)
+                    return False
+        except Exception as e:
+            log.debug("asleep-alert: error reading alert state: %s", e)
+
+    log.info("asleep-alert: Asleep confirmed after Awake — triggering notification")
+    return True
+
+
+def check_asleep_confirmation(current_entry: dict) -> dict | None:
+    """Confirm Asleep transition by looking at recent smoothed states.
+
+    Mirrors check_wake_confirmation. The smoothed `state` field is already
+    temporally confirmed (STATE_CONFIRM_RUN of STATE_CONFIRM_WINDOW), so
+    this is a light second guard — 2+ of the last 3 baby-present frames
+    smoothed to Asleep.
+    """
+    recent = get_db().get_recent_entries(6)
+    present = [e for e in recent if e.get("babyPresent")][-3:]
+    all_states = [e.get("state", "Unknown") for e in present]
+
+    asleep_count = all_states.count("Asleep")
+    log.info("asleep-confirm: recent states=%s asleep=%d/%d threshold=%d",
+             all_states, asleep_count, len(all_states), BURST_AWAKE_THRESHOLD)
+
+    if asleep_count >= BURST_AWAKE_THRESHOLD:
+        log.info("asleep-confirm: CONFIRMED asleep (%d/%d Asleep)", asleep_count, len(all_states))
+        return {
+            "type": "asleep",
+            "states": all_states,
+            "asleep_count": asleep_count,
+            "total_frames": len(all_states),
+            "last_state": all_states[-1] if all_states else "Unknown",
+            "last_position": current_entry.get("sleepPosition", "Unknown"),
+            "timestamp": current_entry.get("timestamp", ""),
+        }
+    log.info("asleep-confirm: NOT confirmed (%d/%d Asleep) — suppressing",
+             asleep_count, len(all_states))
+    return None
+
+
 def check_wake_confirmation(current_entry: dict) -> dict | None:
     """Confirm wake by looking at recent natural entries (no extra captures).
 
@@ -165,6 +241,8 @@ def save_alert_state(alert_type: str):
             pass
     if alert_type == "active_wake":
         state["lastActiveWakeAlert"] = now
+    elif alert_type == "asleep":
+        state["lastAsleepAlert"] = now
     ALERT_STATE_FILE.write_text(json.dumps(state, indent=2))
     log.debug("alert-state: saved %s at %s", alert_type, now)
 
@@ -217,16 +295,21 @@ def get_alert_stats() -> dict:
 
 
 def reset_wake_cooldown():
-    """Reset wake alert cooldown (called when baby is taken out)."""
-    if ALERT_STATE_FILE.exists():
-        try:
-            state = json.loads(ALERT_STATE_FILE.read_text())
-            if "lastActiveWakeAlert" in state:
-                del state["lastActiveWakeAlert"]
-                ALERT_STATE_FILE.write_text(json.dumps(state, indent=2))
-                log.debug("alert-state: reset active wake cooldown (baby removed)")
-        except Exception:
-            pass
+    """Reset wake + asleep alert cooldowns (called when baby is taken out)."""
+    if not ALERT_STATE_FILE.exists():
+        return
+    try:
+        state = json.loads(ALERT_STATE_FILE.read_text())
+        changed = False
+        for key in ("lastActiveWakeAlert", "lastAsleepAlert"):
+            if key in state:
+                del state[key]
+                changed = True
+        if changed:
+            ALERT_STATE_FILE.write_text(json.dumps(state, indent=2))
+            log.debug("alert-state: reset wake + asleep cooldowns (baby removed)")
+    except Exception:
+        pass
 
 
 def send_telegram_alert(message: str, env: dict, alert_id: str = None):

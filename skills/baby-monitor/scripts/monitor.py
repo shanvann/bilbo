@@ -55,6 +55,7 @@ from lib.local_pipeline import (
 from lib.experiments import run_all as run_experiments
 from lib.alerts import (
     check_alerts,
+    check_asleep_confirmation,
     check_edge_alert,
     check_wake_confirmation,
     get_alert_stats,
@@ -63,6 +64,7 @@ from lib.alerts import (
     reset_wake_cooldown,
     save_alert_state,
     send_telegram_alert,
+    should_alert_asleep,
     should_burst,
 )
 from lib.storage import append_entry
@@ -446,6 +448,28 @@ def main():
                     send_telegram_alert(wake_msg, env, alert_id=alert_id)
                     save_alert_state("active_wake")
                     log_alert_feedback(alert_id, wake_alert)
+
+            if should_alert_asleep(entry):
+                asleep_alert = check_asleep_confirmation(entry)
+                if asleep_alert:
+                    log.info("pipeline: ASLEEP confirmed (%d/%d Asleep)",
+                             asleep_alert["asleep_count"], asleep_alert["total_frames"])
+                    ts_str = asleep_alert["timestamp"]
+                    try:
+                        ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        import zoneinfo
+                        et_tz = zoneinfo.ZoneInfo("America/New_York")
+                        local_time = ts_dt.astimezone(et_tz).strftime("%I:%M %p")
+                    except Exception:
+                        local_time = ts_str
+                    asleep_msg = (
+                        f"😴 Baby asleep.\n"
+                        f"Confirmed: {asleep_alert['asleep_count']}/{asleep_alert['total_frames']} "
+                        f"recent frames show Asleep\n"
+                        f"First detected at {local_time}"
+                    )
+                    send_telegram_alert(asleep_msg, env)
+                    save_alert_state("asleep")
         else:
             # Baby removed — reset cooldown so next wake can trigger
             reset_wake_cooldown()

@@ -26,7 +26,12 @@ BILBO — a baby bassinet monitor. A Python pipeline captures RTSP frames every 
   - `scripts/lib/capture.py` — ffmpeg RTSP frame capture
   - `scripts/lib/alerts.py` — Telegram wake/safety alerts with cooldown logic
   - `scripts/lib/storage.py` — frame retention (oldest-first pruning at 10 GB cap)
+  - `scripts/lib/experiments.py` — shadow-experiment framework; every capture tick calls `run_all()` and stores results under `entry["experiments"][<name>]` without touching primary fields
   - `scripts/train_classifiers.py` — retraining with corrections + audit data, writes versioned model dirs
+  - `scripts/experiments_backfill.py` — run registered experiments against historical frames so the dashboard has immediate comparison data
+  - `scripts/promote_experiment.py` — atomic flip of a winning shadow experiment to prod (rename old model as `*_legacy` shadow, swap in the new one, optional re-inference)
+  - `scripts/bbox_impact.py` — A/B-measures whether dashboard-corrected face bboxes improve eye-state predictions vs the classifier's own crop
+  - `scripts/watchdog.py` — independent capture-staleness checker; runs via its own launchd job every 2 min, fires Telegram alert when the newest DB entry is older than `WATCHDOG_ALERT_AFTER_MIN`. State in `data/watchdog-state.json`.
   - `dashboard/app.py` — Flask app + training APIs
   - `references/prompt.md` — the GPT-4o vision prompt
   - `scripts/requirements.txt` — Python dependencies (torch, torchvision, opencv-python-headless, openai, scikit-learn, etc.)
@@ -95,6 +100,7 @@ launchctl list | grep baby-monitor                                              
 launchctl load   ~/Library/LaunchAgents/com.baby-monitor.plist             # capture (every 1 min)
 launchctl load   ~/Library/LaunchAgents/com.baby-monitor-dashboard.plist   # dashboard (persistent)
 launchctl load   ~/Library/LaunchAgents/com.baby-monitor-retrain.plist     # daily retrain (12am ET)
+launchctl load   ~/Library/LaunchAgents/com.baby-monitor-watchdog.plist    # capture-staleness watchdog (every 2 min)
 launchctl unload <plist>                                                            # to stop
 ```
 Logs land in `skills/baby-monitor/data/system.log`, `cron-stdout.log`, `cron-stderr.log`.
@@ -113,6 +119,7 @@ Logs land in `skills/baby-monitor/data/system.log`, `cron-stdout.log`, `cron-std
 - **Head position** — when the cloud API runs (BIRDEYE fallback path), it returns head coordinates which are stored in `state` (key: `head`) and used by BIRDEYE's adaptive crop on the next tick. Now rare since cloud API runs on ~1% of frames.
 - **Model versioning** — `pipeline/models/v_YYYYMMDD_HHMMSS/` with a `latest` symlink, last 20 kept. Each training run writes a `training_runs` row with full metrics; rollback flips the symlink. `run_birdeye_inference` reads the symlink target and tags every result with `shadowModelVersion`.
 - **Training state is PID-based** — CLI, dashboard, and cron all coordinate via `lib/training_state.py`. The dashboard's `/api/retrain` rejects starts when one is already running, and `/api/retrain/abort` kills by PID. Don't store training status in process-local globals.
+- **Shadow experiments** — alternative pipeline variants (e.g. larger eye-state crops, alternate thresholds) run alongside prod on every capture via `lib/experiments.py::run_all`. Results land in `entry["experiments"][<name>]` and are strictly read-only observers — a crashing experiment must never abort a tick (wrapped in try/except in `run_all`). Follow the standard result schema (`state`, `eyeState`, `eyeConfidence`, `modelVersion`, `latencyMs`, `ranAt`) so `db.get_experiment_stats` and the dashboard can render any experiment uniformly. Flow: register in `_REGISTRY` → `experiments_backfill.py` for historical coverage → review on dashboard → `promote_experiment.py` to flip.
 
 ## Conventions worth knowing
 

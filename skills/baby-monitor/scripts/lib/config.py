@@ -50,6 +50,7 @@ PIXEL_DIFF_TIMEOUT = 10
 # ---------------------------------------------------------------------------
 WAKE_SCORE_THRESHOLD = 4
 WAKE_COOLDOWN_MIN = 30
+ASLEEP_COOLDOWN_MIN = 30  # mirror of WAKE_COOLDOWN_MIN for Asleep-transition alerts
 WAKE_WINDOW = 24  # number of recent entries to scan for a prior Asleep state
                   # gating the wake alert. At 1-min capture cadence this is
                   # ~24 minutes of lookback (was 6 = 24 min at the old 4-min
@@ -109,6 +110,18 @@ HEAD_STATE_FILE = DATA_DIR / "head-state.json"
 CORRECTIONS_FILE = DATA_DIR / "corrections.jsonl"
 AUDIT_LOG_FILE = DATA_DIR / "audit-log.jsonl"
 TRAINING_STATE_FILE = DATA_DIR / "training-state.json"
+WATCHDOG_STATE_FILE = DATA_DIR / "watchdog-state.json"
+
+# ---------------------------------------------------------------------------
+# Capture watchdog
+# ---------------------------------------------------------------------------
+# Fires a Telegram alert when the DB hasn't seen a new entry in this many
+# minutes. Catches RTSP outages, launchd stalls, and script crashes — but
+# NOT laptop-off (nothing runs at all in that case).
+WATCHDOG_ALERT_AFTER_MIN = 5
+# If an outage is still ongoing after the first alert, send one reminder
+# every N minutes instead of going silent or spamming.
+WATCHDOG_REMINDER_AFTER_MIN = 60
 
 # Audit settings
 AUDIT_SAMPLE_SIZE = 50  # frames to spot-check per --audit run

@@ -14,22 +14,24 @@ A baby bassinet monitor that captures a frame every minute from an IP camera, cl
 - [Dashboard](#dashboard)
 - [Continuous Improvement Loop](#continuous-improvement-loop)
 - [Design Decisions](#design-decisions)
-  - [Shadow vs Production](#shadow-vs-production)
+  - [Eye-state classifier input resolution — flipped to 448 on 2026-04-14](#eye-state-classifier-input-resolution--flipped-to-448-on-2026-04-14)
+  - [Shadow vs Production (historical)](#shadow-vs-production-historical)
   - [Capture Interval](#capture-interval)
   - [Detection Pipeline Order](#detection-pipeline-order)
   - [Local vs Cloud Analysis](#local-vs-cloud-analysis)
   - [Wake Confirmation](#wake-confirmation)
+  - [Capture Watchdog](#capture-watchdog)
   - [Temporal State Smoothing — added 2026-04-14](#temporal-state-smoothing--added-2026-04-14)
   - [Unknown → Awake absorption (added 2026-04-15)](#unknown--awake-absorption-added-2026-04-15)
   - [Frame Retention](#frame-retention)
   - [Storage: SQLite vs JSONL](#storage-sqlite-vs-jsonl)
+- [Database Schema](#database-schema)
 - [Workspace Files](#workspace-files)
 - [Data (not in repo)](#data-not-in-repo)
 
 ## What It Does
 
-- **Tracks sleep state** — Asleep, Awake, Unknown — via cloud API (GPT-4o) as production, with BIRDEYE (two MobileNetV3-Small classifiers) running as shadow for validation
-- **Shadow pipeline** — BIRDEYE runs on every frame in parallel with the cloud API. Results are logged and compared but not used for decisions until alignment reaches 95%
+- **Tracks sleep state** — Asleep, Awake, Unknown — via on-device **BIRDEYE** (a 3-stage MobileNetV3-Small cascade: presence → face detection → eye-state) running as production. A cloud API (GPT-4o) is called only when BIRDEYE can't find a face or has low confidence — ~1–2% of non-empty frames post-flip (2026-04-12). The `shadow` sub-dict and `shadow_birdeye_*` columns are now an immutable audit trail of what the model said per frame, separate from the user-correctable primary fields.
 - **Detects wake-ups and sleep-onset** — confirms by checking last 3 entries (2/3 agreeing), then sends a Telegram alert. Wake alerts include feedback buttons; asleep alerts fire only on awake→asleep transitions (skipped on placed-already-asleep).
 - **Capture watchdog** — independent launchd job (every 2 min) that pings Telegram if no new frame has been written in `WATCHDOG_ALERT_AFTER_MIN` minutes. Catches RTSP outages, monitor crashes, launchd stalls; doesn't catch laptop-off (nothing runs at all).
 - **Safety alerts** — immediate notification if baby is pressed against the bassinet side
@@ -41,16 +43,25 @@ A baby bassinet monitor that captures a frame every minute from an IP camera, cl
 
 ## Architecture
 
+BIRDEYE-primary since 2026-04-12 (commit `7250067`). Before that, the cloud API was production and BIRDEYE ran as a shadow for validation; see [Shadow vs Production (historical)](#shadow-vs-production-historical) for the rationale behind the flip.
+
 ```
 launchd (every 1 min) → capture frame (ffmpeg)
-  → Shadow: BIRDEYE classifies frame (~40ms, logged but not used)
-  → Production: pixel-diff gate → cloud API (GPT-4o)
-  → Compare shadow vs prod → log alignment
-  → Dual-write: SQLite (primary) + JSONL (backup)
-  → Temporal smoothing: 4-of-6 consecutive eyes_open/closed → Awake/Asleep (carry forward otherwise)
-  → Wake detection: 2/3 of last 3 entries Awake (after prior Asleep)? → Telegram alert
-  → Asleep detection: 2/3 of last 3 entries Asleep (after prior Awake)? → Telegram alert
-  → Head position from cloud API → saved for birdeye's next crop
+  → Pixel-diff: empty bassinet? → store state=not_present, skip BIRDEYE
+  → BIRDEYE (3-stage cascade on CPU, ~130 ms):
+       presence → face detector → eye-state
+  → If BIRDEYE bails (no_face_detected / low_confidence / hard error):
+       Cloud API fallback (GPT-4o) writes primary fields; BIRDEYE result
+       is still stored as the `shadow` audit dict.
+  → Dual-write: SQLite (primary) + JSONL (append-only backup)
+  → Temporal smoothing: 4-of-6 consecutive eyes_open/closed → Awake/Asleep
+       (carry forward otherwise, Unknown as last resort)
+  → Unknown → Awake absorption: on a confirmed Awake, rewrite any
+       immediately-preceding contiguous Unknown+present run (<15 min)
+       back to Awake.
+  → Wake/Asleep alerts: 2/3 of last 3 entries match + prior opposite
+       state + 30-min cooldown → Telegram alert.
+  → If cloud API ran: save head position for BIRDEYE's next crop.
 
 launchd (every 2 min) → watchdog.py
   → newest DB timestamp older than WATCHDOG_ALERT_AFTER_MIN? → Telegram alert
@@ -61,7 +72,10 @@ launchd (every 2 min) → watchdog.py
 Continuous improvement loop:
   Dashboard correction → corrections table ──┐
   Audit (--audit)      → audit table       ──┼→ train_classifiers.py → versioned models
-  Cloud API labels     → entries table     ──┘
+  BIRDEYE + cloud-API  → entries table     ──┘        (label priority:
+  labels as training                                   corrections >
+  signal                                               audit > model
+                                                      labels)
                                                     ↓
                                             Post-retrain re-inference
                                             (verify corrected frames)
@@ -111,7 +125,7 @@ launchctl load ~/Library/LaunchAgents/com.baby-monitor-watchdog.plist   # captur
 **Key files:**
 | File | Purpose |
 |---|---|
-| `scripts/monitor.py` | Main pipeline — capture, shadow, prod, compare, log |
+| `scripts/monitor.py` | Main pipeline — capture → pixel-diff → BIRDEYE → cloud fallback → smooth → alert → dual-write |
 | `scripts/lib/db.py` | SQLite database — all read/write operations |
 | `scripts/lib/classifiers.py` | BIRDEYE — presence + eye state classifiers |
 | `scripts/lib/local_pipeline.py` | BIRDEYE orchestration |
@@ -121,6 +135,8 @@ launchctl load ~/Library/LaunchAgents/com.baby-monitor-watchdog.plist   # captur
 | `scripts/lib/experiments.py` | Shadow pipeline framework — `Experiment` base class, `EyeStateShadowExperiment` generic class, manifest-driven registry. New shadows are added by editing `experiments.json`, not Python source. |
 | `scripts/lib/experiments.json` | Data-driven shadow experiment manifest. Edited atomically by `promote_experiment.py` during a flip. |
 | `scripts/experiments_backfill.py` | Run registered shadow experiments against historical frames so the dashboard has immediate comparison data after a new experiment lands. |
+| `scripts/backfill_birdeye_primary.py` | Re-run BIRDEYE with the currently deployed weights over a time window and **write into the primary `eyeState` / `faceBbox` / `presenceConfidence` / `eyeConfidence` fields** (plus refresh the `shadow` audit dict). Skips `eye_state_edited=1` rows by default. Pair with `backfill_state.py` after. |
+| `scripts/backfill_state.py` | Re-smooth `state` + `rawState` over the primary `eyeState` signal for the whole DB. Cheap, re-runnable. Run after `backfill_birdeye_primary.py` or when smoothing thresholds change. |
 | `scripts/promote_experiment.py` | **One-command shadow → prod promotion.** Bundles the 12-step flip (snapshot, copy, meta update, metrics patch, stale-key cleanup, manifest edit, backfill, reinfer, launchd reload). Rollback is the same command pointed at the legacy snapshot tag. See `docs/shadow-to-prod-playbook.md`. |
 | `scripts/watchdog.py` | Independent capture-staleness watchdog (own launchd job, every 2 min). Reads newest `entries.timestamp` via SQLite; if older than `WATCHDOG_ALERT_AFTER_MIN` minutes, sends a Telegram alert and tracks state in `data/watchdog-state.json`. Sends a recovery ping when captures resume. Reuses `lib.alerts.send_telegram_alert` so the urllib + ssl path is the same as wake/asleep alerts. |
 | `dashboard/app.py` | Flask dashboard with training APIs |
@@ -129,17 +145,20 @@ launchctl load ~/Library/LaunchAgents/com.baby-monitor-watchdog.plist   # captur
 
 **CLI modes:**
 ```bash
-monitor.py                           # full pipeline (cron runs this)
-monitor.py --dry-run                 # test without writing
-monitor.py --retrain                 # retrain with pending corrections
-monitor.py --retrain --force         # retrain even if no new corrections (e.g. after code changes)
-monitor.py --eval-corrections        # re-eval the deployed model on corrections (no retrain; useful after a rollback)
-monitor.py --audit --sample 50       # spot-check birdeye vs cloud API
-monitor.py --list-models             # show model versions + metrics
-monitor.py --rollback VERSION        # revert to previous model
-monitor.py --backtest --birdeye      # test birdeye accuracy
-monitor.py --status                  # system health
-monitor.py --last 10                 # recent log entries
+monitor.py                                          # full pipeline (launchd runs this every 1 min)
+monitor.py --dry-run                                # test without writing
+monitor.py --capture-only                           # grab one frame and exit
+monitor.py --analyze FRAME                          # re-run cloud API on an existing frame
+monitor.py --retrain                                # retrain with pending corrections
+monitor.py --retrain --force                        # retrain even if no new corrections
+monitor.py --eval-corrections                       # re-eval the deployed model on corrections (no retrain)
+monitor.py --audit --sample 50                      # spot-check BIRDEYE vs cloud API disagreements
+monitor.py --list-models                            # show model versions + metrics
+monitor.py --rollback VERSION                       # revert to a previous model
+monitor.py --backtest --birdeye                     # BIRDEYE accuracy vs cloud API ground truth
+monitor.py --status                                 # system health (gaps, disk, recent stats)
+monitor.py --last 10                                # recent log entries
+monitor.py --backfill-shadow --hours 168 --only-stale  # re-run BIRDEYE on historical frames → SHADOW audit dict only
 
 bbox_impact.py                       # A/B eye-state on predicted vs corrected bbox, caches into `state`
 bbox_impact.py --limit 20 --verbose  # iterate during development
@@ -205,44 +224,53 @@ Live at `http://localhost:5555`. Runs as a persistent launchd service.
    - Per-frame: detection method, model version, eye state label, retrain status badge
    - Block-level label override (apply to all frames at once)
    - Pending retrain count per block
-5. **BIRDEYE Classifiers** — combined production + training view (24h/7d):
-   - Three columns: Data & Training | Presence | Eye State
-   - Per-classifier: production headlines (Macro F1, Accuracy from shadow)
-   - Confusion matrices vs Cloud API, per-class P/R/F1
-   - vs Corrections accuracy
-   - Training validation: val accuracy, macro F1, epochs, val loss, error rates, per-class with deltas
-   - Corrections tracking, training data sources, run timing
-   - Model version, rollback badge, retrain button + abort
-6. **Pipeline** — selectable time range (10m to 1 week):
-   - Prod cost, shadow latency, monitoring gaps
-   - Stacked bars: production pipeline + shadow alignment
-7. **Recent Events** — state transitions (placed/removed/fell asleep/woke up), selectable count
+5. **BIRDEYE Classifiers** (Models tab) — combined production + training view, selectable range (6h/12h/24h/7d):
+   - Stacked rows per stage: Data & Training · Presence · Face Detection · Eye State (was 4 columns until 2026-04-18)
+   - Per-stage headline: BIRDEYE Macro F1 + Accuracy vs reviewed/corrected ground truth. Cloud API comparisons removed 2026-04-18 — cloud runs on <2% of frames post-flip, samples too small to be meaningful.
+   - Face Detection: Detection Rate + Frames + IoU vs dashboard-drawn corrections + bbox-impact A/B (eye-state accuracy on predicted vs corrected bbox, per-class).
+   - Training Validation (collapsible): train/val/test split counts, val + test accuracy/macro-F1, epochs, val loss, per-class P/R/F1 with deltas.
+   - Corrections pending/trained, run timing, data sources, model version, rollback badge, retrain button + abort.
+6. **Pipeline** (Models tab) — selectable range (10m–1w): cloud cost, BIRDEYE latency, monitoring gaps (>10 min).
+7. **Pipeline History** (Models tab, added 2026-04-18) — per-ET-day table of how each captured frame was decided: Captures · Pixel-diff · BIRDEYE · Cloud API (each shown as count + % of captures) · Cost (cloud × $0.01) · BIRDEYE model version(s) (% of BIRDEYE's slice, sums to ~100%). 7/14/30-day window selector. Makes the pre/post-flip cost delta visible at a glance.
+8. **Daily Recap** (Events tab, added 2026-04-18) — stitches a day's frames into an MP4 time-lapse via ffmpeg. Date picker + fps selector (15/30/60), server-side cache under `data/videos/recap_<date>_fps<N>.mp4` reused as long as the frame count matches. First generation ~8–30 s; cache hit is instant.
+9. **Recent Events** (Events tab) — state transitions (placed/removed/fell asleep/woke up), selectable count.
 
-**Training APIs:**
+**APIs:**
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/api/training-status` | GET | Run status (PID-based), metrics, pending count |
 | `/api/retrain` | POST | Start retraining (rejects if already running) |
 | `/api/retrain/abort` | POST | Kill running training by PID |
 | `/api/monitor-stats` | GET | Model performance (SQLite aggregation) |
+| `/api/pipeline-history` | GET | `?days=N` (clamped 1–90). Per-ET-day detection-method breakdown + cost + BIRDEYE model versions. Powers the Pipeline History table. |
+| `/api/recap/generate` | POST | `{date, fps}`. Stitches a day's frames into MP4 via ffmpeg, caches under `data/videos/`. Returns `{status, cached, video_url, frame_count, duration_sec, size_bytes}`. |
+| `/api/recap/video` | GET | `?name=recap_<date>_fps<N>.mp4`. Range-capable MP4 delivery for the recap `<video>` element. |
 
 ## Continuous Improvement Loop
 
 ```
-1. Monitor    — shadow birdeye runs on every frame, compared to prod
-2. Review     — dashboard shows alignment %, frames where birdeye disagrees
-3. Correct    — edit eye state per-frame or per-block in dashboard
-4. Retrain    — click dashboard button, CLI --retrain, or daily 12am cron
+1. Monitor    — BIRDEYE decides every non-empty frame; cloud API fallback
+                on ~1-2% of frames writes the shadow audit dict anyway
+2. Review     — dashboard shows BIRDEYE vs corrected-ground-truth Macro F1,
+                block-level review checkboxes build up trusted labels
+3. Correct    — edit eye state per-frame or per-block in dashboard; also
+                draw corrected face bboxes for IoU + bbox-impact analyses
+4. Retrain    — manual only (daily cron is disabled); click dashboard
+                button or run `monitor.py --retrain`
 5. Verify     — post-retrain re-inference on corrected frames
-6. Track      — model versions with metrics, deltas, rollback support
-7. Promote    — when alignment ≥95%, switch birdeye from shadow to prod
+6. Track      — versioned model dirs with metrics, deltas, rollback
+7. Shadow-experiment a new candidate — train at an alternate crop size
+                / architecture, register in `experiments.json`, observe
+                delta on the dashboard, flip with `promote_experiment.py`
 ```
 
-**Label priority:** dashboard corrections > audit disagreements > cloud API labels
+**Label priority:** dashboard corrections > audit disagreements > cloud/BIRDEYE model labels.
 
-**Model versioning:** timestamped directories (`models/v_YYYYMMDD_HHMMSS/`), `latest` symlink, training-log.jsonl with full metrics, keeps last 20 versions.
+**Model versioning:** timestamped directories (`pipeline/models/v_YYYYMMDD_HHMMSS/`), `latest` symlink, `training_runs` table for metrics, keeps last 20 versions.
 
 **Training state:** PID-based, works across CLI/dashboard/cron. Auto-detects zombie processes.
+
+**Retraining is manual-only.** The daily `com.baby-monitor-retrain.plist` cron exists but should stay disabled — cloud-API labels aren't trusted training signal without manual review first. Retrain when a batch of user corrections is ready.
 
 ## Design Decisions
 
@@ -261,7 +289,7 @@ On the adversarial subset (82 frames where the user had to correct the label), t
 
 The physics matched the hypothesis: `eyes_open` recognition needs enough pixels on the iris, `eyes_closed` is already above the resolution floor for the eyelash/lid features the model relies on. Latency went from ~15 ms to ~43 ms per inference — still well under budget given the 1-minute capture cadence.
 
-**Decision:** flipped. `EYE_STATE_INPUT_SIZE = 448` lives in `scripts/lib/config.py`. The prod path in `scripts/lib/local_pipeline.py` passes this to `EyeStateClassifier.classify()`. The old 224 weights are preserved at `pipeline/models/experiments/eye_state_224_legacy/latest/eye_state_classifier.pt` and run as an **inverted shadow experiment** — the dashboard's Shadow Experiments card now reports "new 448 prod vs old 224 legacy" so any regression on future data would become visible before anyone notices a missed wake alert.
+**Decision:** flipped. `EYE_STATE_INPUT_SIZE = 448` lives in `scripts/lib/config.py`. The prod path in `scripts/lib/local_pipeline.py` passes this to `EyeStateClassifier.classify()`. The old 224 weights are preserved at `pipeline/models/experiments/eye_state_224_legacy/latest/eye_state_classifier.pt` for rollback. The matching `eye_state_224_legacy` inverted shadow experiment (which ran the legacy model on every non-empty frame as a regression tripwire) was retired on **2026-04-18** once the 448 model had 6 days of clean production data — the registry entry was removed from `scripts/lib/experiments.json` but the weights and the historical shadow results in `entries.experiments` are preserved. Re-enable by restoring the JSON entry.
 
 **Rollback** is a single command — literally the same promotion flow pointed at the legacy snapshot:
 
@@ -273,21 +301,20 @@ No retraining, no data migration, no source-file edits. The promotion script han
 
 **Under the hood** the pipeline's input resolution is read from `pipeline/models/latest/meta.json`, a sidecar written alongside the weights. `config.EYE_STATE_INPUT_SIZE` reads that file on import — a fallback default of 224 kicks in if the sidecar is missing. This means: (a) flipping is a file-write, not a source edit, (b) rollback via the `latest` symlink automatically reverts the crop size because the meta.json in the old version dir is self-contained, (c) `train_classifiers.py` must write meta.json into every version dir it creates — otherwise flipping the symlink would silently revert the runtime to 224. That last invariant is enforced in the training script now (was added 2026-04-14 after a retrain briefly regressed prod by stripping the sidecar).
 
-### Shadow vs Production
+### Shadow vs Production (historical)
 
-How to safely deploy a new ML model without risking production quality.
+How we safely deployed BIRDEYE without risking production quality. This is the rationale behind the **2026-04-12 flip** (commit `7250067`); BIRDEYE has been primary ever since, and cloud API usage collapsed from ~every non-empty frame to <2%.
 
 | Approach | Risk | Data quality | Cost |
 |----------|------|-------------|------|
 | Direct deploy | High — bad model = missed wakes | No comparison data | Low |
 | A/B split | Medium — some frames get bad model | Partial comparison | Medium |
-| **Shadow mode (chosen)** | **Zero — cloud API handles all decisions** | **Every frame compared** | **Higher (cloud API on every non-empty frame)** |
+| **Shadow mode (chosen until alignment ≥95%)** | **Zero — cloud API handles all decisions** | **Every frame compared** | **~$1.20/day at 4-min cadence** |
+| **BIRDEYE-primary + cloud fallback (chosen post-flip)** | **Low — cloud catches low-confidence / no-face cases** | **Continuous via user corrections** | **~$0.24/day at 1-min cadence (~95% reduction vs pre-flip-at-1-min)** |
 
-**Decision:** Shadow mode. Cloud API is production, birdeye runs in parallel on every frame. Zero risk to production quality while building alignment data. Cost is higher but temporary — once alignment hits 95%, birdeye takes over and cloud API drops to fallback-only.
+**Decision:** Shadow mode for the build-up phase — cloud API was production and BIRDEYE ran in parallel on every frame for months while we accumulated alignment data. Once alignment crossed 95% and the corrections-driven retraining loop was stable, the pipeline flipped to BIRDEYE-primary with cloud API as the fallback on BIRDEYE bails (`no_face_detected`, `low_confidence`, hard error). The `shadow` sub-dict in every entry is now an immutable record of what BIRDEYE said, kept separate from the user-correctable primary fields.
 
-- **Direct deploy** — fast but dangerous. A regression in the model means missed wake events.
-- **A/B split** — reduces risk but some frames still get the untested model.
-- **Shadow mode (chosen)** — every frame gets both pipelines. Full comparison data for retraining. Cloud API cost is the price of safety.
+The flip day also bumped capture cadence from 4 min → 1 min (commit `0045243`, same day), because cloud cost was no longer the constraint. See the **Pipeline History** card on the Models tab for the per-day cost curve across the transition.
 
 ### Capture Interval
 
@@ -303,17 +330,15 @@ How often the camera grabs a frame determines how quickly we detect a wake-up an
 
 ### Detection Pipeline Order
 
-Three systems can analyze a frame (birdeye, pixel-diff, cloud API). The order they run in determines latency, cost, and resilience when one system is down.
+Three systems can analyze a frame (BIRDEYE, pixel-diff, cloud API). The order they run in determines latency, cost, and resilience when one system is down.
 
-| Order | Production | Shadow |
-|-------|-----------|--------|
-| birdeye → pixel-diff → cloud | Birdeye handles 98%, cloud is last resort | N/A |
-| **pixel-diff → cloud + shadow birdeye (chosen)** | **Cloud API is production, birdeye logs in parallel** | **Every frame compared** |
+| Order | Cost | Resilience | Notes |
+|-------|------|------------|-------|
+| pixel-diff → cloud + shadow BIRDEYE | ~$1.20/day at 4-min cadence | Cloud-dependent | Pre-flip; BIRDEYE ran every frame as shadow for validation |
+| **pixel-diff → BIRDEYE → cloud fallback (chosen, post-2026-04-12)** | **~$0.24/day at 1-min cadence** | **Cloud only needed on BIRDEYE bails (~1-2% of non-empty frames)** | BIRDEYE 3-stage cascade (presence → face → eye-state) handles the hot path on-device; cloud catches `no_face_detected` / `low_confidence` / hard errors. |
+| BIRDEYE only | $0 | Degrades when face is hidden; no recovery path | Would be ~98% accurate but the last 2% are the cases we care most about |
 
-**Decision:** Cloud API as production with birdeye shadow. During shadow phase, the reliable pipeline (pixel-diff → cloud API) handles all decisions while birdeye runs in parallel for comparison.
-
-- **Birdeye first** — the target architecture after promotion. Birdeye handles 98%, pixel-diff catches empties when birdeye fails, cloud API is last resort.
-- **Cloud first + shadow (chosen)** — current architecture while building trust in birdeye. Will flip to birdeye-first once alignment exceeds 95%.
+**Decision:** pixel-diff → BIRDEYE → cloud fallback. Pixel-diff cheaply gates out empty-bassinet frames before any model runs; BIRDEYE handles the vast majority of non-empty frames in ~130 ms on CPU; the cloud API is a correctness net for the hard cases BIRDEYE flags itself. The **Pipeline History** table on the dashboard is the running audit of this split.
 
 ### Local vs Cloud Analysis
 
@@ -321,11 +346,11 @@ The fundamental architecture question: run ML on-device, send frames to a cloud 
 
 | Approach | Latency | Cost | Accuracy | Privacy |
 |----------|---------|------|----------|---------|
-| **Cloud API + shadow (current)** | **2-5s** | **~$0.01/frame** | **High (GPT-4o)** | **Frames sent to OpenAI** |
-| Local + cloud fallback (target) | 40ms local, 2-5s fallback | ~$0.003/frame avg | 92%+ local, 100% with fallback | 98% on-device |
-| Local only | 40ms | $0 | 92% (face-down = unknown) | Full privacy |
+| Cloud-primary + BIRDEYE shadow (pre-flip) | 2-5 s | ~$0.01/frame on every non-empty | High (GPT-4o) on every frame | Frames sent to OpenAI |
+| **Local-primary + cloud fallback (chosen, post-2026-04-12)** | **~130 ms local, 2-5 s on ~1-2% fallbacks** | **~$0.24/day at 1-min cadence (~95% reduction)** | **~99% on reviewed/corrected ground truth; cloud backs up the hard cases** | **~99% on-device** |
+| Local only | ~130 ms | $0 | Degrades silently on face-occluded frames | Full privacy |
 
-**Decision:** Cloud API as production now, with a path to local-first. Shadow mode builds the alignment data needed to safely promote birdeye. The self-improving loop (corrections → retrain → re-infer → verify) means accuracy improves with every correction.
+**Decision:** Local-primary with cloud fallback. The shadow-mode phase built the alignment data needed to promote BIRDEYE safely; the corrections-driven retraining loop keeps it improving with every label review. Cloud API remains in the pipeline specifically for the frames BIRDEYE can't see clearly — retiring it entirely would mean silently missing the exact events we most want to catch.
 
 ### Wake Confirmation
 

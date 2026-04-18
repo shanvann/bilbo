@@ -4,8 +4,12 @@
 import csv
 import json
 import os
+import re
+import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,7 +18,7 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
 # Add scripts/ to path so we can import lib.db
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from lib.db import get_db
+from lib.db import get_db, get_entries
 
 app = Flask(__name__, static_folder="static")
 
@@ -22,6 +26,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SLEEP_LOG = DATA_DIR / "sleep-log.jsonl"
 ACTIVITY_CSV = DATA_DIR / "activity-log.csv"
 CORRECTIONS_LOG = DATA_DIR / "corrections.jsonl"
+VIDEOS_DIR = DATA_DIR / "videos"
 ET = timezone(timedelta(hours=-4))  # America/New_York (EDT)
 
 
@@ -813,6 +818,21 @@ def api_monitor_stats():
     return jsonify(db.get_monitor_stats(hours))
 
 
+@app.route("/api/pipeline-history")
+def api_pipeline_history():
+    """Per-ET-day detection-method breakdown for the Pipeline History card.
+
+    Query params:
+        days: lookback in days (default 14, clamped to [1, 90])
+    """
+    try:
+        days = int(request.args.get("days", 14))
+    except (TypeError, ValueError):
+        return jsonify({"error": "days must be an integer"}), 400
+    days = max(1, min(90, days))
+    return jsonify(get_db().get_pipeline_history(days))
+
+
 @app.route("/api/frame")
 def api_frame():
     frame_path = request.args.get("path", "")
@@ -825,6 +845,151 @@ def api_frame():
     if not os.path.isfile(requested):
         abort(404)
     return send_file(requested, mimetype="image/jpeg")
+
+
+# ---------------------------------------------------------------------------
+# Recap (time-lapse video)
+# ---------------------------------------------------------------------------
+# Stitches a day's frames into an MP4 via ffmpeg's concat demuxer.
+# Cache layout (under data/videos/):
+#   recap_<date>_fps<N>.mp4        — the video
+#   recap_<date>_fps<N>.meta.json  — {"frame_count": int, "generated_at": ISO}
+# Cache is reused when the current frame count for the date still matches.
+
+_RECAP_NAME_RE = re.compile(r"^recap_\d{4}-\d{2}-\d{2}_fps\d+\.mp4$")
+_ALLOWED_FPS = {15, 30, 60}
+_RECAP_TIMEOUT_SEC = 240
+
+
+def _resolve_ffmpeg() -> str:
+    # launchd-spawned processes get a stripped PATH, so shutil.which alone
+    # won't find /usr/local/bin/ffmpeg. Look in the usual Homebrew spots too.
+    for candidate in ("ffmpeg", "/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg"):
+        path = shutil.which(candidate) if "/" not in candidate else (candidate if os.path.isfile(candidate) else None)
+        if path:
+            return path
+    raise RuntimeError("ffmpeg not found on PATH or in standard Homebrew locations")
+
+
+def _recap_date_range_utc(date_str: str) -> tuple[str, str]:
+    """ET date (YYYY-MM-DD) → [start_utc, end_utc] ISO-Z strings (inclusive)."""
+    y, m, d = (int(x) for x in date_str.split("-"))
+    start_et = datetime(y, m, d, 0, 0, 0, tzinfo=ET)
+    end_et = datetime(y, m, d, 23, 59, 59, tzinfo=ET)
+    to_z = lambda dt: dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return to_z(start_et), to_z(end_et)
+
+
+def _stitch_frames(frame_paths: list[str], out_path: Path, fps: int) -> None:
+    """Run ffmpeg concat demuxer. Raises RuntimeError on non-zero exit."""
+    dur = 1.0 / fps
+    # concat demuxer list: each file needs an entry; a trailing `file` line
+    # without duration would get a 1-frame default, so we list the final
+    # image twice to make the last shown frame match the others.
+    lines = ["ffconcat version 1.0"]
+    for p in frame_paths:
+        lines.append(f"file {shlex.quote(p)}")
+        lines.append(f"duration {dur:.6f}")
+    lines.append(f"file {shlex.quote(frame_paths[-1])}")
+    list_text = "\n".join(lines) + "\n"
+
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as tf:
+        tf.write(list_text)
+        list_path = tf.name
+    try:
+        cmd = [
+            _resolve_ffmpeg(), "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "concat", "-safe", "0", "-i", list_path,
+            "-vf", "scale=720:-2,fps=" + str(fps),
+            "-c:v", "libx264", "-preset", "fast", "-crf", "24",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            str(out_path),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_RECAP_TIMEOUT_SEC)
+        if proc.returncode != 0:
+            raise RuntimeError(f"ffmpeg exited {proc.returncode}: {proc.stderr.strip()[:400]}")
+    finally:
+        try:
+            os.unlink(list_path)
+        except OSError:
+            pass
+
+
+@app.route("/api/recap/generate", methods=["POST"])
+def api_recap_generate():
+    body = request.get_json(silent=True) or {}
+    date_str = str(body.get("date", "")).strip()
+    try:
+        fps = int(body.get("fps", 30))
+    except (TypeError, ValueError):
+        return jsonify({"error": "fps must be an integer"}), 400
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
+        return jsonify({"error": "date must be YYYY-MM-DD"}), 400
+    if fps not in _ALLOWED_FPS:
+        return jsonify({"error": f"fps must be one of {sorted(_ALLOWED_FPS)}"}), 400
+    force = bool(body.get("force"))
+
+    start_utc, end_utc = _recap_date_range_utc(date_str)
+    entries = get_entries(start=start_utc, end=end_utc)
+    frame_paths = [e["frame"] for e in entries
+                   if e.get("frame") and os.path.isfile(e["frame"])]
+
+    if not frame_paths:
+        return jsonify({"status": "empty", "date": date_str, "fps": fps, "frame_count": 0})
+
+    VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
+    name = f"recap_{date_str}_fps{fps}.mp4"
+    out_path = VIDEOS_DIR / name
+    meta_path = VIDEOS_DIR / f"recap_{date_str}_fps{fps}.meta.json"
+
+    cached = False
+    if out_path.exists() and meta_path.exists() and not force:
+        try:
+            prev = json.loads(meta_path.read_text())
+            if prev.get("frame_count") == len(frame_paths) and prev.get("fps") == fps:
+                cached = True
+        except (OSError, json.JSONDecodeError):
+            cached = False
+
+    if not cached:
+        try:
+            _stitch_frames(frame_paths, out_path, fps)
+        except subprocess.TimeoutExpired:
+            return jsonify({"error": "ffmpeg timed out"}), 504
+        except RuntimeError as e:
+            return jsonify({"error": str(e)}), 500
+        meta = {
+            "frame_count": len(frame_paths),
+            "fps": fps,
+            "date": date_str,
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        meta_path.write_text(json.dumps(meta))
+
+    size = out_path.stat().st_size
+    return jsonify({
+        "status": "ready",
+        "cached": cached,
+        "date": date_str,
+        "fps": fps,
+        "frame_count": len(frame_paths),
+        "duration_sec": len(frame_paths) / fps,
+        "size_bytes": size,
+        "video_url": f"/api/recap/video?name={name}",
+    })
+
+
+@app.route("/api/recap/video")
+def api_recap_video():
+    name = request.args.get("name", "")
+    if not _RECAP_NAME_RE.match(name):
+        abort(400)
+    path = VIDEOS_DIR / name
+    if not path.is_file():
+        abort(404)
+    # send_file handles Range requests, which the <video> element uses for seeking.
+    return send_file(str(path), mimetype="video/mp4", conditional=True)
 
 
 if __name__ == "__main__":

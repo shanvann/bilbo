@@ -1132,21 +1132,17 @@ function renderFaceDetectionColumn() {
   let html = '';
 
   // --- Production headlines ---
-  html += '<div class="safety-source-label">Production (shadow)</div>';
+  // Fallback rate already shown in the card's meta line (top of Classifiers
+  // card). Confidence distribution dropped — near-binary detector, so
+  // min/avg/median/max carries little signal.
+  html += '<div class="safety-source-label">Production</div>';
   html += '<div class="safety-headline">';
 
-  // Detection rate
   html += '<div class="safety-headline-row" title="% of baby-present frames where a face was detected">';
   html += '<span class="safety-headline-label">Detection Rate</span>';
   html += '<span class="safety-headline-value ' + _safetyClass(face.detectionRate, [0.50, 0.75]) + '">'
     + Math.round(face.detectionRate * 100) + '%</span></div>';
 
-  // Fallback rate
-  html += '<div class="safety-headline-row" title="% of baby-present frames where face detection failed → cloud API fallback">';
-  html += '<span class="safety-headline-label">Fallback Rate</span>';
-  html += '<span class="safety-headline-value">' + Math.round(face.fallbackRate * 100) + '%</span></div>';
-
-  // Frame counts
   html += '<div class="safety-headline-row">';
   html += '<span class="safety-headline-label">Frames</span>';
   html += '<span class="safety-headline-value">' + face.detected + ' / ' + face.total + '</span></div>';
@@ -1257,23 +1253,12 @@ function renderFaceDetectionColumn() {
     html += '<div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px">ran ' + ranAt + staleWarning + ' · refresh: <code>python scripts/bbox_impact.py --force</code></div>';
   }
 
-  // --- Confidence distribution ---
-  if (face.confidence) {
-    const c = face.confidence;
-    html += '<div class="safety-source-label">Confidence Distribution</div>';
-    html += '<div class="train-details">';
-    html += '<div class="train-row"><span>Avg</span><span class="train-val">' + Math.round(c.avg * 100) + '%</span></div>';
-    html += '<div class="train-row"><span>Min</span><span class="train-val">' + Math.round(c.min * 100) + '%</span></div>';
-    html += '<div class="train-row"><span>Median</span><span class="train-val">' + Math.round(c.p50 * 100) + '%</span></div>';
-    html += '<div class="train-row"><span>Max</span><span class="train-val">' + Math.round(c.max * 100) + '%</span></div>';
-    html += '</div>';
-  }
-
   // --- Training validation metrics ---
   const faceMetrics = trainingData && trainingData.lastMetrics
     ? trainingData.lastMetrics.face_detect : null;
   if (faceMetrics) {
-    html += '<div class="safety-source-label" style="margin-top:14px">Training Validation</div>';
+    html += '<details class="cm-details" style="margin-top:14px">';
+    html += '<summary class="cm-toggle safety-source-label">Training Validation</summary>';
     html += '<div class="train-details">';
 
     // Dataset split counts — match the presence/eye-state layout
@@ -1312,6 +1297,7 @@ function renderFaceDetectionColumn() {
         + faceMetrics.val_loss + '</span></div>';
     }
     html += '</div>';
+    html += '</details>';
   }
 
   el.innerHTML = html;
@@ -1566,12 +1552,10 @@ function renderClassifierColumn(elId, type) {
 
   if (safety) {
     const bird = safety.birdeyeVsGT || {};
-    const cloud = safety.cloudVsGT || {};
     const gt = safetyData.groundTruth || {};
     const macroThresh = isPresence ? [0.90, 0.97] : [0.60, 0.85];
     const accThresh = isPresence ? [0.90, 0.97] : [0.75, 0.90];
     const hasBird = bird.total > 0;
-    const hasCloud = cloud.total > 0;
 
     // Ground truth source label
     const gtLabel = gt.total > 0
@@ -1584,21 +1568,10 @@ function renderClassifierColumn(elId, type) {
       html += '<div class="safety-headline-row" title="BIRDEYE macro F1 against reviewed + corrected ground truth"><span class="safety-headline-label">BIRDEYE Macro F1</span>';
       html += '<span class="safety-headline-value ' + _safetyClass(bird.macroF1, macroThresh) + '">'
         + Math.round(bird.macroF1 * 100) + '% <span style="font-size:0.7rem;color:var(--text-dim)">(' + bird.total + ')</span></span></div>';
-    }
-    if (hasCloud) {
-      html += '<div class="safety-headline-row" title="Cloud API macro F1 against reviewed + corrected ground truth"><span class="safety-headline-label">Cloud API Macro F1</span>';
-      html += '<span class="safety-headline-value ' + _safetyClass(cloud.macroF1, macroThresh) + '">'
-        + Math.round(cloud.macroF1 * 100) + '% <span style="font-size:0.7rem;color:var(--text-dim)">(' + cloud.total + ')</span></span></div>';
-    }
-    if (hasBird) {
+
       html += '<div class="safety-headline-row" title="BIRDEYE accuracy against ground truth"><span class="safety-headline-label">BIRDEYE Accuracy</span>';
       html += '<span class="safety-headline-value ' + _safetyClass(bird.accuracy, accThresh) + '">'
         + Math.round(bird.accuracy * 100) + '%</span></div>';
-    }
-    if (hasCloud) {
-      html += '<div class="safety-headline-row" title="Cloud API accuracy against ground truth"><span class="safety-headline-label">Cloud API Accuracy</span>';
-      html += '<span class="safety-headline-value ' + _safetyClass(cloud.accuracy, accThresh) + '">'
-        + Math.round(cloud.accuracy * 100) + '%</span></div>';
     }
     html += '</div>';
 
@@ -1611,16 +1584,7 @@ function renderClassifierColumn(elId, type) {
       html += '</details>';
     }
 
-    // Cloud API per-class P/R/F1 + collapsible confusion matrix
-    if (hasCloud && cloud.confusion) {
-      html += '<div class="safety-source-label">Cloud API vs Ground Truth</div>';
-      html += _renderPerClass(cloud, classes);
-      html += '<details class="cm-details"><summary class="cm-toggle">Confusion matrix</summary>';
-      html += _renderConfusion(cloud, classes);
-      html += '</details>';
-    }
-
-    if (!hasBird && !hasCloud) {
+    if (!hasBird) {
       html += '<div class="safety-empty">No ground truth data yet — review blocks in the timeline to build ground truth.</div>';
     }
   } else {
@@ -1637,7 +1601,8 @@ function renderClassifierColumn(elId, type) {
 
   if (metrics) {
     const pm = prevMetrics || {};
-    html += '<div class="safety-source-label" style="margin-top:14px">Training Validation</div>';
+    html += '<details class="cm-details" style="margin-top:14px">';
+    html += '<summary class="cm-toggle safety-source-label">Training Validation</summary>';
     html += '<div class="train-details">';
 
     // --- Dataset split counts ---
@@ -1701,6 +1666,7 @@ function renderClassifierColumn(elId, type) {
     }
 
     html += '</div>';
+    html += '</details>';
   }
 
   el.innerHTML = html;
@@ -2147,6 +2113,7 @@ async function loadAll() {
     loadSafetyStats(),
     loadBassinetChart(),
     loadPendingCorrections(),
+    loadPipelineHistory(),
   ]);
   document.getElementById('footer-refresh').textContent =
     'Last refreshed: ' + new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York' });
@@ -2191,14 +2158,16 @@ function setActiveTab(name, opts) {
 
 function initTabs() {
   const validTabs = ['monitor', 'models', 'events'];
-  // Pick initial tab: URL hash > localStorage > default
+  // 'recap' was a separate tab until 2026-04-18 when it was merged into
+  // Events; redirect old hash/localStorage values so bookmarks still land.
+  const redirect = (name) => (name === 'recap' ? 'events' : name);
   let initial = 'monitor';
-  const fromHash = (window.location.hash || '').replace('#', '');
+  const fromHash = redirect((window.location.hash || '').replace('#', ''));
   if (validTabs.includes(fromHash)) {
     initial = fromHash;
   } else {
     try {
-      const stored = localStorage.getItem('bilbo:tab');
+      const stored = redirect(localStorage.getItem('bilbo:tab'));
       if (validTabs.includes(stored)) initial = stored;
     } catch (e) { /* ignore */ }
   }
@@ -2214,13 +2183,142 @@ function initTabs() {
   });
 }
 
+// --- Pipeline History table (Models tab) ---
+// Per-ET-day breakdown of how each capture was decided (pixel-diff,
+// BIRDEYE, or cloud API fallback) plus the cloud-API cost and the
+// dominant BIRDEYE model version(s) for that day. Powered by
+// /api/pipeline-history.
+async function loadPipelineHistory() {
+  const days = document.getElementById('pipeline-history-days').value;
+  const body = document.getElementById('pipeline-history-body');
+  const note = document.getElementById('pipeline-history-note');
+  try {
+    const res = await fetch('/api/pipeline-history?days=' + encodeURIComponent(days));
+    const data = await res.json();
+    const rows = data.rows || [];
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="7" class="muted">No data in this range.</td></tr>';
+      note.textContent = '';
+      return;
+    }
+
+    const fmtCell = (c) => c && c.count ? `${c.count} <span class="muted">(${c.pct.toFixed(1)}%)</span>` : '0';
+    const fmtVersions = (versions) => {
+      if (!versions || !versions.length) return '<span class="muted">—</span>';
+      // Top 3 to keep the cell compact; one per line.
+      return versions.slice(0, 3).map(v =>
+        `<div class="version-line"><code>${v.version}</code> <span class="muted">(${v.pct.toFixed(1)}%)</span></div>`
+      ).join('');
+    };
+
+    // Newest first — easier for at-a-glance.
+    const sorted = [...rows].sort((a, b) => b.date.localeCompare(a.date));
+    body.innerHTML = sorted.map(r => `
+      <tr>
+        <td>${r.date}</td>
+        <td class="num">${r.captures}</td>
+        <td class="num">${fmtCell(r.pixelDiff)}</td>
+        <td class="num">${fmtCell(r.birdeye)}</td>
+        <td class="num">${fmtCell(r.cloudApi)}</td>
+        <td class="num">$${r.cost.toFixed(2)}</td>
+        <td>${fmtVersions(r.versions)}</td>
+      </tr>
+    `).join('');
+
+    const totalCost = rows.reduce((s, r) => s + (r.cost || 0), 0);
+    const totalCaptures = rows.reduce((s, r) => s + (r.captures || 0), 0);
+    note.textContent = `${totalCaptures.toLocaleString()} captures · $${totalCost.toFixed(2)} total cloud cost`;
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="7" class="muted">Error: ${e.message}</td></tr>`;
+  }
+}
+
+// --- Recap tab ---
+// Day-in-a-minute time-lapse. Clicking Generate POSTs to /api/recap/generate,
+// which stitches the day's frames via ffmpeg and caches the MP4 by
+// (date, fps, frame count). The server reuses the cache when the count
+// matches, so repeat clicks are instant.
+function initRecap() {
+  const picker = document.getElementById('recap-date');
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  picker.value = today;
+  picker.max = today;
+
+  const bump = (days) => {
+    const d = new Date(picker.value + 'T12:00:00');
+    d.setDate(d.getDate() + days);
+    const next = d.toISOString().slice(0, 10);
+    if (next > picker.max) return;
+    picker.value = next;
+  };
+  document.getElementById('recap-prev').addEventListener('click', () => bump(-1));
+  document.getElementById('recap-next').addEventListener('click', () => bump(1));
+  document.getElementById('recap-generate').addEventListener('click', generateRecap);
+}
+
+async function generateRecap() {
+  const date = document.getElementById('recap-date').value;
+  const fps = parseInt(document.getElementById('recap-fps').value, 10);
+  const status = document.getElementById('recap-status');
+  const info = document.getElementById('recap-info');
+  const video = document.getElementById('recap-video');
+  const placeholder = document.getElementById('recap-placeholder');
+  const btn = document.getElementById('recap-generate');
+
+  if (!date) {
+    status.textContent = 'Pick a date first.';
+    return;
+  }
+
+  btn.disabled = true;
+  status.textContent = 'Generating…';
+  info.textContent = '';
+
+  try {
+    const resp = await fetch('/api/recap/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, fps }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+
+    if (data.status === 'empty') {
+      video.style.display = 'none';
+      video.removeAttribute('src');
+      placeholder.style.display = '';
+      placeholder.textContent = `No frames captured on ${date}.`;
+      status.textContent = '';
+      return;
+    }
+
+    // Bust the browser cache if we just regenerated.
+    const cacheBuster = data.cached ? '' : '&t=' + Date.now();
+    video.src = data.video_url + cacheBuster;
+    video.style.display = '';
+    placeholder.style.display = 'none';
+
+    const mb = (data.size_bytes / 1024 / 1024).toFixed(1);
+    info.textContent =
+      `${data.frame_count} frames · ${data.duration_sec.toFixed(1)} s @ ${data.fps} fps · ${mb} MB` +
+      (data.cached ? ' · cached' : '');
+    status.textContent = '';
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 initTabs();
 initTimelineNav();
+initRecap();
 document.getElementById('perf-range').addEventListener('change', loadMonitorStats);
 document.getElementById('safety-range').addEventListener('change', loadSafetyStats);
 document.getElementById('events-count').addEventListener('change', loadEvents);
 document.getElementById('events-type').addEventListener('change', loadEvents);
 document.getElementById('events-range').addEventListener('change', loadEvents);
 document.getElementById('bassinet-days').addEventListener('change', loadBassinetChart);
+document.getElementById('pipeline-history-days').addEventListener('change', loadPipelineHistory);
 loadAll();
 setInterval(loadAll, REFRESH_INTERVAL_SEC * 1000);

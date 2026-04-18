@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Baby Monitor Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=21">
+  <link rel="stylesheet" href="/static/style.css?v=30">
 </head>
 <body>
   <!-- Top Bar: Compact Status -->
@@ -262,10 +262,74 @@
       <div class="perf-breakdown" id="perf-breakdown"></div>
     </section>
 
+    <!-- Pipeline History: per-day detection-method breakdown + cost -->
+    <section class="card" id="pipeline-history-card">
+      <h2>Pipeline History
+        <select id="pipeline-history-days" class="detail-select" style="margin-left:8px">
+          <option value="7">Last 7 days</option>
+          <option value="14" selected>Last 14 days</option>
+          <option value="30">Last 30 days</option>
+        </select>
+        <span class="subtitle" id="pipeline-history-note"></span>
+      </h2>
+      <p class="section-desc">
+        Per-day breakdown of how each captured frame was decided. Every
+        capture flows through <b>pixel-diff</b> first (cheap check for an
+        empty bassinet, no model needed); non-empty frames go to
+        <b>BIRDEYE</b>, the on-device MobileNetV3 cascade
+        (presence &rarr; face &rarr; eye-state); only when BIRDEYE bails
+        (<code>no_face_detected</code> / <code>low_confidence</code> /
+        hard error) does the frame fall back to the <b>Cloud API</b>
+        (GPT-4o vision). Cost is cloud calls &times; $0.01. The model
+        version column shows which BIRDEYE checkpoint(s) produced the
+        BIRDEYE-decided frames that day; percentages are of BIRDEYE's
+        slice (so they sum to ~100%), making it easy to read "version X
+        did most of BIRDEYE's work today". On pre-flip days these labels
+        can be anachronistic because <code>backfill_birdeye_primary.py</code>
+        may have re-tagged historical rows.
+      </p>
+      <div class="table-wrap">
+        <table id="pipeline-history-table" class="pipeline-history-table">
+          <thead>
+            <tr>
+              <th>ET date</th>
+              <th class="num">Captures</th>
+              <th class="num">Pixel-diff</th>
+              <th class="num">BIRDEYE</th>
+              <th class="num">Cloud API</th>
+              <th class="num">Cost</th>
+              <th>BIRDEYE model version(s)</th>
+            </tr>
+          </thead>
+          <tbody id="pipeline-history-body"></tbody>
+        </table>
+      </div>
+    </section>
+
     </div><!-- /models-panel -->
 
     <!-- =============== Events tab =============== -->
     <div class="tab-panel" role="tabpanel" data-tab="events" aria-labelledby="tab-events" hidden>
+    <!-- Daily Recap (video) — merged into Events 2026-04-18 -->
+    <section class="card">
+      <h2>Daily Recap
+        <button id="recap-prev" class="tl-nav-btn">◀</button>
+        <input type="date" id="recap-date" class="tl-date-picker">
+        <button id="recap-next" class="tl-nav-btn">▶</button>
+        <select id="recap-fps" class="detail-select" style="margin-left:8px">
+          <option value="15">15 fps</option>
+          <option value="30" selected>30 fps</option>
+          <option value="60">60 fps</option>
+        </select>
+        <button id="recap-generate" class="viewer-btn" style="margin-left:8px">Generate</button>
+        <span id="recap-status" class="viewer-saved"></span>
+      </h2>
+      <div id="recap-info" class="recap-info"></div>
+      <div class="recap-video-wrap">
+        <video id="recap-video" class="recap-video" controls preload="metadata" style="display:none"></video>
+        <div id="recap-placeholder" class="recap-placeholder">Pick a date and click Generate. Stitching ~1440 frames takes 10–30 s.</div>
+      </div>
+    </section>
     <!-- Recent Events Table -->
     <section class="card">
       <h2>Recent Events
@@ -319,6 +383,6 @@
     </div>
   </footer>
 
-  <script src="/static/app.js?v=21"></script>
+  <script src="/static/app.js?v=30"></script>
 </body>
 </html>

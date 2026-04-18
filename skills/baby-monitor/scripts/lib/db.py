@@ -502,6 +502,112 @@ def get_monitor_stats(hours: float = 24) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Pipeline history (per-day detection-method breakdown, used by the
+# dashboard's Pipeline History card).
+# ---------------------------------------------------------------------------
+
+# Per-call cost assumption — matches get_monitor_stats above.
+_CLOUD_API_COST_PER_CALL = 0.01
+
+# ET offset in SQLite's `date(ts, '-N hours')` grouping. We use the same
+# static -4h assumption as dashboard/app.py's ET constant. Good enough for
+# daily bucketing; DST drift only shifts midnight boundaries by an hour.
+_ET_SHIFT = "-4 hours"
+
+
+def get_pipeline_history(days: int = 14) -> dict:
+    """Per-ET-day detection-method breakdown with model versions and cost.
+
+    Returns:
+        {"days": int, "rows": [{"date", "pixelDiff", "birdeye", "cloudApi",
+                                "captures", "cost", "versions": [{"version",
+                                "count", "pct"}]}, ...]}
+
+    Each method cell is {"count": N, "pct": float (0..100)}.
+    Versions list the BIRDEYE model versions seen that day, ordered by
+    frame count desc, each a {"version", "count", "pct"} dict. `pct` is
+    the share of BIRDEYE-decided frames (not total captures) that this
+    version handled — so the listed versions for a day sum to ~100% of
+    BIRDEYE's slice, making it easy to read "version X did most of
+    BIRDEYE's work today".
+    """
+    conn = get_connection()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    method_rows = conn.execute(f"""
+        SELECT date(timestamp, '{_ET_SHIFT}') AS et_date,
+               detection_method, COUNT(*) AS n
+        FROM entries
+        WHERE timestamp >= ?
+        GROUP BY et_date, detection_method
+    """, (cutoff,)).fetchall()
+
+    version_rows = conn.execute(f"""
+        SELECT date(timestamp, '{_ET_SHIFT}') AS et_date,
+               shadow_model_version, COUNT(*) AS n
+        FROM entries
+        WHERE timestamp >= ? AND shadow_model_version IS NOT NULL
+        GROUP BY et_date, shadow_model_version
+        ORDER BY et_date ASC, n DESC
+    """, (cutoff,)).fetchall()
+
+    days_map: dict[str, dict] = {}
+    for r in method_rows:
+        d = r["et_date"]
+        if not d:
+            continue
+        bucket = days_map.setdefault(d, {"pixel-diff": 0, "birdeye": 0, "cloud": 0, "other": 0})
+        m = r["detection_method"]
+        if m == "pixel-diff":
+            bucket["pixel-diff"] += r["n"]
+        elif m == "birdeye":
+            bucket["birdeye"] += r["n"]
+        elif m in ("vision-api", "openai-vision"):
+            bucket["cloud"] += r["n"]
+        else:
+            bucket["other"] += r["n"]
+
+    versions_map: dict[str, list] = {}
+    for r in version_rows:
+        d = r["et_date"]
+        if not d:
+            continue
+        versions_map.setdefault(d, []).append((r["shadow_model_version"], r["n"]))
+
+    def cell(n: int, total: int) -> dict:
+        return {"count": n, "pct": round(100 * n / total, 1) if total else 0.0}
+
+    rows_out = []
+    for d in sorted(days_map):
+        b = days_map[d]
+        captures = b["pixel-diff"] + b["birdeye"] + b["cloud"] + b["other"]
+        # Versions are per-BIRDEYE-decided frame, so `pct` is of b["birdeye"]
+        # and the listed versions sum to ~100% of BIRDEYE's slice. Rows
+        # where the BIRDEYE model fired during a cloud-API frame still show
+        # up here (shadow_model_version is populated even on fallbacks), so
+        # the sum can slightly exceed birdeye count — clamp the denominator
+        # to max(versions_sum, birdeye) to keep percentages sane.
+        version_rows = versions_map.get(d, [])
+        version_total = sum(n for _, n in version_rows)
+        denom = max(b["birdeye"], version_total)
+        versions = [
+            {"version": v, "count": n, "pct": round(100 * n / denom, 1) if denom else 0.0}
+            for v, n in version_rows
+        ]
+        rows_out.append({
+            "date": d,
+            "pixelDiff": cell(b["pixel-diff"], captures),
+            "birdeye": cell(b["birdeye"], captures),
+            "cloudApi": cell(b["cloud"], captures),
+            "captures": captures,
+            "cost": round(b["cloud"] * _CLOUD_API_COST_PER_CALL, 2),
+            "versions": versions,
+        })
+
+    return {"days": days, "rows": rows_out}
+
+
+# ---------------------------------------------------------------------------
 # Corrections
 # ---------------------------------------------------------------------------
 
@@ -1339,6 +1445,7 @@ class MonitorDB:
     get_entry_count = staticmethod(get_entry_count)
     get_timeline = staticmethod(get_timeline)
     get_monitor_stats = staticmethod(get_monitor_stats)
+    get_pipeline_history = staticmethod(get_pipeline_history)
 
     # Corrections & review
     insert_correction = staticmethod(insert_correction)

@@ -57,7 +57,7 @@ Three classifiers in cascade, all MobileNetV3-Small except the legacy YuNet fall
 
 Head position is adaptive: when BIRDEYE falls back to the cloud API, the API returns the head's approximate location in `data/head-state.json`, which BIRDEYE uses to center its crop on the next tick.
 
-**Rollback for the 448 flip:** copy `pipeline/models/experiments/eye_state_224_legacy/latest/eye_state_classifier.pt` over `pipeline/models/latest/eye_state_classifier.pt`, set `EYE_STATE_INPUT_SIZE = 224`, reload launchd. The snapshot is preserved for exactly this purpose and is also running as an inverted shadow experiment (`eye_state_224_legacy`) so the dashboard continuously monitors the current-prod-vs-rollback gap.
+**Rollback for the 448 flip:** copy `pipeline/models/experiments/eye_state_224_legacy/latest/eye_state_classifier.pt` over `pipeline/models/latest/eye_state_classifier.pt`, set `EYE_STATE_INPUT_SIZE = 224`, reload launchd. The snapshot is preserved for exactly this purpose. The matching `eye_state_224_legacy` shadow experiment was retired on 2026-04-18 (registry entry removed from `scripts/lib/experiments.json`) — historical shadow results remain in the `entries.experiments` column as an audit trail, and the experiment can be reinstated by restoring the JSON entry.
 
 | Metric | Value |
 |---|---|

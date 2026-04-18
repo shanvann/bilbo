@@ -733,16 +733,24 @@ footer {
   grid-template-columns: repeat(3, 1fr);
   gap: 16px;
 }
-/* Classifiers grid (4 col) */
+/* Classifiers list (stacked rows — was 4-col grid before 2026-04-18) */
 .classifiers-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.train-col {
+  border-top: 1px solid var(--border, #222);
+  padding-top: 14px;
+}
+.train-col:first-child {
+  border-top: none;
+  padding-top: 0;
 }
 .train-col h3 {
-  font-size: 0.85rem;
+  font-size: 0.95rem;
   color: var(--accent-blue);
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 .train-details {
   font-size: 0.8rem;
@@ -765,7 +773,6 @@ footer {
 
 @media (max-width: 700px) {
   .train-grid { grid-template-columns: 1fr; }
-  .classifiers-grid { grid-template-columns: 1fr; }
   .block-viewer { flex-direction: column; }
   .viewer-frame { max-width: 100%; }
   .perf-grid { grid-template-columns: repeat(2, 1fr); }
@@ -1045,4 +1052,63 @@ footer {
   font-size: 0.8rem;
   margin: -4px 0 12px 0;
   line-height: 1.4;
+}
+
+/* Pipeline History table */
+.pipeline-history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+.pipeline-history-table th,
+.pipeline-history-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border, #222);
+  text-align: left;
+  vertical-align: top;
+}
+.pipeline-history-table th.num,
+.pipeline-history-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.pipeline-history-table code {
+  font-size: 0.82rem;
+  color: var(--text-dim, #889);
+}
+.pipeline-history-table .version-line {
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.pipeline-history-table .muted {
+  color: var(--text-dim, #667);
+}
+
+/* Recap tab */
+.recap-info {
+  color: #778;
+  font-size: 0.85rem;
+  margin: 4px 0 12px 0;
+  min-height: 1.2em;
+}
+.recap-video-wrap {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #000;
+  border-radius: 6px;
+  min-height: 320px;
+  padding: 8px;
+}
+.recap-video {
+  width: 100%;
+  max-width: 960px;
+  border-radius: 4px;
+  background: #000;
+}
+.recap-placeholder {
+  color: #aab;
+  font-size: 0.9rem;
+  padding: 40px;
+  text-align: center;
 }

@@ -23,6 +23,7 @@ A baby bassinet monitor that captures a frame every minute from an IP camera, cl
   - [Capture Watchdog](#capture-watchdog)
   - [Temporal State Smoothing — added 2026-04-14](#temporal-state-smoothing--added-2026-04-14)
   - [Unknown → Awake absorption (added 2026-04-15)](#unknown--awake-absorption-added-2026-04-15)
+  - [FallingAsleep (putdown-pattern absorption, added 2026-04-20)](#fallingasleep-putdown-pattern-absorption-added-2026-04-20)
   - [Frame Retention](#frame-retention)
   - [Storage: SQLite vs JSONL](#storage-sqlite-vs-jsonl)
 - [Database Schema](#database-schema)
@@ -31,7 +32,7 @@ A baby bassinet monitor that captures a frame every minute from an IP camera, cl
 
 ## What It Does
 
-- **Tracks sleep state** — Asleep, Awake, Unknown — via on-device **BIRDEYE** (a 3-stage MobileNetV3-Small cascade: presence → face detection → eye-state) running as production. A cloud API (GPT-4o) is called only when BIRDEYE can't find a face or has low confidence — ~1–2% of non-empty frames post-flip (2026-04-12). The `shadow` sub-dict and `shadow_birdeye_*` columns are now an immutable audit trail of what the model said per frame, separate from the user-correctable primary fields.
+- **Tracks sleep state** — Asleep, Awake, FallingAsleep, Unknown — via on-device **BIRDEYE** (a 3-stage MobileNetV3-Small cascade: presence → face detection → eye-state) running as production. A cloud API (GPT-4o) is called only when BIRDEYE can't find a face or has low confidence — ~1–2% of non-empty frames post-flip (2026-04-12). The `shadow` sub-dict and `shadow_birdeye_*` columns are now an immutable audit trail of what the model said per frame, separate from the user-correctable primary fields.
 - **Detects wake-ups and sleep-onset** — confirms by checking last 3 entries (2/3 agreeing), then sends a Telegram alert. Wake alerts include feedback buttons; asleep alerts fire only on awake→asleep transitions (skipped on placed-already-asleep).
 - **Capture watchdog** — independent launchd job (every 2 min) that pings Telegram if no new frame has been written in `WATCHDOG_ALERT_AFTER_MIN` minutes. Catches RTSP outages, monitor crashes, launchd stalls; doesn't catch laptop-off (nothing runs at all).
 - **Safety alerts** — immediate notification if baby is pressed against the bassinet side
@@ -433,6 +434,23 @@ The post-smoothing rule: **when a new `Awake` state is confirmed, any immediatel
 - `scripts/backfill_state.py` (historical): after the pass-1 forward-smoothing sweep, a pass-2 single-pass walk accumulates contiguous Unknown runs and flushes them to Awake when a terminating Awake is within budget. A pass-3 diff against stored state builds the SQL update batch.
 
 **Boundaries that break the run.** Asleep, Awake, not_present, or any non-Unknown state stops the backward walk. A baby-removal (`not_present`) in the middle of the window means only the post-removal Unknown frames can be absorbed, not anything before the removal. `eye_state_edited = 1` corrections are stored in the `eye_state` column but not read by the absorber — the absorber operates on the derived `state` field only, so user eye-state corrections already propagate through the smoother on re-smooth.
+
+### FallingAsleep (putdown-pattern absorption, added 2026-04-20)
+
+Companion rule for the mirror-image of Unknown→Awake, specifically targeting the *putdown-to-sleep* case. The pattern is narrow by design: `not_present → Unknown+babyPresent (run) → Asleep`. When the live smoother (or `backfill_state.py` pass-3) confirms `Asleep` AND the preceding contiguous `Unknown+babyPresent` run is bookended by `not_present`, the run is reclassified by span:
+
+| Run span | New state | Reason |
+|----------|-----------|--------|
+| ≤ `FALLING_ASLEEP_MAX_MINUTES` (default 30) | `FallingAsleep` | Textbook putdown → settle → sleep. The ambiguous frames are the transition itself, and it's useful to see it as a distinct color on the timeline. |
+| > 30 min | `Awake` | Baby was in the bassinet "crib-awake" for a long stretch before dozing off — the ambiguous frames were mostly awake time, not the sleep transition. |
+
+**Why only the `not_present`-bookended pattern?** A pattern like `Awake → Unknown → Asleep` (no removal in between) is also a natural fall-asleep sequence, but the absorption there would conflict with the existing asymmetric-toward-Awake rationale (pre-sleep ambiguity is a weaker signal than the sleep confirmation itself). Limiting this to the putdown case avoids reclassifying pre-sleep ambiguity that wasn't preceded by a fresh placement.
+
+**Why `FallingAsleep` is a first-class state value (not a flag on `Awake`).** The timeline, bassinet chart, and corrections-breakdown chip all want to distinguish this from true crib-awake time — same reason Unknown was elevated out of the Asleep bucket in 2026-04-14. The dashboard renders it as light green between Awake (yellow) and Asleep (green). Alerts are unaffected: `should_alert_asleep` requires `"Awake" in recent_present_states` to fire, and `FallingAsleep` doesn't match, so the putdown case stays silent (as it was before this rule).
+
+**Pass ordering interaction (backfill).** `backfill_state.py` runs Pass 2 (Unknown→Awake) before Pass 3 (FallingAsleep putdown). If the same Unknown run is eligible for both — for instance, a wake-up that shortly preceded sleep — Pass 2 wins (flips to Awake), and Pass 3 sees no Unknown run to classify. This matches live-path behaviour and the design intuition: a wake-up that shortly precedes sleep is really a wake-up.
+
+Helper: `lib.state.putdown_prefix_to_absorb`. Threshold: `FALLING_ASLEEP_MAX_MINUTES` in `lib/config.py`.
 
 ### Frame Retention
 

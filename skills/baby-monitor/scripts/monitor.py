@@ -43,7 +43,11 @@ from lib.config import (
     log,
     set_verbose,
 )
-from lib.state import smooth_state_temporal, unknown_prefix_to_absorb
+from lib.state import (
+    putdown_prefix_to_absorb,
+    smooth_state_temporal,
+    unknown_prefix_to_absorb,
+)
 from lib.capture import capture_frame, enforce_disk_limit
 from lib.db import get_db
 from lib.detect import detect_empty_bassinet, make_empty_entry
@@ -380,6 +384,23 @@ def main():
     _absorb_history = _db_for_smoothing.get_recent_entries(_absorb_history_n)
     _to_absorb = unknown_prefix_to_absorb(entry, _absorb_history)
 
+    # --- Putdown-pattern absorption (Unknown → FallingAsleep / Awake) ---
+    # When we just confirmed Asleep AND the preceding Unknown+babyPresent
+    # run is bookended by not_present, classify the run based on span
+    # (≤ 30 min = FallingAsleep, > 30 min = Awake). Helper needs a longer
+    # history window than unknown_prefix_to_absorb because the putdown
+    # budget is larger; use the same max() pattern for safety.
+    from lib.config import FALLING_ASLEEP_MAX_MINUTES
+    _putdown_history_n = max(STATE_CONFIRM_WINDOW, int(FALLING_ASLEEP_MAX_MINUTES) + 5)
+    _putdown_history = (
+        _db_for_smoothing.get_recent_entries(_putdown_history_n)
+        if _putdown_history_n > _absorb_history_n
+        else _absorb_history
+    )
+    _putdown_to_absorb, _putdown_new_state = putdown_prefix_to_absorb(
+        entry, _putdown_history
+    )
+
     # --- Shadow experiments ---
     # Run every registered shadow pipeline against this frame. Results are
     # stored under entry["experiments"][<name>] alongside the primary
@@ -420,6 +441,16 @@ def main():
                      len(_to_absorb), entry["timestamp"])
             for _u in _to_absorb:
                 db.update_entry(_u["timestamp"], {"state": "Awake"})
+
+        # Putdown pattern: either flips a short (≤30m) Unknown run to
+        # FallingAsleep or a longer one to Awake. No-op when the rule
+        # didn't match.
+        if _putdown_to_absorb:
+            log.info("state-smooth: putdown pattern, %d Unknown frames -> %s "
+                     "(span ending at %s)",
+                     len(_putdown_to_absorb), _putdown_new_state, entry["timestamp"])
+            for _u in _putdown_to_absorb:
+                db.update_entry(_u["timestamp"], {"state": _putdown_new_state})
     elapsed = time.monotonic() - t_start
 
     # --- Safety alerts ---

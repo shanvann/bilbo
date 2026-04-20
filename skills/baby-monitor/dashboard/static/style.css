@@ -301,10 +301,11 @@ main {
   position: relative;
 }
 
-.tl-block.asleep { background: var(--accent-blue); }
-.tl-block.awake { background: var(--accent-blue-light); opacity: 0.6; }
-.tl-block.absent { background: var(--accent-orange); opacity: 0.5; }
-.tl-block.unknown-present { background: var(--accent-blue-light); opacity: 0.3; }
+.tl-block.asleep { background: rgba(76, 175, 80, 0.85); }          /* green */
+.tl-block.falling-asleep { background: rgba(139, 195, 74, 0.85); } /* light green */
+.tl-block.awake { background: rgba(240, 180, 41, 0.85); }          /* yellow */
+.tl-block.absent { background: rgba(170, 170, 175, 0.7); }         /* grey */
+.tl-block.unknown-present { background: rgba(180, 180, 190, 0.35); } /* faint grey */
 
 .timeline-feeds {
   position: relative;
@@ -474,10 +475,11 @@ footer {
   height: 12px;
   border-radius: 3px;
 }
-.legend-dot.asleep { background: rgba(74, 158, 255, 0.8); }
-.legend-dot.unknown-present { background: rgba(74, 158, 255, 0.2); }
-.legend-dot.awake { background: rgba(74, 158, 255, 0.3); }
-.legend-dot.absent { background: rgba(255, 152, 0, 0.6); }
+.legend-dot.asleep { background: rgba(76, 175, 80, 0.85); }
+.legend-dot.falling-asleep { background: rgba(139, 195, 74, 0.85); }
+.legend-dot.unknown-present { background: rgba(180, 180, 190, 0.35); }
+.legend-dot.awake { background: rgba(240, 180, 41, 0.85); }
+.legend-dot.absent { background: rgba(170, 170, 175, 0.7); }
 
 /* Timeline navigation */
 .tl-nav-btn {
@@ -1002,6 +1004,26 @@ footer {
   align-items: flex-end;
   gap: 6px;
   height: 160px;
+  position: relative;
+}
+.bassinet-24h-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1px dashed rgba(255, 255, 255, 0.35);
+  pointer-events: none;
+  z-index: 2;
+}
+.bassinet-24h-line span {
+  position: absolute;
+  right: 0;
+  top: -0.7rem;
+  font-size: 0.6rem;
+  color: var(--text-dim, #889);
+  background: var(--card-bg, rgba(0, 0, 0, 0.6));
+  padding: 0 3px;
+  border-radius: 2px;
 }
 .bassinet-bar-group {
   flex: 1;
@@ -1030,11 +1052,19 @@ footer {
   font-weight: 600;
   color: rgba(255,255,255,0.8);
 }
-.bassinet-bar-seg.in { background: var(--accent-blue); }
-.bassinet-bar-seg.asleep { background: rgba(74, 158, 255, 0.8); }
-.bassinet-bar-seg.awake { background: rgba(74, 158, 255, 0.35); }
-.bassinet-bar-seg.unknown-in { background: rgba(74, 158, 255, 0.18); }
-.bassinet-bar-seg.out { background: rgba(255, 152, 0, 0.5); }
+.bassinet-bar-seg.in { background: rgba(76, 175, 80, 0.85); }
+.bassinet-bar-seg.asleep { background: rgba(76, 175, 80, 0.85); }            /* green */
+.bassinet-bar-seg.falling-asleep { background: rgba(139, 195, 74, 0.85); }   /* light green */
+.bassinet-bar-seg.awake { background: rgba(240, 180, 41, 0.85); }            /* yellow */
+.bassinet-bar-seg.unknown-in { background: rgba(180, 180, 190, 0.35); }      /* faint grey */
+.bassinet-bar-seg.out { background: rgba(170, 170, 175, 0.7); }              /* grey */
+
+/* Legend dots — mirror the segment colors so the legend reads true to the bars */
+.legend-dot.bassinet-legend-asleep { background: rgba(76, 175, 80, 0.85); }
+.legend-dot.bassinet-legend-falling-asleep { background: rgba(139, 195, 74, 0.85); }
+.legend-dot.bassinet-legend-awake { background: rgba(240, 180, 41, 0.85); }
+.legend-dot.bassinet-legend-unknown-in { background: rgba(180, 180, 190, 0.35); }
+.legend-dot.bassinet-legend-out { background: rgba(170, 170, 175, 0.7); }
 .bassinet-bar-label {
   font-size: 0.65rem;
   color: var(--text-dim);

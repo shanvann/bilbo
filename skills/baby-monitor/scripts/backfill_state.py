@@ -31,6 +31,7 @@ sys.path.insert(0, str(_HERE))
 
 from lib.config import (
     DATA_DIR,
+    FALLING_ASLEEP_MAX_MINUTES,
     STATE_CONFIRM_WINDOW,
     UNKNOWN_ABSORB_MAX_MINUTES,
 )
@@ -107,7 +108,58 @@ def main():
                         n_absorbed += 1
         pending_run = []
 
-    # --- Pass 3: compare against stored_state and build update list ---
+    # --- Pass 3: Putdown-pattern absorption ---
+    # Walk forward. When we hit a terminating Asleep AND the preceding
+    # contiguous Unknown+babyPresent run is bookended by a not_present
+    # frame, rewrite the run to FallingAsleep (≤30m) or Awake (>30m).
+    # This mirrors lib.state.putdown_prefix_to_absorb but runs over the
+    # whole DB in one forward pass instead of re-walking from each Asleep.
+    #
+    # Ordering vs Pass 2: if the same Unknown run is also eligible for
+    # Unknown → Awake absorption (because a later Awake also satisfies the
+    # short-run rule), Pass 2 wins because it runs first and flips the
+    # entries to Awake — by the time we walk the run here, there are no
+    # Unknowns left to reclassify. That's the desired behaviour: a
+    # contiguous run terminated by BOTH a nearby Awake AND a later Asleep
+    # is really just a wake-up briefly preceding sleep, and the live path
+    # would also see the Awake first.
+    n_putdown_falling = 0
+    n_putdown_awake = 0
+    pending_run = []
+    pre_run_was_not_present = False  # is the frame immediately before the run not_present?
+    prev_was_not_present = True  # treat start-of-history as not_present-safe
+    for ts, entry, _ in all_entries:
+        smoothed = entry["state"]
+        is_unk_present = (smoothed == "Unknown" and entry.get("babyPresent"))
+        is_not_present = not entry.get("babyPresent")
+
+        if is_unk_present:
+            if not pending_run:
+                # Starting a new run — remember whether the frame right
+                # before the run was not_present.
+                pre_run_was_not_present = prev_was_not_present
+            pending_run.append((ts, entry))
+            prev_was_not_present = False
+            continue
+
+        if smoothed == "Asleep" and pending_run and pre_run_was_not_present:
+            first_ts = _parse_ts(pending_run[0][0])
+            curr_ts = _parse_ts(ts)
+            if first_ts and curr_ts:
+                span_min = (curr_ts - first_ts).total_seconds() / 60.0
+                new_state = "FallingAsleep" if span_min <= FALLING_ASLEEP_MAX_MINUTES else "Awake"
+                for _u_ts, u_entry in pending_run:
+                    u_entry["state"] = new_state
+                    if new_state == "FallingAsleep":
+                        n_putdown_falling += 1
+                    else:
+                        n_putdown_awake += 1
+
+        pending_run = []
+        pre_run_was_not_present = False
+        prev_was_not_present = is_not_present
+
+    # --- Pass 4: compare against stored_state and build update list ---
     updates: list[tuple[str, str, str]] = []
     changed_by_direction: dict[str, int] = {}
     for ts, entry, stored_state in all_entries:
@@ -119,7 +171,12 @@ def main():
                 print(f"  {ts}  raw={entry.get('rawState')}  {direction}")
             updates.append((ts, smoothed, json.dumps(entry)))
 
-    print(f"\nchanges: {len(updates)} entries (including {n_absorbed} absorbed Unknown→Awake)")
+    print(
+        f"\nchanges: {len(updates)} entries "
+        f"(including {n_absorbed} absorbed Unknown→Awake, "
+        f"{n_putdown_falling} Unknown→FallingAsleep, "
+        f"{n_putdown_awake} Unknown→Awake from putdown pattern)"
+    )
     for direction, count in sorted(changed_by_direction.items(), key=lambda x: -x[1]):
         print(f"  {direction:40s} {count}")
 

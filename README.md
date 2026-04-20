@@ -149,8 +149,10 @@ monitor.py                                          # full pipeline (launchd run
 monitor.py --dry-run                                # test without writing
 monitor.py --capture-only                           # grab one frame and exit
 monitor.py --analyze FRAME                          # re-run cloud API on an existing frame
-monitor.py --retrain                                # retrain with pending corrections
+monitor.py --retrain                                # retrain with pending corrections (auto-runs post-retrain chain)
 monitor.py --retrain --force                        # retrain even if no new corrections
+monitor.py --retrain --skip-post-retrain            # retrain only (skip auto backfill + bbox_impact refresh)
+monitor.py --retrain --post-retrain-backfill-days 14 # widen auto primary-backfill window (default: 7 days)
 monitor.py --eval-corrections                       # re-eval the deployed model on corrections (no retrain)
 monitor.py --audit --sample 50                      # spot-check BIRDEYE vs cloud API disagreements
 monitor.py --list-models                            # show model versions + metrics
@@ -232,8 +234,9 @@ Live at `http://localhost:5555`. Runs as a persistent launchd service.
    - Corrections pending/trained, run timing, data sources, model version, rollback badge, retrain button + abort.
 6. **Pipeline** (Models tab) — selectable range (10m–1w): cloud cost, BIRDEYE latency, monitoring gaps (>10 min).
 7. **Pipeline History** (Models tab, added 2026-04-18) — per-ET-day table of how each captured frame was decided: Captures · Pixel-diff · BIRDEYE · Cloud API (each shown as count + % of captures) · Cost (cloud × $0.01) · BIRDEYE model version(s) (% of BIRDEYE's slice, sums to ~100%). 7/14/30-day window selector. Makes the pre/post-flip cost delta visible at a glance.
-8. **Daily Recap** (Events tab, added 2026-04-18) — stitches a day's frames into an MP4 time-lapse via ffmpeg. Date picker + fps selector (15/30/60), server-side cache under `data/videos/recap_<date>_fps<N>.mp4` reused as long as the frame count matches. First generation ~8–30 s; cache hit is instant.
-9. **Recent Events** (Events tab) — state transitions (placed/removed/fell asleep/woke up), selectable count.
+8. **Eye-State Daily Metrics** (Models tab, added 2026-04-19) — three SVG line charts (Precision · Recall · F1) per ET day, with one line per class (eyes_open, eyes_closed). Truth = dashboard corrections + reviewed-as-correct frames; predictions = `shadow_birdeye_eye` (BIRDEYE's immutable audit trail), so dashboard re-labels don't contaminate the prediction side. Days with zero ground-truth support for a class render as a gap, not 0. 7/14/30-day window selector. Makes daily improvement (or regressions) after retraining visible at a glance.
+9. **Daily Recap** (Events tab, added 2026-04-18) — stitches a day's frames into an MP4 time-lapse via ffmpeg. Date picker + fps selector (15/30/60), server-side cache under `data/videos/recap_<date>_fps<N>.mp4` reused as long as the frame count matches. First generation ~8–30 s; cache hit is instant.
+10. **Recent Events** (Events tab) — state transitions (placed/removed/fell asleep/woke up), selectable count.
 
 **APIs:**
 | Endpoint | Method | Purpose |
@@ -243,6 +246,7 @@ Live at `http://localhost:5555`. Runs as a persistent launchd service.
 | `/api/retrain/abort` | POST | Kill running training by PID |
 | `/api/monitor-stats` | GET | Model performance (SQLite aggregation) |
 | `/api/pipeline-history` | GET | `?days=N` (clamped 1–90). Per-ET-day detection-method breakdown + cost + BIRDEYE model versions. Powers the Pipeline History table. |
+| `/api/eye-state-daily-metrics` | GET | `?days=N` (clamped 1–90). Per-ET-day BIRDEYE eye-state precision/recall/F1 for `eyes_open` and `eyes_closed` vs corrected/reviewed ground truth. Powers the Eye-State Daily Metrics charts. |
 | `/api/recap/generate` | POST | `{date, fps}`. Stitches a day's frames into MP4 via ffmpeg, caches under `data/videos/`. Returns `{status, cached, video_url, frame_count, duration_sec, size_bytes}`. |
 | `/api/recap/video` | GET | `?name=recap_<date>_fps<N>.mp4`. Range-capable MP4 delivery for the recap `<video>` element. |
 
@@ -257,9 +261,14 @@ Live at `http://localhost:5555`. Runs as a persistent launchd service.
                 draw corrected face bboxes for IoU + bbox-impact analyses
 4. Retrain    — manual only (daily cron is disabled); click dashboard
                 button or run `monitor.py --retrain`
-5. Verify     — post-retrain re-inference on corrected frames
-6. Track      — versioned model dirs with metrics, deltas, rollback
-7. Shadow-experiment a new candidate — train at an alternate crop size
+5. Refresh    — after a successful retrain, the post-retrain chain runs
+                automatically: backfill_birdeye_primary (7 days by default)
+                → backfill_state → bbox_impact --force, so the dashboard
+                Per-class / Bbox-impact numbers track the new model.
+                Opt out with --skip-post-retrain.
+6. Verify     — post-retrain re-inference on corrected frames
+7. Track      — versioned model dirs with metrics, deltas, rollback
+8. Shadow-experiment a new candidate — train at an alternate crop size
                 / architecture, register in `experiments.json`, observe
                 delta on the dashboard, flip with `promote_experiment.py`
 ```

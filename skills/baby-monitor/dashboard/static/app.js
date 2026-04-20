@@ -993,6 +993,99 @@ async function loadBassinetChart() {
 // ---------------------------------------------------------------------------
 // Pending Corrections
 // ---------------------------------------------------------------------------
+
+// Inline label editor rendered in every "Corrected To" cell — users can
+// re-edit a previously-saved label (mistakes happen), and the row's
+// `corrected_at` bumps to now on every save so the re-edit lands ahead of
+// the previous training cutoff. Originally built to rescue phantom rows
+// (null corrected fields from pre-2026-04-19 bbox-only edits); now the
+// same control set serves both cases, with prefill rules:
+//
+//   1. If a corrected eye-state already exists on the row → prefill that
+//      (so the dropdown shows the label the user last saved).
+//   2. Otherwise, fall back to BIRDEYE's shadow prediction as a
+//      one-click "confirm what the model said" shortcut.
+//   3. Otherwise leave the dropdown unselected.
+//
+// Discard remains available on every row: real corrections can also be
+// struck (the user realised the original label was actually right).
+function _buildCorrectionEditor(c) {
+  const wrap = document.createElement('span');
+  wrap.className = 'corr-editor-controls';
+
+  const select = document.createElement('select');
+  select.className = 'corr-editor-select';
+  const options = [
+    { value: '', text: '—' },
+    { value: 'eyes_open', text: 'Eyes Open' },
+    { value: 'eyes_closed', text: 'Eyes Closed' },
+    { value: 'face_not_visible', text: 'Face Not Visible' },
+    { value: 'not_in_bassinet', text: 'Not In Bassinet' },
+  ];
+  const existing = c.correctedEyeState || '';
+  const shadowSuggestion = c.shadowBirdeyeEye
+    || (c.shadowBirdeyePresent === 0 ? 'not_in_bassinet' : '');
+  const prefill = existing || shadowSuggestion;
+  for (const o of options) {
+    const opt = document.createElement('option');
+    opt.value = o.value;
+    opt.textContent = o.text;
+    if (o.value && o.value === prefill) opt.selected = true;
+    select.appendChild(opt);
+  }
+  wrap.appendChild(select);
+
+  const saveBtn = document.createElement('button');
+  saveBtn.textContent = 'Save';
+  saveBtn.className = 'corr-editor-btn corr-editor-save';
+  saveBtn.title = 'Save label. The Corrected timestamp updates to now on every save, so re-edits land after the previous training cutoff.';
+  saveBtn.onclick = async () => {
+    const value = select.value;
+    if (!value) { saveBtn.textContent = 'pick one'; return; }
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'saving…';
+    try {
+      const res = await fetch('/api/correction/resolve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: c.id, eyeState: value }),
+      });
+      if (!res.ok) throw new Error('http ' + res.status);
+      await loadPendingCorrections();
+    } catch (err) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'error';
+      console.error('Resolve correction error:', err);
+    }
+  };
+  wrap.appendChild(saveBtn);
+
+  const discardBtn = document.createElement('button');
+  discardBtn.textContent = 'Discard';
+  discardBtn.className = 'corr-editor-btn corr-editor-discard';
+  discardBtn.title = 'Delete this correction row. The frame\'s bbox correction (if any) is preserved — only the label-correction row is removed.';
+  discardBtn.onclick = async () => {
+    discardBtn.disabled = true;
+    discardBtn.textContent = '…';
+    try {
+      const res = await fetch('/api/correction/discard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: c.id }),
+      });
+      if (!res.ok) throw new Error('http ' + res.status);
+      await loadPendingCorrections();
+    } catch (err) {
+      discardBtn.disabled = false;
+      discardBtn.textContent = 'error';
+      console.error('Discard correction error:', err);
+    }
+  };
+  wrap.appendChild(discardBtn);
+
+  return wrap;
+}
+
 async function loadPendingCorrections() {
   try {
     const res = await fetch('/api/pending-corrections');
@@ -1059,23 +1152,47 @@ async function loadPendingCorrections() {
       tdOrig.className = 'corr-label';
       tr.appendChild(tdOrig);
 
-      // Corrected label
+      // Corrected label — every row gets an inline editor so the user can
+      // re-pick a label after realising the first choice was wrong. Each
+      // save bumps `corrected_at` to now via /api/correction/resolve, so
+      // re-edits land after the previous training cutoff. Rows with a
+      // saved label prefill the dropdown from it; phantom rows (pre-
+      // 2026-04-19 bbox-only edits) fall back to BIRDEYE's shadow.
       const tdCorr = document.createElement('td');
-      tdCorr.textContent = friendlyLabel(c.correctedEyeState || c.correctedState);
-      tdCorr.className = 'corr-label corr-label-new';
+      tdCorr.className = 'corr-label corr-editor';
+      if (c.id != null) {
+        tdCorr.appendChild(_buildCorrectionEditor(c));
+      } else {
+        // Defensive: pre-migration rows without an id can't be targeted.
+        tdCorr.textContent = friendlyLabel(c.correctedEyeState || c.correctedState);
+      }
       tr.appendChild(tdCorr);
 
-      // BIRDEYE prediction — eye-state direct from shadow_birdeye_eye column
+      // BIRDEYE prediction — eye-state direct from shadow_birdeye_eye column.
+      // Colored green when it agrees with the saved correction, yellow when
+      // it disagrees. Neutral (no color) when the correction has no label
+      // yet: there's nothing to compare against, so colouring would imply a
+      // disagreement that doesn't exist. Re-paints on every save because
+      // loadPendingCorrections() rebuilds the whole row list post-resolve.
       const tdBirdeye = document.createElement('td');
+      const hasLabel = Boolean(c.correctedEyeState);
       if (c.shadowBirdeyeEye) {
         const labelMap = { eyes_open: 'Eyes Open', eyes_closed: 'Eyes Closed' };
         tdBirdeye.textContent = labelMap[c.shadowBirdeyeEye] || c.shadowBirdeyeEye;
-        const agreed = c.correctedEyeState === c.shadowBirdeyeEye;
-        tdBirdeye.className = 'corr-label' + (agreed ? ' corr-agree' : ' corr-disagree');
+        if (hasLabel) {
+          const agreed = c.correctedEyeState === c.shadowBirdeyeEye;
+          tdBirdeye.className = 'corr-label ' + (agreed ? 'corr-agree' : 'corr-disagree');
+        } else {
+          tdBirdeye.className = 'corr-label';
+        }
       } else if (c.shadowBirdeyePresent === 0) {
         tdBirdeye.textContent = 'Not Present';
-        const agreed = c.correctedEyeState === 'not_in_bassinet';
-        tdBirdeye.className = 'corr-label' + (agreed ? ' corr-agree' : ' corr-disagree');
+        if (hasLabel) {
+          const agreed = c.correctedEyeState === 'not_in_bassinet';
+          tdBirdeye.className = 'corr-label ' + (agreed ? 'corr-agree' : 'corr-disagree');
+        } else {
+          tdBirdeye.className = 'corr-label';
+        }
       } else {
         tdBirdeye.textContent = '—';
         tdBirdeye.className = 'corr-label';
@@ -1109,6 +1226,29 @@ async function loadPendingCorrections() {
 // BIRDEYE Classifiers: combined production + training validation view
 // ---------------------------------------------------------------------------
 
+// Per-classifier "Last trained" badge — same ET formatting as the global
+// meta tag. `classifierKey` is "presence" | "eye_state" | "face_detect"
+// (matches the keys emitted by get_last_trained_per_classifier).
+function lastTrainedBadge(classifierKey) {
+  const per = trainingData && trainingData.lastTrainedPerClassifier;
+  const entry = per && per[classifierKey];
+  if (!entry || !entry.timestamp) {
+    return '<div class="classifier-last-trained classifier-last-trained--empty" '
+      + 'title="This classifier has no training_runs row yet">'
+      + 'Last trained: never</div>';
+  }
+  const when = new Date(entry.timestamp).toLocaleString('en-US', {
+    timeZone: 'America/New_York', month: 'short', day: 'numeric',
+    hour: 'numeric', minute: '2-digit', hour12: true,
+  });
+  const version = entry.version
+    ? ' · <span class="classifier-last-trained-version">' + entry.version + '</span>'
+    : '';
+  return '<div class="classifier-last-trained" '
+    + 'title="Most recent training_runs row whose models_trained included this classifier (accepts presence/eye-state/face-detect singular runs, plus all / all-no-face as appropriate)">'
+    + 'Last trained: ' + when + version + '</div>';
+}
+
 function delta(curr, prev, suffix, higherIsBetter) {
   if (prev == null || curr == null) return '';
   const diff = curr - prev;
@@ -1119,17 +1259,153 @@ function delta(curr, prev, suffix, higherIsBetter) {
   return ' <span style="font-size:0.7rem;color:' + color + '">' + sign + (diff * 100).toFixed(1) + suffix + '</span>';
 }
 
+// ---- Face-detection sub-panels (3-column grid inside the face column) ----
+// These three share a common header style (title + inline description + body).
+// The description is plain text in the DOM so it's always visible — the
+// previous version relied on title="" hover tooltips which users miss.
+
+function _faceSubHeader(title, scopePill, description) {
+  const pill = scopePill
+    ? ' <span style="font-weight:400;color:var(--text-muted);font-size:0.7rem">(' + scopePill + ')</span>'
+    : '';
+  return '<div class="face-sub-header">'
+    + '<div class="safety-source-label" style="margin:0">' + title + pill + '</div>'
+    + '<div class="face-sub-desc">' + description + '</div>'
+    + '</div>';
+}
+
+function _renderFaceIouSection(iouBlock) {
+  let html = '<div class="face-sub">';
+  // Prefer the current-window IoU sample; fall back to all-time when the
+  // window is too small. Description states which scope is in use.
+  let scope = 'no data';
+  let iou = { n: 0 };
+  if (iouBlock) {
+    const iouWindowed = iouBlock.windowed || { n: 0 };
+    const iouAll = iouBlock.allTime || { n: 0 };
+    const useWindowed = iouWindowed.n >= 10;
+    iou = useWindowed ? iouWindowed : iouAll;
+    scope = useWindowed ? 'in window' : 'all time';
+  }
+  html += _faceSubHeader(
+    'IoU vs corrections',
+    scope,
+    'How tightly the face detector\'s predicted bbox overlaps your dashboard-drawn corrected bbox. IoU (Intersection-over-Union) is the standard bbox-overlap metric: 0 means no overlap, 1 means perfect match. Your drawn bbox is treated as ground truth. 0.5+ is usable; 0.75+ is tight enough for a clean downstream eye-state crop.'
+  );
+
+  if (!iouBlock || iou.n === 0) {
+    html += '<div class="safety-empty" style="padding:8px 0">No corrected bboxes yet. Use the face-box draw tool on a frame to start populating this.</div>';
+    html += '</div>';
+    return html;
+  }
+
+  html += '<div class="train-details">';
+  html += '<div class="train-row"><span>Mean IoU</span><span class="train-val ' + _safetyClass(iou.mean, [0.40, 0.65]) + '">'
+    + (iou.mean * 100).toFixed(1) + '%</span></div>';
+  html += '<div class="train-row"><span>Median (p50)</span><span class="train-val">'
+    + (iou.p50 * 100).toFixed(1) + '%</span></div>';
+  html += '<div class="train-row"><span>p10 (worst tail)</span><span class="train-val">'
+    + (iou.p10 * 100).toFixed(1) + '%</span></div>';
+
+  const over50Pct = iou.n > 0 ? iou.over50 / iou.n : 0;
+  const over75Pct = iou.n > 0 ? iou.over75 / iou.n : 0;
+  html += '<div class="train-row"><span>Usable (≥0.5)</span><span class="train-val ' + _safetyClass(over50Pct, [0.70, 0.90]) + '">'
+    + iou.over50 + '/' + iou.n + ' (' + Math.round(over50Pct * 100) + '%)</span></div>';
+  html += '<div class="train-row"><span>Tight (≥0.75)</span><span class="train-val ' + _safetyClass(over75Pct, [0.40, 0.75]) + '">'
+    + iou.over75 + '/' + iou.n + ' (' + Math.round(over75Pct * 100) + '%)</span></div>';
+  html += '</div>';
+
+  // If we fell back to allTime, tell the user so they don't read a stale
+  // mixed-version average as the current model's behavior.
+  if (scope === 'all time') {
+    const iouWindowed = iouBlock.windowed || { n: 0 };
+    html += '<div class="face-sub-footnote">(only ' + iouWindowed.n + ' corrected bboxes in the current range — showing all-time aggregate instead)</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function _renderFaceBboxImpactSection(bi, deployedVersion) {
+  let html = '<div class="face-sub">';
+  html += _faceSubHeader(
+    'Bbox impact on eye-state',
+    null,
+    'Does the face detector\'s bbox actually matter for the downstream eye-state prediction? Same eye-state model, two crops: one from BIRDEYE\'s predicted bbox, one from your corrected bbox. If both predictions agree with your ground-truth label, the bbox wasn\'t a bottleneck. Computed offline by scripts/bbox_impact.py; refreshed after every retrain.'
+  );
+
+  if (!bi || !bi.count) {
+    html += '<div class="safety-empty" style="padding:8px 0">No data yet — populates when you\'ve drawn corrected bboxes on frames that also have a confirmed eye-state label.</div>';
+    html += '</div>';
+    return html;
+  }
+
+  const predPct = Math.round(bi.accuracyOnPredicted * 100);
+  const corrPct = Math.round(bi.accuracyOnCorrected * 100);
+  const deltaPts = Math.round(bi.delta * 1000) / 10;
+  const deltaSign = deltaPts >= 0 ? '+' : '';
+  const deltaColor = deltaPts > 0.5 ? 'var(--accent-green)'
+                    : deltaPts < -0.5 ? 'var(--accent-red)'
+                    : 'var(--text-muted)';
+  const flipPct = Math.round(bi.flipRate * 100);
+
+  html += '<div class="train-details">';
+  html += '<div class="train-row"><span>On predicted bbox</span><span class="train-val">'
+    + predPct + '% (' + Math.round(bi.accuracyOnPredicted * bi.count) + '/' + bi.count + ')</span></div>';
+  html += '<div class="train-row"><span>On corrected bbox</span><span class="train-val">'
+    + corrPct + '% (' + Math.round(bi.accuracyOnCorrected * bi.count) + '/' + bi.count + ')</span></div>';
+  html += '<div class="train-row"><span>Δ (corrected − predicted)</span><span class="train-val" style="color:' + deltaColor + ';font-weight:600">'
+    + deltaSign + deltaPts.toFixed(1) + ' pts</span></div>';
+  html += '<div class="train-row"><span>Flip rate</span><span class="train-val">'
+    + flipPct + '%</span></div>';
+  html += '</div>';
+  html += '</div>';
+  return html;
+}
+
+function _renderFacePerClassSection(bi) {
+  let html = '<div class="face-sub">';
+  html += _faceSubHeader(
+    'Per-class (read this one)',
+    null,
+    'Same A/B as Bbox impact, split by eye-state class. The aggregate can hide opposite per-class deltas — if the predicted bbox helps eyes_open but hurts eyes_closed, those cancel out in the aggregate. This column tells you which class is benefiting or suffering. Each row reads: accuracy-on-predicted → accuracy-on-corrected, with the delta in points.'
+  );
+
+  if (!bi || !bi.perClass || Object.keys(bi.perClass).length === 0) {
+    html += '<div class="safety-empty" style="padding:8px 0">No per-class data yet.</div>';
+    html += '</div>';
+    return html;
+  }
+
+  html += '<div class="train-details">';
+  for (const cls of Object.keys(bi.perClass)) {
+    const pc = bi.perClass[cls];
+    const clsDelta = Math.round(pc.delta * 1000) / 10;
+    const clsSign = clsDelta >= 0 ? '+' : '';
+    const clsColor = clsDelta > 0.5 ? 'var(--accent-green)'
+                    : clsDelta < -0.5 ? 'var(--accent-red)'
+                    : 'var(--text-muted)';
+    html += '<div class="train-row"><span>' + cls + ' (n=' + pc.n + ')</span><span class="train-val" style="color:' + clsColor + '">'
+      + Math.round(pc.accuracyOnPredicted * 100) + '% → '
+      + Math.round(pc.accuracyOnCorrected * 100) + ' '
+      + '<span style="font-weight:600">' + clsSign + clsDelta.toFixed(1) + '</span></span></div>';
+  }
+  html += '</div>';
+  html += '</div>';
+  return html;
+}
+
 function renderFaceDetectionColumn() {
   const el = document.getElementById('classifier-face');
   if (!el) return;
 
   const face = safetyData ? safetyData.faceDetection : null;
   if (!face || face.total === 0) {
-    el.innerHTML = '<div class="safety-empty">No data yet — populates as new frames arrive with face detection.</div>';
+    el.innerHTML = lastTrainedBadge('face_detect')
+      + '<div class="safety-empty">No data yet — populates as new frames arrive with face detection.</div>';
     return;
   }
 
-  let html = '';
+  let html = lastTrainedBadge('face_detect');
 
   // --- Production headlines ---
   // Fallback rate already shown in the card's meta line (top of Classifiers
@@ -1148,109 +1424,29 @@ function renderFaceDetectionColumn() {
   html += '<span class="safety-headline-value">' + face.detected + ' / ' + face.total + '</span></div>';
   html += '</div>';
 
-  // --- IoU vs dashboard-drawn corrections ---
-  // This is the "how tight are the model's bboxes" metric, measured on
-  // frames where the user has drawn a corrected bbox. A corrected bbox is
-  // treated as ground truth. Two scopes: within the selected time range
-  // (tracks current model behavior) and all-time (larger N, may mix model
-  // versions). We prefer the windowed one when it has enough pairs and
-  // fall back to allTime otherwise.
-  if (face.iou) {
-    const iouWindowed = face.iou.windowed || {n: 0};
-    const iouAll = face.iou.allTime || {n: 0};
-    const useWindowed = iouWindowed.n >= 10;
-    const iou = useWindowed ? iouWindowed : iouAll;
-    const scopeLabel = useWindowed ? 'in window' : 'all time';
+  // --- IoU vs corrections + Bbox impact + Per-class — laid out in a
+  // 3-column sub-grid below so the three related A/B views sit side by
+  // side instead of stacking vertically. Each column has its own inline
+  // description (browser tooltips on the header are often unnoticed).
+  html += '<div class="face-metrics-grid">';
+  html += _renderFaceIouSection(face.iou);
+  html += _renderFaceBboxImpactSection(face.bboxImpact, safetyData && safetyData.deployedVersion);
+  html += _renderFacePerClassSection(face.bboxImpact);
+  html += '</div>';
 
-    html += '<div class="safety-source-label" title="IoU between BIRDEYE predicted bbox and your dashboard-drawn corrected bbox. Corrected bbox is treated as ground truth.">IoU vs corrections <span style="font-weight:400;color:var(--text-muted);font-size:0.75rem">(' + scopeLabel + ')</span></div>';
-
-    if (iou.n === 0) {
-      html += '<div class="safety-empty" style="padding:8px 0">No corrected bboxes yet. Use the face-box draw tool on a frame to start populating this.</div>';
-    } else {
-      html += '<div class="train-details">';
-      html += '<div class="train-row"><span title="Mean Intersection-over-Union across all frames where you corrected the face bbox">Mean IoU</span><span class="train-val ' + _safetyClass(iou.mean, [0.40, 0.65]) + '">'
-        + (iou.mean * 100).toFixed(1) + '%</span></div>';
-      html += '<div class="train-row"><span title="Median (p50) IoU — less sensitive to outliers than mean">Median</span><span class="train-val">'
-        + (iou.p50 * 100).toFixed(1) + '%</span></div>';
-      html += '<div class="train-row"><span title="Worst-decile IoU — the 10% of frames where the model is furthest from your correction">p10 (worst tail)</span><span class="train-val">'
-        + (iou.p10 * 100).toFixed(1) + '%</span></div>';
-
-      const over50Pct = iou.n > 0 ? iou.over50 / iou.n : 0;
-      const over75Pct = iou.n > 0 ? iou.over75 / iou.n : 0;
-      html += '<div class="train-row"><span title="Fraction of frames where IoU ≥ 0.5 — conventional usable-detection threshold">Usable (≥0.5)</span><span class="train-val ' + _safetyClass(over50Pct, [0.70, 0.90]) + '">'
-        + iou.over50 + ' / ' + iou.n + ' (' + Math.round(over50Pct * 100) + '%)</span></div>';
-      html += '<div class="train-row"><span title="Fraction of frames where IoU ≥ 0.75 — tight enough for a reliable downstream eye-state crop">Tight (≥0.75)</span><span class="train-val ' + _safetyClass(over75Pct, [0.40, 0.75]) + '">'
-        + iou.over75 + ' / ' + iou.n + ' (' + Math.round(over75Pct * 100) + '%)</span></div>';
-      html += '</div>';
-      // Footnote: if we fell back to allTime, show both counts so it's
-      // obvious that the window is insufficient rather than the model is bad.
-      if (!useWindowed && iouAll.n > 0) {
-        html += '<div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px">'
-          + '(only ' + iouWindowed.n + ' corrected bboxes in the current range — showing all-time aggregate instead)</div>';
-      }
-    }
-  }
-
-  // --- Bbox impact on downstream eye-state ---
-  // Does running eye-state on the corrected bbox produce a better answer
-  // than running it on BIRDEYE's predicted bbox? Same model, two crops.
-  // Computed offline by scripts/bbox_impact.py. The per-class split is
-  // the part worth reading — the aggregate can hide opposite deltas per
-  // class (which is exactly what happened on the first run of this).
+  // Shared staleness / refresh footer — Bbox impact and Per-class both
+  // come from bbox_impact.py, so a single footer applies to both.
   if (face.bboxImpact && face.bboxImpact.count > 0) {
     const bi = face.bboxImpact;
-    const predPct = Math.round(bi.accuracyOnPredicted * 100);
-    const corrPct = Math.round(bi.accuracyOnCorrected * 100);
-    const deltaPts = Math.round(bi.delta * 1000) / 10; // one decimal
-    const deltaSign = deltaPts >= 0 ? '+' : '';
-    const deltaColor = deltaPts > 0.5 ? 'var(--accent-green)'
-                      : deltaPts < -0.5 ? 'var(--accent-red)'
-                      : 'var(--text-muted)';
-    const flipPct = Math.round(bi.flipRate * 100);
-
-    html += '<div class="safety-source-label" title="Eye-state accuracy when run on BIRDEYE\'s predicted bbox vs your corrected bbox. Same eye-state model, two crops. Computed by scripts/bbox_impact.py.">Bbox impact on eye-state</div>';
-    html += '<div class="train-details">';
-    html += '<div class="train-row"><span title="Eye-state accuracy when the classifier reads from BIRDEYE\'s predicted bbox crop">On predicted bbox</span><span class="train-val">'
-      + predPct + '% (' + Math.round(bi.accuracyOnPredicted * bi.count) + '/' + bi.count + ')</span></div>';
-    html += '<div class="train-row"><span title="Eye-state accuracy when the classifier reads from your dashboard-drawn corrected bbox crop">On corrected bbox</span><span class="train-val">'
-      + corrPct + '% (' + Math.round(bi.accuracyOnCorrected * bi.count) + '/' + bi.count + ')</span></div>';
-    html += '<div class="train-row"><span title="Accuracy delta: positive means corrected bbox helped, negative means it hurt">Δ (corrected − predicted)</span><span class="train-val" style="color:' + deltaColor + ';font-weight:600">'
-      + deltaSign + deltaPts.toFixed(1) + ' pts</span></div>';
-    html += '<div class="train-row"><span title="Fraction of frames where the eye-state prediction changed between the two bboxes — a measure of how much the bbox geometry matters regardless of which one is right">Flip rate</span><span class="train-val">'
-      + flipPct + '%</span></div>';
-    html += '</div>';
-
-    // Per-class breakdown — this is the load-bearing part of the whole
-    // analysis. The aggregate is easy to misread; the per-class view is
-    // where the real signal lives.
-    if (bi.perClass) {
-      html += '<div class="safety-source-label" style="margin-top:10px;font-size:0.7rem">Per-class (this is the number to read)</div>';
-      html += '<div class="train-details">';
-      for (const cls of Object.keys(bi.perClass)) {
-        const pc = bi.perClass[cls];
-        const clsDelta = Math.round(pc.delta * 1000) / 10;
-        const clsSign = clsDelta >= 0 ? '+' : '';
-        const clsColor = clsDelta > 0.5 ? 'var(--accent-green)'
-                        : clsDelta < -0.5 ? 'var(--accent-red)'
-                        : 'var(--text-muted)';
-        html += '<div class="train-row"><span>' + cls + ' (n=' + pc.n + ')</span><span class="train-val" style="color:' + clsColor + '">'
-          + Math.round(pc.accuracyOnPredicted * 100) + '% → '
-          + Math.round(pc.accuracyOnCorrected * 100) + '% '
-          + '<span style="font-weight:600">' + clsSign + clsDelta.toFixed(1) + '</span></span></div>';
-      }
-      html += '</div>';
-    }
-
-    // Staleness + how to refresh
     const ranAt = bi.ranAt ? new Date(bi.ranAt).toLocaleString('en-US', {
       timeZone: 'America/New_York', month: 'short', day: 'numeric',
-      hour: 'numeric', minute: '2-digit', hour12: true
+      hour: 'numeric', minute: '2-digit', hour12: true,
     }) : '?';
     const versionMatches = bi.modelVersion === (safetyData && safetyData.deployedVersion);
     const staleWarning = !versionMatches
       ? '<span style="color:var(--accent-red);font-weight:600"> · STALE (run on ' + bi.modelVersion + ')</span>'
       : '';
-    html += '<div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px">ran ' + ranAt + staleWarning + ' · refresh: <code>python scripts/bbox_impact.py --force</code></div>';
+    html += '<div style="font-size:0.7rem;color:var(--text-muted);margin-top:6px">Bbox impact & Per-class ran ' + ranAt + staleWarning + ' · refresh: <code>python scripts/bbox_impact.py --force</code> (also runs automatically after every dashboard retrain)</div>';
   }
 
   // --- Training validation metrics ---
@@ -1271,8 +1467,11 @@ function renderFaceDetectionColumn() {
     }
 
     if (faceMetrics.mean_iou != null) {
-      html += '<div class="train-row"><span title="Mean Intersection-over-Union on positive validation samples (face present)">Mean IoU (val)</span><span class="train-val">'
-        + (faceMetrics.mean_iou * 100).toFixed(1) + '%</span></div>';
+      const iouN = faceMetrics.iou_samples != null
+        ? ' <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem">(n=' + faceMetrics.iou_samples + ')</span>'
+        : '';
+      html += '<div class="train-row"><span title="Mean Intersection-over-Union averaged over only the positive validation samples (frames labelled as having a face). iou_samples is that positive count — smaller than val_total.">Mean IoU (val)</span><span class="train-val">'
+        + (faceMetrics.mean_iou * 100).toFixed(1) + '%' + iouN + '</span></div>';
     }
     if (faceMetrics.conf_accuracy != null) {
       html += '<div class="train-row"><span title="Binary accuracy: correctly predicting face present vs absent (on val set)">Conf Accuracy (val)</span><span class="train-val">'
@@ -1280,8 +1479,11 @@ function renderFaceDetectionColumn() {
     }
     // Held-out test metrics — populated by future training runs
     if (faceMetrics.test_mean_iou != null) {
-      html += '<div class="train-row"><span title="Mean IoU on held-out test set — not used for model selection, so this is the honest generalization number">Mean IoU (test)</span><span class="train-val">'
-        + (faceMetrics.test_mean_iou * 100).toFixed(1) + '%</span></div>';
+      const testIouN = faceMetrics.test_iou_samples != null
+        ? ' <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem">(n=' + faceMetrics.test_iou_samples + ')</span>'
+        : '';
+      html += '<div class="train-row"><span title="Mean IoU on held-out test set, averaged over positive samples only (test_iou_samples). Not used for model selection, so this is the honest generalization number.">Mean IoU (test)</span><span class="train-val">'
+        + (faceMetrics.test_mean_iou * 100).toFixed(1) + '%' + testIouN + '</span></div>';
     }
     if (faceMetrics.test_conf_accuracy != null) {
       html += '<div class="train-row"><span title="Binary present/absent accuracy on held-out test set">Conf Accuracy (test)</span><span class="train-val">'
@@ -1293,7 +1495,7 @@ function renderFaceDetectionColumn() {
         + faceMetrics.best_epoch + ' / ' + faceMetrics.total_epochs + '</span></div>';
     }
     if (faceMetrics.val_loss != null) {
-      html += '<div class="train-row"><span title="Combined SmoothL1 bbox + BCE confidence loss on validation set">Val loss</span><span class="train-val">'
+      html += '<div class="train-row"><span title="Average per-sample combined loss on val set: BCE(confidence) + 2×SmoothL1(bbox). The 2× weight is applied in the training loop (train_classifiers.py).">Val loss</span><span class="train-val">'
         + faceMetrics.val_loss + '</span></div>';
     }
     html += '</div>';
@@ -1545,7 +1747,7 @@ function renderClassifierColumn(elId, type) {
 
   const isPresence = type === 'presence';
   const classes = isPresence ? ['not_present', 'present'] : ['eyes_open', 'eyes_closed'];
-  let html = '';
+  let html = lastTrainedBadge(isPresence ? 'presence' : 'eye_state');
 
   // --- vs Corrections (ground truth) ---
   const safety = safetyData ? (isPresence ? safetyData.presence : safetyData.eyeState) : null;
@@ -2114,10 +2316,195 @@ async function loadAll() {
     loadBassinetChart(),
     loadPendingCorrections(),
     loadPipelineHistory(),
+    loadEyeStateDailyMetrics(),
+    loadSystemUsage(),
   ]);
   document.getElementById('footer-refresh').textContent =
     'Last refreshed: ' + new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York' });
 }
+
+// ---------------------------------------------------------------------------
+// System Load (Models tab)
+// ---------------------------------------------------------------------------
+// Backed by /api/system-usage (dashboard/system_usage.py). Polled every 10s
+// so the panel tracks in close-to-real-time — useful when the user kicks
+// off a retrain from the dashboard and wants to watch the load climb.
+
+function _fmtBytes(n) {
+  if (n == null) return '—';
+  const units = [['TB', 1e12], ['GB', 1e9], ['MB', 1e6], ['KB', 1e3]];
+  for (const [u, d] of units) {
+    if (n >= d) return (n / d).toFixed(1) + ' ' + u;
+  }
+  return n + ' B';
+}
+
+function _loadRatioClass(ratio) {
+  // Thresholds are tuned for a laptop, not a server. 1.0× is fully used,
+  // >1.0 means the run queue is backed up. Sustained >2× is where macOS
+  // starts noticeably lagging.
+  if (ratio >= 2.0) return 'bad';
+  if (ratio >= 1.2) return 'warn';
+  return 'good';
+}
+
+function _trendArrow(trend) {
+  if (trend > 0.3) return '↑';
+  if (trend < -0.3) return '↓';
+  return '→';
+}
+
+async function loadSystemUsage() {
+  try {
+    const res = await fetch('/api/system-usage');
+    if (!res.ok) throw new Error('http ' + res.status);
+    const data = await res.json();
+    _renderSystemUsage(data);
+  } catch (err) {
+    console.error('system-usage error:', err);
+    const el = document.getElementById('system-usage-body');
+    if (el) el.innerHTML = '<div class="safety-empty">Failed to load system usage.</div>';
+  }
+}
+
+function _renderSystemUsage(data) {
+  const body = document.getElementById('system-usage-body');
+  const asOfEl = document.getElementById('system-usage-asof');
+  const refreshEl = document.getElementById('system-usage-refresh');
+  if (!body) return;
+
+  if (asOfEl) {
+    asOfEl.textContent = data.asOf
+      ? '(as of ' + new Date(data.asOf).toLocaleTimeString('en-US', {
+          timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit',
+          second: '2-digit', hour12: true,
+        }) + ')'
+      : '';
+  }
+  if (refreshEl) refreshEl.textContent = 'auto-refreshes every 10s';
+
+  const load = data.load || {};
+  const mem = data.memory || {};
+  const disk = data.disk || [];
+  const bm = (data.babyMonitor && data.babyMonitor.sizes) || {};
+  const bmProcs = (data.babyMonitor && data.babyMonitor.processes) || [];
+  const top = data.topProcesses || [];
+
+  let html = '';
+
+  // --- Headline row: load + memory + disk at a glance ---
+  html += '<div class="sys-headline-row">';
+
+  // Load
+  const ratioCls = _loadRatioClass(load.ratio || 0);
+  const arrow = _trendArrow(load.trend || 0);
+  html += '<div class="sys-tile">';
+  html += '<div class="sys-tile-label">Load (1 / 5 / 15 min)</div>';
+  html += '<div class="sys-tile-value ' + ratioCls + '">'
+    + (load.oneMin != null ? load.oneMin.toFixed(2) : '—')
+    + ' <span class="sys-tile-sub">/ ' + (load.fiveMin != null ? load.fiveMin.toFixed(2) : '—')
+    + ' / ' + (load.fifteenMin != null ? load.fifteenMin.toFixed(2) : '—')
+    + '</span></div>';
+  html += '<div class="sys-tile-note" title="Unix load average divided by core count. >1.0 means the run queue is longer than the CPU can process in real time.">'
+    + (load.cores || '?') + ' cores · ratio '
+    + (load.ratio != null ? load.ratio.toFixed(2) + '× ' + arrow : '—')
+    + '</div>';
+  html += '</div>';
+
+  // Memory
+  const memCls = mem.usedPct == null ? ''
+    : (mem.usedPct >= 90 ? 'bad' : (mem.usedPct >= 75 ? 'warn' : 'good'));
+  html += '<div class="sys-tile">';
+  html += '<div class="sys-tile-label">Memory</div>';
+  html += '<div class="sys-tile-value ' + memCls + '">'
+    + (mem.usedPct != null ? mem.usedPct.toFixed(1) + '%' : '—')
+    + '</div>';
+  html += '<div class="sys-tile-note" title="Pages that are free, active, inactive, wired, or compressed, reported via vm_stat. usedPct = (total − free) / total.">'
+    + _fmtBytes(mem.totalBytes) + ' total · '
+    + _fmtBytes(mem.compressedBytes) + ' compressed'
+    + '</div>';
+  html += '</div>';
+
+  // Disk (workspace row only; root is redundant on single-APFS-volume macs)
+  const workspace = disk.find((d) => d.label === 'workspace') || disk[0];
+  if (workspace) {
+    const diskCls = workspace.usedPct >= 95 ? 'bad'
+      : (workspace.usedPct >= 85 ? 'warn' : 'good');
+    html += '<div class="sys-tile">';
+    html += '<div class="sys-tile-label">Disk (workspace volume)</div>';
+    html += '<div class="sys-tile-value ' + diskCls + '">'
+      + workspace.usedPct.toFixed(1) + '%</div>';
+    html += '<div class="sys-tile-note">'
+      + _fmtBytes(workspace.freeBytes) + ' free · '
+      + _fmtBytes(workspace.totalBytes) + ' total'
+      + '</div>';
+    html += '</div>';
+  }
+
+  // Baby-monitor data sizes
+  html += '<div class="sys-tile">';
+  html += '<div class="sys-tile-label">Baby-monitor data</div>';
+  html += '<div class="sys-tile-value">' + _fmtBytes(bm.dataDirBytes) + '</div>';
+  html += '<div class="sys-tile-note">'
+    + 'frames ' + _fmtBytes(bm.framesDirBytes) + ' · '
+    + 'models ' + _fmtBytes(bm.modelsDirBytes) + ' · '
+    + 'db ' + _fmtBytes(bm.monitorDbBytes)
+    + '</div>';
+  html += '</div>';
+
+  html += '</div>';
+
+  // --- Baby-monitor processes (always shown; explains whose load this is) ---
+  html += '<div class="sys-section-label">Baby-monitor processes</div>';
+  if (bmProcs.length === 0) {
+    html += '<div class="safety-empty" style="padding:4px 0">'
+      + 'None of the known baby-monitor scripts are running right now. '
+      + '(Expected: dashboard/app.py is always up; monitor.py is ephemeral per 1-min tick.)'
+      + '</div>';
+  } else {
+    html += _sysProcessTable(bmProcs, { showScript: true });
+  }
+
+  // --- Top CPU processes ---
+  html += '<div class="sys-section-label">Top processes (by CPU)</div>';
+  if (top.length === 0) {
+    html += '<div class="safety-empty" style="padding:4px 0">No process data.</div>';
+  } else {
+    html += _sysProcessTable(top.slice(0, 6), { showScript: false });
+  }
+
+  body.innerHTML = html;
+}
+
+function _sysProcessTable(rows, opts) {
+  let html = '<table class="sys-proc-table"><thead><tr>';
+  html += '<th>PID</th>';
+  if (opts.showScript) html += '<th>Script</th>';
+  html += '<th>CPU</th><th>Mem</th><th>RSS</th><th>Elapsed</th><th>Command</th>';
+  html += '</tr></thead><tbody>';
+  for (const p of rows) {
+    const hotCls = p.cpuPct >= 100 ? 'sys-proc-hot'
+      : (p.cpuPct >= 25 ? 'sys-proc-warm' : '');
+    html += '<tr class="' + hotCls + '">';
+    html += '<td class="num">' + p.pid + '</td>';
+    if (opts.showScript) {
+      html += '<td><code>' + (p.script || '—') + '</code></td>';
+    }
+    html += '<td class="num">' + (p.cpuPct != null ? p.cpuPct.toFixed(1) + '%' : '—') + '</td>';
+    html += '<td class="num">' + (p.memPct != null ? p.memPct.toFixed(1) + '%' : '—') + '</td>';
+    html += '<td class="num">' + _fmtBytes((p.rssKb || 0) * 1024) + '</td>';
+    html += '<td class="num">' + (p.etime || '—') + '</td>';
+    html += '<td>' + (p.command || '—') + '</td>';
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  return html;
+}
+
+// Kick off a 10s polling loop for the System Load card. Separate from the
+// main loadAll() cadence so it's lightweight and refreshes during retrain
+// without jittering the other panels.
+setInterval(loadSystemUsage, 10000);
 
 // --- Tab switching ---
 // The main content is split into three tabs: Monitor (live watching),
@@ -2233,6 +2620,115 @@ async function loadPipelineHistory() {
   }
 }
 
+// --- Eye-State Daily Metrics (Models tab) ---
+// Three SVG line charts (precision / recall / F1) with one line per class
+// (eyes_open, eyes_closed). Powered by /api/eye-state-daily-metrics.
+//
+// Days where a class has zero ground-truth support render as a gap so
+// "no signal today" doesn't masquerade as a 0.0 metric. Hover dots show
+// the per-day value + support count.
+const EYE_METRICS = [
+  { key: 'precision', label: 'Precision' },
+  { key: 'recall', label: 'Recall' },
+  { key: 'f1', label: 'F1 Score' },
+];
+const EYE_CLASSES = [
+  { key: 'eyes_open', label: 'Eyes open', color: '#f0b429' },
+  { key: 'eyes_closed', label: 'Eyes closed', color: '#4a9eff' },
+];
+
+async function loadEyeStateDailyMetrics() {
+  const days = document.getElementById('eye-metrics-days').value;
+  const grid = document.getElementById('eye-metrics-grid');
+  const note = document.getElementById('eye-metrics-note');
+  try {
+    const res = await fetch('/api/eye-state-daily-metrics?days=' + encodeURIComponent(days));
+    const data = await res.json();
+    const rows = data.rows || [];
+    if (!rows.length) {
+      grid.innerHTML = '<div class="muted" style="padding:12px">No labelled frames in this range.</div>';
+      note.textContent = '';
+      return;
+    }
+    const totalLabels = rows.reduce((s, r) => s + (r.total || 0), 0);
+    note.textContent = `${rows.length} day${rows.length === 1 ? '' : 's'} · ${totalLabels.toLocaleString()} labelled frames`;
+    grid.innerHTML = EYE_METRICS.map(m => renderEyeMetricChart(m, rows)).join('');
+  } catch (e) {
+    grid.innerHTML = `<div class="muted" style="padding:12px">Error: ${e.message}</div>`;
+    note.textContent = '';
+  }
+}
+
+function renderEyeMetricChart(metric, rows) {
+  // SVG layout: 280×140 plot area inside a 320×190 viewBox.
+  const W = 320, H = 190;
+  const PAD = { top: 16, right: 12, bottom: 38, left: 32 };
+  const plotW = W - PAD.left - PAD.right;
+  const plotH = H - PAD.top - PAD.bottom;
+  const n = rows.length;
+  // X positions evenly spaced; if only one day, center it.
+  const xAt = i => n === 1 ? PAD.left + plotW / 2 : PAD.left + (i / (n - 1)) * plotW;
+  const yAt = v => PAD.top + (1 - v) * plotH;
+
+  // Y-axis gridlines at 0, 0.5, 1.0
+  let svg = `<svg viewBox="0 0 ${W} ${H}" class="eye-metric-svg" preserveAspectRatio="xMidYMid meet">`;
+  for (const v of [0, 0.5, 1.0]) {
+    const y = yAt(v);
+    svg += `<line x1="${PAD.left}" y1="${y}" x2="${W - PAD.right}" y2="${y}" class="eye-metric-grid"/>`;
+    svg += `<text x="${PAD.left - 4}" y="${y + 3}" class="eye-metric-axis" text-anchor="end">${v.toFixed(1)}</text>`;
+  }
+
+  // X-axis labels: first, middle, last (avoids crowding for 14- or 30-day ranges)
+  const labelIdxs = n <= 1 ? [0] : n === 2 ? [0, 1] : [0, Math.floor((n - 1) / 2), n - 1];
+  for (const i of labelIdxs) {
+    const d = rows[i].date.slice(5); // MM-DD
+    svg += `<text x="${xAt(i)}" y="${H - PAD.bottom + 14}" class="eye-metric-axis" text-anchor="middle">${d}</text>`;
+  }
+
+  // One polyline per class, broken by gaps where the metric is null.
+  for (const cls of EYE_CLASSES) {
+    let segment = [];
+    const flush = () => {
+      if (segment.length === 0) return;
+      const pts = segment.map(([x, y]) => `${x},${y}`).join(' ');
+      if (segment.length === 1) {
+        // Lone point — render just the dot below.
+      } else {
+        svg += `<polyline points="${pts}" class="eye-metric-line" stroke="${cls.color}"/>`;
+      }
+      segment = [];
+    };
+    rows.forEach((r, i) => {
+      const v = r[cls.key] && r[cls.key][metric.key];
+      if (v == null) { flush(); return; }
+      segment.push([xAt(i), yAt(v)]);
+    });
+    flush();
+    // Dots with hover titles for every defined point
+    rows.forEach((r, i) => {
+      const cell = r[cls.key];
+      const v = cell ? cell[metric.key] : null;
+      if (v == null) return;
+      const title = `${r.date} · ${cls.label} ${metric.label.toLowerCase()}: ${v.toFixed(3)} (n=${cell.support})`;
+      svg += `<circle cx="${xAt(i)}" cy="${yAt(v)}" r="2.5" fill="${cls.color}"><title>${title}</title></circle>`;
+    });
+  }
+
+  svg += `</svg>`;
+
+  const legend = EYE_CLASSES.map(c =>
+    `<span><span class="legend-dot" style="background:${c.color}"></span>${c.label}</span>`
+  ).join('');
+
+  return `
+    <div class="eye-metric-card">
+      <div class="eye-metric-title">${metric.label}</div>
+      ${svg}
+      <div class="eye-metric-legend">${legend}</div>
+    </div>
+  `;
+}
+
 // --- Recap tab ---
 // Day-in-a-minute time-lapse. Clicking Generate POSTs to /api/recap/generate,
 // which stitches the day's frames via ffmpeg and caches the MP4 by
@@ -2320,5 +2816,6 @@ document.getElementById('events-type').addEventListener('change', loadEvents);
 document.getElementById('events-range').addEventListener('change', loadEvents);
 document.getElementById('bassinet-days').addEventListener('change', loadBassinetChart);
 document.getElementById('pipeline-history-days').addEventListener('change', loadPipelineHistory);
+document.getElementById('eye-metrics-days').addEventListener('change', loadEyeStateDailyMetrics);
 loadAll();
 setInterval(loadAll, REFRESH_INTERVAL_SEC * 1000);

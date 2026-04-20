@@ -137,6 +137,8 @@ python scripts/train_classifiers.py --sleep-log ... --frames ... --model eye-sta
 
 Labels come from the cloud API's annotations in sleep-log.jsonl (no manual labeling needed). `--face-crops` adds manually validated face images to improve awake→asleep accuracy.
 
+**Post-retrain chain (automatic since 2026-04-19):** `monitor.py --retrain` (and the dashboard's Retrain button, which shells to the same command) triggers a chain after the new model is deployed: `backfill_birdeye_primary.py --start=<7 days ago>` → `backfill_state.py` → `bbox_impact.py --force`. This keeps the dashboard's Per-class / Bbox-impact numbers pinned to the deployed model without a manual follow-up. Opt out with `--skip-post-retrain`; widen the backfill window with `--post-retrain-backfill-days N`. Chain-step failures are logged but non-fatal — the retrained model is already persisted.
+
 ## Directory structure
 
 ```

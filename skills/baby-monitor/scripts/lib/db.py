@@ -702,7 +702,7 @@ def get_pending_corrections(last_trained: str = None) -> list[dict]:
     conn = get_connection()
     if last_trained:
         rows = conn.execute("""
-            SELECT c.corrected_at, c.original_timestamp, c.frame,
+            SELECT c.id, c.corrected_at, c.original_timestamp, c.frame,
                    c.original_state, c.corrected_state,
                    c.original_eye_state, c.corrected_eye_state,
                    c.detection_method, c.source,
@@ -715,7 +715,7 @@ def get_pending_corrections(last_trained: str = None) -> list[dict]:
         """, (last_trained,)).fetchall()
     else:
         rows = conn.execute("""
-            SELECT c.corrected_at, c.original_timestamp, c.frame,
+            SELECT c.id, c.corrected_at, c.original_timestamp, c.frame,
                    c.original_state, c.corrected_state,
                    c.original_eye_state, c.corrected_eye_state,
                    c.detection_method, c.source,
@@ -729,6 +729,7 @@ def get_pending_corrections(last_trained: str = None) -> list[dict]:
     result = []
     for row in rows:
         result.append({
+            "id": row["id"],
             "correctedAt": row["corrected_at"],
             "originalTimestamp": row["original_timestamp"],
             "frame": row["frame"],
@@ -744,6 +745,49 @@ def get_pending_corrections(last_trained: str = None) -> list[dict]:
             "eyeConfidence": row["eye_confidence"],
         })
     return result
+
+
+def resolve_correction(correction_id: int, new_eye_state: str, now: str) -> dict | None:
+    """Resolve a phantom correction row by filling in its corrected_eye_state.
+
+    Used by the dashboard to turn a bbox-only (null-labelled) correction into a
+    real eye-state correction in one click, without creating a duplicate row.
+    Bumps `corrected_at` to `now` so the resolution shows up in the "pending
+    since last training" window, not at the original phantom timestamp.
+
+    Returns the updated row dict (same shape as get_pending_corrections), or
+    None if no row with that id exists.
+    """
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT original_timestamp FROM corrections WHERE id = ?",
+        (correction_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute(
+        "UPDATE corrections SET corrected_eye_state = ?, corrected_at = ? WHERE id = ?",
+        (new_eye_state, now, correction_id),
+    )
+    conn.commit()
+    return {
+        "id": correction_id,
+        "originalTimestamp": row["original_timestamp"],
+        "correctedEyeState": new_eye_state,
+        "correctedAt": now,
+    }
+
+
+def delete_correction(correction_id: int) -> bool:
+    """Delete a correction row outright.
+
+    Used to discard phantom (bbox-only) correction rows that the dashboard
+    user does not want to label. Returns True if a row was removed.
+    """
+    conn = get_connection()
+    cur = conn.execute("DELETE FROM corrections WHERE id = ?", (correction_id,))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 # ---------------------------------------------------------------------------
@@ -799,6 +843,40 @@ def get_last_training_runs(n: int = 2) -> list[dict]:
             "started_at": row["started_at"],
             "finished_at": row["finished_at"],
         })
+    return result
+
+
+def get_last_trained_per_classifier() -> dict:
+    """Return the most recent training_runs timestamp + version per classifier.
+
+    Keys: "presence", "eye_state", "face_detect". Value per key is
+    `{"timestamp": ISO-str, "version": str}` or `None` if that classifier
+    has never been trained.
+
+    `models_trained` is the CLI `--model` value — one of:
+      presence, eye-state, face-detect, all, all-no-face
+    A run labelled `all` trains all three; `all-no-face` skips the face
+    detector; the singular names train only that one classifier.
+    """
+    conn = get_connection()
+    mapping = {
+        "presence":   ("presence",   "all", "all-no-face"),
+        "eye_state":  ("eye-state",  "all", "all-no-face"),
+        "face_detect": ("face-detect", "all"),
+    }
+    result: dict = {}
+    for key, accepted in mapping.items():
+        placeholders = ",".join("?" * len(accepted))
+        row = conn.execute(
+            f"SELECT timestamp, version FROM training_runs "
+            f"WHERE models_trained IN ({placeholders}) "
+            f"ORDER BY timestamp DESC LIMIT 1",
+            accepted,
+        ).fetchone()
+        result[key] = (
+            {"timestamp": row["timestamp"], "version": row["version"]}
+            if row else None
+        )
     return result
 
 
@@ -1147,6 +1225,115 @@ def get_safety_stats(hours: float = 168) -> dict:
     }
 
 
+def get_eye_state_daily_metrics(days: int = 14) -> dict:
+    """Per-ET-day precision/recall/F1 for BIRDEYE eye-state vs ground truth.
+
+    Mirrors the eye-state confusion logic from ``get_safety_stats`` but
+    buckets by ET day so the dashboard can plot a daily trend per class.
+    Truth source order matches ``get_safety_stats``:
+        correction.corrected_eye_state > correction.corrected_state >
+        reviewed entry's existing eye_state.
+    Predictions come from ``shadow_birdeye_eye`` (BIRDEYE's immutable
+    audit trail), so corrections that overwrite the primary ``eye_state``
+    field don't contaminate the prediction side.
+
+    Days with zero labelled support for a class report ``None`` for that
+    class's metrics — the chart renders a gap rather than a misleading 0.
+    """
+    conn = get_connection()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    STATE_TO_EYE = {"asleep": "eyes_closed", "awake": "eyes_open"}
+    eye_classes = ("eyes_open", "eyes_closed")
+
+    rows = conn.execute(f"""
+        SELECT date(e.timestamp, '{_ET_SHIFT}') AS et_date,
+               e.timestamp,
+               e.state AS cloud_state,
+               e.eye_state AS cloud_eye_state,
+               e.shadow_birdeye_eye,
+               e.baby_present,
+               e.eye_state_edited,
+               e.reviewed,
+               c.corrected_eye_state,
+               c.corrected_state
+        FROM entries e
+        LEFT JOIN corrections c ON c.original_timestamp = e.timestamp
+        WHERE e.timestamp >= ?
+          AND (e.reviewed = 1 OR e.eye_state_edited = 1)
+        ORDER BY e.timestamp ASC
+    """, (cutoff,)).fetchall()
+
+    # If a frame has multiple correction rows, keep only the latest one.
+    seen: set[str] = set()
+    unique_rows = []
+    for row in reversed(rows):
+        ts = row["timestamp"]
+        if ts in seen:
+            continue
+        seen.add(ts)
+        unique_rows.append(row)
+    unique_rows.reverse()
+
+    # Per-day pairs of (truth, predicted) restricted to binary eye labels.
+    per_day_pairs: dict[str, list[tuple[str, str]]] = {}
+    for row in unique_rows:
+        truth_eye: str | None = None
+        if row["corrected_eye_state"] in eye_classes:
+            truth_eye = row["corrected_eye_state"]
+        elif row["corrected_state"]:
+            mapped = STATE_TO_EYE.get((row["corrected_state"] or "").lower())
+            if mapped:
+                truth_eye = mapped
+        elif row["reviewed"] and row["baby_present"]:
+            ce = row["cloud_eye_state"]
+            if ce in eye_classes:
+                truth_eye = ce
+            else:
+                truth_eye = STATE_TO_EYE.get((row["cloud_state"] or "").lower())
+        if truth_eye not in eye_classes:
+            continue
+
+        pred_eye = row["shadow_birdeye_eye"]
+        if pred_eye not in eye_classes:
+            continue  # BIRDEYE didn't produce a binary call for this frame
+
+        d = row["et_date"]
+        if not d:
+            continue
+        per_day_pairs.setdefault(d, []).append((truth_eye, pred_eye))
+
+    def class_metrics(pairs: list[tuple[str, str]], cls: str) -> dict:
+        tp = sum(1 for t, p in pairs if t == cls and p == cls)
+        fp = sum(1 for t, p in pairs if t != cls and p == cls)
+        fn = sum(1 for t, p in pairs if t == cls and p != cls)
+        support = tp + fn
+        if support == 0:
+            # No ground-truth examples of this class today → metrics undefined.
+            return {"precision": None, "recall": None, "f1": None, "support": 0}
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / support
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        return {
+            "precision": round(precision, 3),
+            "recall": round(recall, 3),
+            "f1": round(f1, 3),
+            "support": support,
+        }
+
+    rows_out = []
+    for d in sorted(per_day_pairs):
+        pairs = per_day_pairs[d]
+        rows_out.append({
+            "date": d,
+            "total": len(pairs),
+            "eyes_open": class_metrics(pairs, "eyes_open"),
+            "eyes_closed": class_metrics(pairs, "eyes_closed"),
+        })
+
+    return {"days": days, "rows": rows_out}
+
+
 def get_experiment_stats(name: str, hours: float = 168) -> dict:
     """Aggregate metrics for a single shadow experiment over a time window.
 
@@ -1451,15 +1638,19 @@ class MonitorDB:
     insert_correction = staticmethod(insert_correction)
     get_pending_corrections_count = staticmethod(get_pending_corrections_count)
     get_pending_corrections = staticmethod(get_pending_corrections)
+    resolve_correction = staticmethod(resolve_correction)
+    delete_correction = staticmethod(delete_correction)
     mark_reviewed = staticmethod(mark_reviewed)
     get_reviewed_ground_truth = staticmethod(get_reviewed_ground_truth)
 
     # Training
     insert_training_run = staticmethod(insert_training_run)
     get_last_training_runs = staticmethod(get_last_training_runs)
+    get_last_trained_per_classifier = staticmethod(get_last_trained_per_classifier)
     update_training_run_metrics = staticmethod(update_training_run_metrics)
     get_training_duration_stats = staticmethod(get_training_duration_stats)
     get_safety_stats = staticmethod(get_safety_stats)
+    get_eye_state_daily_metrics = staticmethod(get_eye_state_daily_metrics)
 
     # State
     get_state = staticmethod(get_state)

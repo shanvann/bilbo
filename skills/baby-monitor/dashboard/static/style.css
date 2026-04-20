@@ -10,6 +10,7 @@
   --accent-green: #4caf50;
   --accent-orange: #ff9800;
   --accent-red: #ef5350;
+  --accent-yellow: #ffd54f;
   --accent-purple: #ab47bc;
   --border: #2a3a5c;
   --radius: 10px;
@@ -752,6 +753,52 @@ footer {
   color: var(--accent-blue);
   margin-bottom: 10px;
 }
+.classifier-last-trained {
+  font-size: 0.7rem;
+  color: var(--text-muted, #667);
+  margin: -6px 0 10px;
+  letter-spacing: 0.01em;
+}
+.classifier-last-trained--empty {
+  color: var(--accent-orange);
+  font-style: italic;
+}
+.classifier-last-trained-version {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.65rem;
+  color: var(--text-dim, #778);
+}
+/* Face-detection 3-column sub-grid (IoU / Bbox impact / Per-class) */
+.face-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 12px;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .face-metrics-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.face-sub {
+  min-width: 0;  /* let grid cells shrink below their content size */
+}
+.face-sub-header {
+  margin-bottom: 8px;
+}
+.face-sub-desc {
+  font-size: 0.7rem;
+  color: var(--text-muted, #889);
+  line-height: 1.45;
+  margin-top: 4px;
+  font-weight: 400;
+}
+.face-sub-footnote {
+  font-size: 0.7rem;
+  color: var(--text-muted, #889);
+  margin-top: 4px;
+}
 .train-details {
   font-size: 0.8rem;
   color: var(--text-dim);
@@ -1032,7 +1079,7 @@ footer {
   color: var(--accent-green);
 }
 .corr-disagree {
-  color: var(--accent-orange);
+  color: var(--accent-yellow);
 }
 .corr-thumb {
   width: 48px;
@@ -1044,6 +1091,134 @@ footer {
 }
 .corr-thumb:hover {
   border-color: var(--accent-blue);
+}
+.corr-editor {
+  padding: 2px 0;
+}
+.corr-editor-controls {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  flex-wrap: nowrap;
+}
+.corr-editor-select {
+  font-size: 0.75rem;
+  padding: 2px 4px;
+  background: var(--card-bg, #1a1a24);
+  color: var(--text, #ddd);
+  border: 1px solid var(--border, #334);
+  border-radius: 3px;
+}
+.corr-editor-btn {
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  border-radius: 3px;
+  border: 1px solid var(--border, #334);
+  cursor: pointer;
+  background: var(--card-bg, #1a1a24);
+  color: var(--text-dim, #aab);
+}
+.corr-editor-btn:hover:not(:disabled) {
+  border-color: var(--accent-blue);
+  color: var(--text, #ddd);
+}
+.corr-editor-save {
+  color: var(--accent-blue);
+}
+.corr-editor-discard {
+  color: var(--accent-orange);
+}
+.corr-editor-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* ---- System Load card (Models tab) ---- */
+.sys-headline-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+  margin: 8px 0 18px;
+}
+.sys-tile {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border, #223);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+.sys-tile-label {
+  font-size: 0.7rem;
+  color: var(--text-muted, #778);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+.sys-tile-value {
+  font-size: 1.4rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text, #ddd);
+}
+.sys-tile-value.good { color: var(--accent-green); }
+.sys-tile-value.warn { color: var(--accent-yellow); }
+.sys-tile-value.bad { color: var(--accent-red); }
+.sys-tile-value .sys-tile-sub {
+  font-size: 0.9rem;
+  font-weight: 400;
+  color: var(--text-dim, #99a);
+}
+.sys-tile-note {
+  font-size: 0.7rem;
+  color: var(--text-muted, #778);
+  margin-top: 4px;
+}
+.sys-section-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent-blue);
+  font-weight: 500;
+  margin: 12px 0 6px;
+}
+.sys-proc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+.sys-proc-table thead th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-muted, #778);
+  border-bottom: 1px solid var(--border, #223);
+  padding: 4px 8px;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.sys-proc-table tbody td {
+  padding: 3px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  font-variant-numeric: tabular-nums;
+}
+.sys-proc-table td.num {
+  text-align: right;
+  white-space: nowrap;
+}
+.sys-proc-table td:last-child {
+  color: var(--text-dim, #99a);
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sys-proc-table tr.sys-proc-hot td {
+  color: var(--accent-red);
+}
+.sys-proc-table tr.sys-proc-warm td {
+  color: var(--accent-yellow);
+}
+.sys-proc-table tr.sys-proc-hot td:last-child,
+.sys-proc-table tr.sys-proc-warm td:last-child {
+  color: inherit;
 }
 
 /* Section description */
@@ -1082,6 +1257,61 @@ footer {
 }
 .pipeline-history-table .muted {
   color: var(--text-dim, #667);
+}
+
+/* Eye-State Daily Metrics (Models tab) */
+.eye-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+  margin-top: 8px;
+}
+.eye-metric-card {
+  background: var(--card-inner-bg, rgba(255, 255, 255, 0.02));
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.06));
+  border-radius: 6px;
+  padding: 8px 10px 10px 10px;
+}
+.eye-metric-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text, #ddd);
+  margin-bottom: 4px;
+}
+.eye-metric-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.eye-metric-grid {
+  stroke: rgba(255, 255, 255, 0.08);
+  stroke-width: 1;
+}
+.eye-metric-axis {
+  fill: var(--text-dim, #889);
+  font-size: 9px;
+}
+.eye-metric-line {
+  fill: none;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.eye-metric-legend {
+  display: flex;
+  gap: 12px;
+  font-size: 0.75rem;
+  color: var(--text-dim, #889);
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+.eye-metric-legend .legend-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 4px;
+  vertical-align: middle;
 }
 
 /* Recap tab */

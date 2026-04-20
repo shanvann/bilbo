@@ -1134,11 +1134,29 @@ def cmd_eval_corrections() -> int:
         return 1
 
 
-def cmd_retrain(trigger: str = "cli", force: bool = False, skip_face_detect: bool = False):
+def cmd_retrain(
+    trigger: str = "cli",
+    force: bool = False,
+    skip_face_detect: bool = False,
+    skip_post_retrain: bool = False,
+    post_retrain_backfill_days: int = 7,
+):
     """Retrain classifiers using corrections + audit disagreements as supplemental data.
 
     Only retrains if corrections.jsonl or audit-log.jsonl has new entries since the
     last model file was modified.
+
+    After a successful retrain, this runs a post-retrain chain so the dashboard
+    reflects the new model without manual follow-up:
+      1. backfill_birdeye_primary.py over the last `post_retrain_backfill_days`
+         to refresh primary eyeState/face fields on recent frames (skips user-
+         edited rows).
+      2. backfill_state.py to re-smooth the derived `state` column.
+      3. bbox_impact.py --force to regenerate Per-class / Bbox-impact numbers
+         against the newly-deployed model.
+
+    Pass `skip_post_retrain=True` to opt out (e.g. for a quick metrics-only
+    training run that doesn't need data refresh).
     """
     import subprocess
     from . import training_state
@@ -1305,6 +1323,58 @@ def cmd_retrain(trigger: str = "cli", force: bool = False, skip_face_detect: boo
             db.insert_training_run(run_data)
             log.info("retrain: synced training run %s to SQLite", run_data.get("version"))
 
+    # --- Post-retrain refresh chain ---
+    # Runs automatically so dashboard Per-class / Bbox-impact numbers track
+    # the deployed model without manual follow-up. Failures here are logged
+    # but non-fatal — the retrain itself already succeeded and been persisted.
+    if not skip_post_retrain:
+        from datetime import timedelta as _td
+        scripts_dir = SKILL_DIR / "scripts"
+        backfill_start = (
+            _dt.utcnow() - _td(days=post_retrain_backfill_days)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        steps = [
+            (
+                "backfill_birdeye_primary",
+                [
+                    sys.executable,
+                    str(scripts_dir / "backfill_birdeye_primary.py"),
+                    "--start", backfill_start,
+                ],
+            ),
+            (
+                "backfill_state",
+                [sys.executable, str(scripts_dir / "backfill_state.py")],
+            ),
+            (
+                "bbox_impact",
+                [
+                    sys.executable,
+                    str(scripts_dir / "bbox_impact.py"),
+                    "--force",
+                ],
+            ),
+        ]
+
+        print()
+        print(f"Post-retrain chain (--skip-post-retrain to disable):")
+        for name, cmd in steps:
+            print(f"  → {name}")
+            try:
+                step_result = subprocess.run(cmd, cwd=str(SKILL_DIR))
+                if step_result.returncode != 0:
+                    log.warning(
+                        "post-retrain step %s exited %d — continuing "
+                        "(retrain itself succeeded and is already persisted)",
+                        name, step_result.returncode,
+                    )
+            except Exception as e:
+                log.warning("post-retrain step %s raised %s — continuing", name, e)
+    else:
+        print()
+        print("Skipping post-retrain chain (--skip-post-retrain).")
+
     print()
     print(f"Retrain complete (model {model_version}).")
 
@@ -1406,6 +1476,11 @@ examples:
                         "— useful when training code or hyperparameters changed")
     p.add_argument("--skip-face-detect", action="store_true",
                    help="(retrain) skip face detector training (~60 min savings)")
+    p.add_argument("--skip-post-retrain", action="store_true",
+                   help="(retrain) skip the post-retrain chain "
+                        "(backfill-primary → backfill-state → bbox-impact)")
+    p.add_argument("--post-retrain-backfill-days", metavar="N", type=int, default=7,
+                   help="(retrain) days back for post-retrain primary backfill window (default: 7)")
     mode.add_argument("--list-models", action="store_true",
                       help="list available model versions")
     mode.add_argument("--rollback", metavar="VERSION",

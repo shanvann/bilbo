@@ -579,8 +579,14 @@ def api_update_entry():
         new_lines.append(json.dumps(entry))
     SLEEP_LOG.write_text("\n".join(new_lines) + "\n")
 
-    # Log correction to both SQLite and JSONL backup
-    if original_entry:
+    # Log correction to both SQLite and JSONL backup — only when a *label*
+    # field actually changed. Bbox-only edits (faceBbox) are not label
+    # corrections: they feed the face detector via entries.faceBboxCorrected,
+    # not the corrections table. Historically we wrote phantom rows with
+    # null corrected_state / corrected_eye_state here, which polluted the
+    # pending-corrections view with "?" entries.
+    label_changed = bool(new_state or new_eye_state or new_position)
+    if original_entry and label_changed:
         correction = {
             "correctedAt": now,
             "originalTimestamp": ts,
@@ -641,6 +647,7 @@ def api_training_status():
     last_trained_ts = last_log.get("timestamp") if last_log else None
     total_corrections, pending_corrections = db.get_pending_corrections_count(last_trained_ts)
     duration_stats = db.get_training_duration_stats()
+    last_trained_per_classifier = db.get_last_trained_per_classifier()
 
     return jsonify({
         "running": state.get("status") == "running",
@@ -661,6 +668,7 @@ def api_training_status():
         "pendingCorrections": pending_corrections,
         "totalCorrections": total_corrections,
         "trainingDurationStats": duration_stats,
+        "lastTrainedPerClassifier": last_trained_per_classifier,
     })
 
 
@@ -746,6 +754,106 @@ def api_pending_corrections():
     })
 
 
+@app.route("/api/correction/resolve", methods=["POST"])
+def api_correction_resolve():
+    """Resolve a phantom correction by filling in its eye-state label.
+
+    Body: {id: int, eyeState: "eyes_open" | "eyes_closed" | "face_not_visible" | "not_in_bassinet"}
+
+    Updates both the correction row (corrected_eye_state + corrected_at) and
+    the matching entry (eyeState, eyeStateEdited=1), keeping SQLite + JSONL
+    in sync. Used for phantom rows created before the 2026-04-19 bugfix that
+    stopped logging corrections on bbox-only updates.
+    """
+    data = request.get_json(silent=True) or {}
+    correction_id = data.get("id")
+    new_eye_state = data.get("eyeState")
+
+    allowed = {"eyes_open", "eyes_closed", "face_not_visible", "not_in_bassinet"}
+    if not isinstance(correction_id, int):
+        return jsonify({"error": "id (int) required"}), 400
+    if new_eye_state not in allowed:
+        return jsonify({"error": f"eyeState must be one of {sorted(allowed)}"}), 400
+
+    db = get_db()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    resolved = db.resolve_correction(correction_id, new_eye_state, now)
+    if resolved is None:
+        return jsonify({"error": "correction not found"}), 404
+
+    ts = resolved["originalTimestamp"]
+
+    # Mirror the label into the entry, same way api_update_entry does.
+    entry_updates = {
+        "eyeState": new_eye_state,
+        "eyeStateEdited": True,
+        "eyeStateCorrectedAt": now,
+    }
+    db.update_entry(ts, entry_updates)
+
+    # Keep JSONL backup in sync with SQLite. Missing line is tolerated —
+    # SQLite is authoritative; a JSONL row can be absent for older entries
+    # that were only ever dual-written after migration.
+    try:
+        lines = SLEEP_LOG.read_text().strip().splitlines()
+        new_lines = []
+        for line in lines:
+            entry = json.loads(line)
+            if entry.get("timestamp") == ts:
+                entry.update(entry_updates)
+            new_lines.append(json.dumps(entry))
+        SLEEP_LOG.write_text("\n".join(new_lines) + "\n")
+    except FileNotFoundError:
+        pass
+
+    # Append to corrections.jsonl backup so the append-only log reflects the
+    # resolution (the original phantom row is already in there with nulls).
+    with open(CORRECTIONS_LOG, "a") as f:
+        f.write(json.dumps({
+            "correctedAt": now,
+            "originalTimestamp": ts,
+            "correctedEyeState": new_eye_state,
+            "source": "dashboard-resolve",
+            "resolvedCorrectionId": correction_id,
+        }) + "\n")
+
+    return jsonify({"ok": True, "id": correction_id, "eyeState": new_eye_state})
+
+
+@app.route("/api/correction/discard", methods=["POST"])
+def api_correction_discard():
+    """Delete a phantom correction row outright.
+
+    Body: {id: int}
+
+    The row is removed from the corrections table; the underlying entry's
+    label is untouched. corrections.jsonl is append-only, so this does not
+    rewrite it — SQLite is authoritative for training label reads.
+    """
+    data = request.get_json(silent=True) or {}
+    correction_id = data.get("id")
+    if not isinstance(correction_id, int):
+        return jsonify({"error": "id (int) required"}), 400
+    db = get_db()
+    ok = db.delete_correction(correction_id)
+    if not ok:
+        return jsonify({"error": "correction not found"}), 404
+    return jsonify({"ok": True, "id": correction_id})
+
+
+@app.route("/api/system-usage")
+def api_system_usage():
+    """Snapshot of machine load, memory, disk, and baby-monitor processes.
+
+    Exposed for the Models-tab "System Load" card. Pure stdlib — implemented
+    in dashboard/system_usage.py so it can also be run as a CLI without the
+    Flask process. Directory-size lookups inside are cached for 60s so the
+    10s-poll UI doesn't re-walk data/frames/ on every tick.
+    """
+    from system_usage import gather as _gather_system_usage
+    return jsonify(_gather_system_usage())
+
+
 @app.route("/api/mark-reviewed", methods=["POST"])
 def api_mark_reviewed():
     """Mark a list of entries as reviewed (human-confirmed ground truth)."""
@@ -816,6 +924,21 @@ def api_monitor_stats():
     hours = float(request.args.get("hours", 24))
     db = get_db()
     return jsonify(db.get_monitor_stats(hours))
+
+
+@app.route("/api/eye-state-daily-metrics")
+def api_eye_state_daily_metrics():
+    """Per-ET-day BIRDEYE eye-state P/R/F1 for eyes_open and eyes_closed.
+
+    Query params:
+        days: lookback in days (default 14, clamped to [1, 90])
+    """
+    try:
+        days = int(request.args.get("days", 14))
+    except (TypeError, ValueError):
+        return jsonify({"error": "days must be an integer"}), 400
+    days = max(1, min(90, days))
+    return jsonify(get_db().get_eye_state_daily_metrics(days))
 
 
 @app.route("/api/pipeline-history")

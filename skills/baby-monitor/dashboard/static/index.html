@@ -159,6 +159,16 @@
 
     <!-- =============== Models tab =============== -->
     <div class="tab-panel" role="tabpanel" data-tab="models" aria-labelledby="tab-models" hidden>
+
+    <!-- System Load -->
+    <section class="card" id="system-usage-card">
+      <h2>System Load
+        <span class="subtitle" id="system-usage-asof"></span>
+        <span style="float:right;font-size:0.75rem;color:var(--text-muted)" id="system-usage-refresh"></span>
+      </h2>
+      <div id="system-usage-body"></div>
+    </section>
+
     <!-- Pending Corrections -->
     <details class="card" id="corrections-card">
       <summary><h2 style="display:inline">Pending Corrections
@@ -219,6 +229,26 @@
           <div id="classifier-eye"></div>
         </div>
       </div>
+    </section>
+
+    <!-- Daily Eye-State Metrics: per-day P/R/F1 trend per class -->
+    <section class="card" id="eye-metrics-card">
+      <h2>Eye-State Daily Metrics
+        <select id="eye-metrics-days" class="detail-select" style="margin-left:8px">
+          <option value="7">Last 7 days</option>
+          <option value="14" selected>Last 14 days</option>
+          <option value="30">Last 30 days</option>
+        </select>
+        <span class="subtitle" id="eye-metrics-note"></span>
+      </h2>
+      <p class="section-desc">
+        Per-ET-day BIRDEYE eye-state precision, recall, and F1 against
+        ground truth (dashboard corrections + reviewed-as-correct frames).
+        Only frames with a binary user label and a binary BIRDEYE
+        prediction count. Days with zero labelled support for a class
+        render as a gap rather than 0.
+      </p>
+      <div class="eye-metrics-grid" id="eye-metrics-grid"></div>
     </section>
 
     <!-- Shadow Experiments: per-experiment shadow-pipeline metrics -->

@@ -343,8 +343,9 @@ def api_bassinet_daily():
     )
 
     # Accumulate per-day durations, split in-bassinet time by state.
-    # `in` is the legacy total (asleep + awake + unknown_in) and is kept
-    # for any consumer that still wants a single in-vs-out breakdown.
+    # `in` is the legacy total (asleep + awake + falling_asleep + unknown_in)
+    # and is kept for any consumer that still wants a single in-vs-out
+    # breakdown.
     daily = {}
     for i in range(len(raw) - 1):
         e = raw[i]
@@ -358,7 +359,8 @@ def api_bassinet_daily():
         date_str = ts.astimezone(et).strftime("%Y-%m-%d")
         if date_str not in daily:
             daily[date_str] = {
-                "asleep": 0, "awake": 0, "unknown_in": 0, "out": 0,
+                "asleep": 0, "awake": 0, "falling_asleep": 0,
+                "unknown_in": 0, "out": 0,
             }
 
         if not e.get("babyPresent"):
@@ -370,18 +372,21 @@ def api_bassinet_daily():
             daily[date_str]["asleep"] += dur
         elif state == "Awake":
             daily[date_str]["awake"] += dur
+        elif state == "FallingAsleep":
+            daily[date_str]["falling_asleep"] += dur
         else:
             daily[date_str]["unknown_in"] += dur
 
     result = []
     for date_str in sorted(daily.keys()):
         d = daily[date_str]
-        in_total = d["asleep"] + d["awake"] + d["unknown_in"]
+        in_total = d["asleep"] + d["awake"] + d["falling_asleep"] + d["unknown_in"]
         total = in_total + d["out"]
         result.append({
             "date": date_str,
             "asleepHours": round(d["asleep"] / 3600, 1),
             "awakeHours": round(d["awake"] / 3600, 1),
+            "fallingAsleepHours": round(d["falling_asleep"] / 3600, 1),
             "unknownInHours": round(d["unknown_in"] / 3600, 1),
             "inHours": round(in_total / 3600, 1),
             "outHours": round(d["out"] / 3600, 1),

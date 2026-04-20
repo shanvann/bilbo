@@ -210,6 +210,7 @@ async function loadTimeline() {
       if (!e.babyPresent) return 'absent';
       if (e.state === 'Awake') return 'awake';
       if (e.state === 'Asleep') return 'asleep';
+      if (e.state === 'FallingAsleep') return 'falling-asleep';
       return 'unknown-present';
     }
 
@@ -217,6 +218,7 @@ async function loadTimeline() {
       if (!e.babyPresent) return 'Out of bassinet';
       if (e.state === 'Asleep') return 'Asleep';
       if (e.state === 'Awake') return 'Awake';
+      if (e.state === 'FallingAsleep') return 'Falling asleep';
       return 'Unknown (in bassinet)';
     }
 
@@ -925,8 +927,11 @@ async function loadBassinetChart() {
       return;
     }
 
-    // Find max total hours for scaling
+    // Find max total hours for scaling. Clamp to ≥24 so the 24h reference
+    // line is always in range (days with capture gaps sum to <24h).
     const maxHours = Math.max(...data.days.map(d => d.inHours + d.outHours), 1);
+    const scaleMax = Math.max(maxHours, 24);
+    const line24Pct = (24 / scaleMax) * 100;
 
     // Stack segments bottom → top: out, awake, unknown-in, asleep.
     // Asleep sits at the top so the "good sleep" color is the most
@@ -935,11 +940,14 @@ async function loadBassinetChart() {
     //
     // Bars sit inside a horizontal row wrapper so the legend (appended
     // after it) stacks below the bars rather than becoming a flex
-    // sibling to the right.
+    // sibling to the right. The 24h reference line is an absolutely-
+    // positioned overlay inside the same wrapper.
     let html = '<div class="bassinet-bars-row">';
+    html += '<div class="bassinet-24h-line" style="bottom:' + line24Pct.toFixed(2) + '%"'
+      + ' title="24 hours — a full day with no capture gaps"><span>24h</span></div>';
     for (const d of data.days) {
       const total = d.inHours + d.outHours;
-      const stackPct = total > 0 ? (total / maxHours * 100) : 0;
+      const stackPct = total > 0 ? (total / scaleMax * 100) : 0;
 
       function fmtHrs(h) { return h >= 1 ? h + 'h' : ''; }
       function segFlex(h) { return total > 0 ? stackPct * (h / total) : 0; }
@@ -952,6 +960,9 @@ async function loadBassinetChart() {
       html += '<div class="bassinet-bar-stack" style="height:100%">';
       html += '<div style="flex:' + (100 - stackPct) + '"></div>'; // spacer
 
+      // Stack order bottom → top: out · awake · falling-asleep · unknown-in · asleep.
+      // Asleep sits at the top so "good sleep" is visually prominent;
+      // FallingAsleep slots just below it to read as the transition.
       if (d.outHours > 0) {
         html += '<div class="bassinet-bar-seg out" style="flex:' + segFlex(d.outHours)
           + '" title="Out of bassinet: ' + d.outHours + 'h">' + fmtHrs(d.outHours) + '</div>';
@@ -959,6 +970,10 @@ async function loadBassinetChart() {
       if (d.awakeHours > 0) {
         html += '<div class="bassinet-bar-seg awake" style="flex:' + segFlex(d.awakeHours)
           + '" title="Awake in bassinet: ' + d.awakeHours + 'h">' + fmtHrs(d.awakeHours) + '</div>';
+      }
+      if (d.fallingAsleepHours > 0) {
+        html += '<div class="bassinet-bar-seg falling-asleep" style="flex:' + segFlex(d.fallingAsleepHours)
+          + '" title="Falling asleep: ' + d.fallingAsleepHours + 'h">' + fmtHrs(d.fallingAsleepHours) + '</div>';
       }
       if (d.unknownInHours > 0) {
         html += '<div class="bassinet-bar-seg unknown-in" style="flex:' + segFlex(d.unknownInHours)
@@ -975,12 +990,13 @@ async function loadBassinetChart() {
     }
 
     html += '</div>';
-    // Legend
+    // Legend — colors track .bassinet-bar-seg.{asleep,awake,falling-asleep,unknown-in,out} in style.css.
     html += '<div class="bassinet-chart-legend">';
-    html += '<span><span class="legend-dot" style="background:rgba(74,158,255,0.8)"></span> Asleep</span>';
-    html += '<span><span class="legend-dot" style="background:rgba(74,158,255,0.18)"></span> Unknown (in bassinet)</span>';
-    html += '<span><span class="legend-dot" style="background:rgba(74,158,255,0.35)"></span> Awake</span>';
-    html += '<span><span class="legend-dot" style="background:rgba(255,152,0,0.5)"></span> Out of bassinet</span>';
+    html += '<span><span class="legend-dot bassinet-legend-asleep"></span> Asleep</span>';
+    html += '<span><span class="legend-dot bassinet-legend-falling-asleep"></span> Falling asleep</span>';
+    html += '<span><span class="legend-dot bassinet-legend-awake"></span> Awake</span>';
+    html += '<span><span class="legend-dot bassinet-legend-unknown-in"></span> Unknown (in bassinet)</span>';
+    html += '<span><span class="legend-dot bassinet-legend-out"></span> Out of bassinet</span>';
     html += '</div>';
 
     chartEl.innerHTML = html;
@@ -1116,7 +1132,7 @@ async function loadPendingCorrections() {
     const labelMap = {
       eyes_open: 'Eyes Open', eyes_closed: 'Eyes Closed',
       face_not_visible: 'Face Not Visible', not_in_bassinet: 'Not In Bassinet',
-      Awake: 'Awake', Asleep: 'Asleep', Unknown: 'Unknown',
+      Awake: 'Awake', Asleep: 'Asleep', FallingAsleep: 'Falling asleep', Unknown: 'Unknown',
       unknown: '?', null: '?',
     };
     function friendlyLabel(s) { return labelMap[s] || s || '?'; }

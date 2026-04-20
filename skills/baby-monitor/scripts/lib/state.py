@@ -16,6 +16,7 @@ break any in-progress consecutive run (conservative: ~1% of frames).
 from datetime import datetime
 
 from .config import (
+    FALLING_ASLEEP_MAX_MINUTES,
     STATE_CONFIRM_RUN,
     STATE_CONFIRM_WINDOW,
     UNKNOWN_ABSORB_MAX_MINUTES,
@@ -23,6 +24,7 @@ from .config import (
 
 _AWAKE = "Awake"
 _ASLEEP = "Asleep"
+_FALLING_ASLEEP = "FallingAsleep"
 _UNKNOWN = "Unknown"
 _NOT_PRESENT = "not_present"
 
@@ -153,3 +155,66 @@ def unknown_prefix_to_absorb(current_entry: dict,
 
     run.reverse()  # return oldest → newest
     return run
+
+
+def putdown_prefix_to_absorb(current_entry: dict,
+                              recent_entries: list[dict],
+                              max_minutes: float = FALLING_ASLEEP_MAX_MINUTES
+                              ) -> tuple[list[dict], str | None]:
+    """If `current_entry` is a just-confirmed Asleep and the preceding
+    contiguous Unknown+baby-present run is bookended by an out-of-bassinet
+    frame, classify the Unknown run:
+
+      - span ≤ max_minutes → FallingAsleep (the putdown-to-sleep case)
+      - span  > max_minutes → Awake (crib-awake, eventually dozed off)
+
+    Returns `(run_oldest_to_newest, new_state)` when the pattern matches,
+    or `([], None)` otherwise. The caller is expected to rewrite
+    `state` on every entry in the run to `new_state`.
+
+    Pattern match rules (walking newest → oldest from `recent_entries`):
+      1. Skip & collect frames where `state == "Unknown"` AND
+         `babyPresent == True`.
+      2. The first frame that breaks that chain must have
+         `babyPresent == False`. Any other state (Awake, Asleep,
+         FallingAsleep, another Unknown with `babyPresent == False`
+         which we treat as `not_present`) means the pattern doesn't
+         match — this rule is specifically for the put-down case.
+      3. The run must be non-empty (an Asleep that lands one frame
+         after not_present, with no Unknown in between, has nothing
+         for us to rewrite).
+
+    If `recent_entries` runs out before we hit a terminator we bail —
+    we can't assert the `not_present` precondition from truncated
+    history, so we leave the run alone.
+    """
+    if current_entry.get("state") != _ASLEEP:
+        return [], None
+
+    run: list[dict] = []
+    terminator: dict | None = None
+    for prev in reversed(recent_entries):
+        if prev.get("state") == _UNKNOWN and prev.get("babyPresent"):
+            run.append(prev)
+            continue
+        terminator = prev
+        break
+
+    if terminator is None:
+        return [], None  # history exhausted without a bookend
+    if terminator.get("babyPresent"):
+        return [], None  # bookend isn't not_present — not a putdown pattern
+    if not run:
+        return [], None  # Asleep directly after not_present, nothing to rewrite
+
+    oldest = run[-1]
+    oldest_ts = _parse_ts(oldest.get("timestamp"))
+    current_ts = _parse_ts(current_entry.get("timestamp"))
+    if not oldest_ts or not current_ts:
+        return [], None
+
+    span_minutes = (current_ts - oldest_ts).total_seconds() / 60.0
+    new_state = _FALLING_ASLEEP if span_minutes <= max_minutes else _AWAKE
+
+    run.reverse()  # oldest → newest for caller convenience
+    return run, new_state

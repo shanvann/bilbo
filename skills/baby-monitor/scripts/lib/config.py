@@ -96,6 +96,18 @@ STATE_CONFIRM_RUN = 4
 # because pre-wake ambiguity is a weaker signal than the wake itself.
 UNKNOWN_ABSORB_MAX_MINUTES = 15
 
+# Putdown-pattern absorption: when a new Asleep state is confirmed AND the
+# immediately-preceding contiguous Unknown+baby-present run is bookended by
+# an out-of-bassinet (not_present) frame, classify the Unknown run based on
+# its total span:
+#   - span ≤ this many minutes → FallingAsleep (putdown-to-sleep transition)
+#   - span  > this many minutes → Awake (baby was crib-awake before dozing off)
+# Only triggers for the specific "put down → settled into sleep" pattern. Awake
+# → Unknown → Asleep (no not_present on the prior side) is intentionally left
+# alone — that's the same pre-sleep ambiguity the Unknown → Awake absorption
+# is asymmetric about.
+FALLING_ASLEEP_MAX_MINUTES = 30
+
 # ---------------------------------------------------------------------------
 # Edge alert
 # ---------------------------------------------------------------------------

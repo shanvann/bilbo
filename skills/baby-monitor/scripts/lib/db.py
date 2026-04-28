@@ -294,6 +294,68 @@ def get_recent_entries(n: int) -> list[dict]:
     return [json.loads(row["data"]) for row in reversed(rows)]
 
 
+def get_state_transitions(start: str, end: str | None = None) -> list[dict]:
+    """Collapse the entries table into a state-change log for [start, end].
+    Returns [{timestamp, state}, ...] with one row per change in chronological
+    order. Used by the air-quality charts to overlay vlines at transitions.
+
+    Seeds `prev` from the last entry before `start` so a transition that
+    happens at the start of the window is captured correctly (and no spurious
+    "transition" is emitted for the first row when its state matches the
+    pre-window state)."""
+    conn = get_connection()
+    seed = conn.execute(
+        "SELECT state FROM entries WHERE timestamp < ? ORDER BY timestamp DESC LIMIT 1",
+        (start,),
+    ).fetchone()
+    prev = seed["state"] if seed else None
+
+    where = "WHERE timestamp >= ?"
+    params: list = [start]
+    if end:
+        where += " AND timestamp <= ?"
+        params.append(end)
+    rows = conn.execute(
+        f"SELECT timestamp, state FROM entries {where} ORDER BY timestamp ASC",
+        params,
+    ).fetchall()
+
+    out = []
+    for r in rows:
+        s = r["state"]
+        if s != prev:
+            out.append({"timestamp": r["timestamp"], "state": s})
+        prev = s
+    return out
+
+
+def find_current_run_start(baby_present: bool, state: str | None) -> str | None:
+    """Timestamp of the oldest entry in the current contiguous run matching
+    (baby_present, state), scanning back from the most recent entry. Used by
+    the dashboard status card to compute "in this state for X" without being
+    capped by an N-entry walk-back window."""
+    conn = get_connection()
+    bp = 1 if baby_present else 0
+    # Most recent entry that breaks the run.
+    row = conn.execute(
+        "SELECT timestamp FROM entries "
+        "WHERE baby_present IS NOT ? OR state IS NOT ? "
+        "ORDER BY timestamp DESC LIMIT 1",
+        (bp, state),
+    ).fetchone()
+    if row is None:
+        first = conn.execute(
+            "SELECT timestamp FROM entries ORDER BY timestamp ASC LIMIT 1"
+        ).fetchone()
+        return first["timestamp"] if first else None
+    next_row = conn.execute(
+        "SELECT timestamp FROM entries WHERE timestamp > ? "
+        "ORDER BY timestamp ASC LIMIT 1",
+        (row["timestamp"],),
+    ).fetchone()
+    return next_row["timestamp"] if next_row else None
+
+
 def update_entry(timestamp: str, updates: dict) -> bool:
     """Update fields on an entry by timestamp. Returns True if found."""
     conn = get_connection()
@@ -1628,6 +1690,8 @@ class MonitorDB:
     get_entries = staticmethod(get_entries)
     get_last_entry = staticmethod(get_last_entry)
     get_recent_entries = staticmethod(get_recent_entries)
+    get_state_transitions = staticmethod(get_state_transitions)
+    find_current_run_start = staticmethod(find_current_run_start)
     update_entry = staticmethod(update_entry)
     get_entry_count = staticmethod(get_entry_count)
     get_timeline = staticmethod(get_timeline)

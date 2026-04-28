@@ -11,6 +11,7 @@ A baby bassinet monitor that captures a frame every minute from an IP camera, cl
 - [Skills](#skills)
   - [Baby Monitor](#baby-monitor-skillsbaby-monitor)
   - [Baby Report](#baby-report-skillsbaby-report)
+  - [AirGradient Logger](#airgradient-logger-skillsairgradient-logger)
 - [Dashboard](#dashboard)
 - [Continuous Improvement Loop](#continuous-improvement-loop)
 - [Design Decisions](#design-decisions)
@@ -212,6 +213,22 @@ report.py --format json                  # structured output
 
 Sections: `sleep`, `feeding`, `pumping`, `diapers`, `weight`, `monitor`
 
+### AirGradient Logger (`skills/airgradient-logger/`)
+
+Standalone polling daemon for an AirGradient indoor air-quality monitor on the LAN. Runs as its own launchd job (`com.airgradient-logger`, every `POLL_SECONDS` = 60s) and writes one row per reading into a SQLite database at `data/airgradient.db`. The dashboard's Air Quality tab reads this DB read-only and pairs it with bassinet state transitions from the monitor DB to overlay state-change vlines on the time-series charts.
+
+```bash
+cd skills/airgradient-logger
+AIRGRADIENT_URL=http://192.168.1.50/measures/current \
+DB_PATH=data/airgradient.db \
+venv/bin/python airgradient_logger.py     # run manually (foreground)
+
+launchctl list | grep airgradient-logger  # status when running as launchd
+tail -f logs/stderr.log                   # live log
+```
+
+Field mapping reads both camelCase (current firmware: `pm003Count`, `tvocRaw`, `pm02Compensated`, `atmpCompensated`, `rhumCompensated`) and snake_case for older firmware. Full payload is preserved as `raw_json` so any field the typed columns miss can be queried via `json_extract()` (this is how the dashboard pulls `tvocIndex` without a schema migration).
+
 ## Dashboard
 
 Live at `http://localhost:5555`. Runs as a persistent launchd service.
@@ -238,6 +255,7 @@ Live at `http://localhost:5555`. Runs as a persistent launchd service.
 8. **Eye-State Daily Metrics** (Models tab, added 2026-04-19) — three SVG line charts (Precision · Recall · F1) per ET day, with one line per class (eyes_open, eyes_closed). Truth = dashboard corrections + reviewed-as-correct frames; predictions = `shadow_birdeye_eye` (BIRDEYE's immutable audit trail), so dashboard re-labels don't contaminate the prediction side. Days with zero ground-truth support for a class render as a gap, not 0. 7/14/30-day window selector. Makes daily improvement (or regressions) after retraining visible at a glance.
 9. **Daily Recap** (Events tab, added 2026-04-18) — stitches a day's frames into an MP4 time-lapse via ffmpeg. Date picker + fps selector (15/30/60), server-side cache under `data/videos/recap_<date>_fps<N>.mp4` reused as long as the frame count matches. First generation ~8–30 s; cache hit is instant.
 10. **Recent Events** (Events tab) — state transitions (placed/removed/fell asleep/woke up), selectable count.
+11. **Air Quality** (Air Quality tab, added 2026-04-28) — rich dashboard over the AirGradient logger DB, not just charts. Stack of: Hero snapshot cards (Temperature, Humidity, CO₂, PM2.5, TVOC) with status pill (Good/Moderate/Poor/Critical) + dynamic interpretation + static "how this affects baby" line; Baby Comfort Score (0–100 weighted composite — PM2.5 30 %, CO₂ 25 %, Temp 20 %, Humidity 15 %, TVOC 10 %) with per-driver bars showing which metric is pulling the score down; Active Alerts (severity-coded, current threshold breaches + spike detection); Insights (rule-based pattern detection: overnight CO₂ climb, evening PM2.5 spike, humidity drift, overnight summary); What to do now (right-now recommendations tied to the snapshot); Trend charts for all five metrics (1h / 6h / 24h / 3d / 7d / 30d range selector) with bad-zone shading on the metric's "poor" band, plus bassinet state-change vlines (Asleep / FallingAsleep / Awake / Unknown / out-of-bassinet) so AQ excursions correlate against putdowns and wake-ups; Sensor Health footer (last reading, samples vs expected, missing %, OK/Gappy/Stale verdict). Analysis logic lives in `dashboard/aq_analysis.py` (pure functions, no Flask), driven by `/api/air-quality?hours=N`.
 
 **APIs:**
 | Endpoint | Method | Purpose |
@@ -250,6 +268,7 @@ Live at `http://localhost:5555`. Runs as a persistent launchd service.
 | `/api/eye-state-daily-metrics` | GET | `?days=N` (clamped 1–90). Per-ET-day BIRDEYE eye-state precision/recall/F1 for `eyes_open` and `eyes_closed` vs corrected/reviewed ground truth. Powers the Eye-State Daily Metrics charts. |
 | `/api/recap/generate` | POST | `{date, fps}`. Stitches a day's frames into MP4 via ffmpeg, caches under `data/videos/`. Returns `{status, cached, video_url, frame_count, duration_sec, size_bytes}`. |
 | `/api/recap/video` | GET | `?name=recap_<date>_fps<N>.mp4`. Range-capable MP4 delivery for the recap `<video>` element. |
+| `/api/air-quality` | GET | `?hours=N` (clamped 1–720). Reads the AirGradient logger DB (path via `AIRGRADIENT_DB_PATH`, defaults to `skills/airgradient-logger/data/airgradient.db`) read-only via SQLite URI mode. Returns bucketed time-series points + latest snapshot + computed analysis (comfort score, statuses, alerts, insights, recommendations, bad-zone spans, sensor health) + bassinet state transitions. Powers the Air Quality tab. |
 
 ## Continuous Improvement Loop
 
@@ -583,3 +602,6 @@ All data files are gitignored:
 - `venv/` — Python 3.12 virtualenv
 - `pipeline/models/` — versioned model checkpoints (last 20 kept)
 - `pipeline/output/` — training data, validated face crops
+- `skills/airgradient-logger/data/airgradient.db` — AirGradient time-series readings (one row per minute)
+- `skills/airgradient-logger/logs/` — logger stdout/stderr from the launchd job
+- `skills/airgradient-logger/venv/` — Python virtualenv for the logger

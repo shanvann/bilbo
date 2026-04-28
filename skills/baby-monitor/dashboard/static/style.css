@@ -305,7 +305,7 @@ main {
 .tl-block.falling-asleep { background: rgba(139, 195, 74, 0.85); } /* light green */
 .tl-block.awake { background: rgba(240, 180, 41, 0.85); }          /* yellow */
 .tl-block.absent { background: rgba(170, 170, 175, 0.7); }         /* grey */
-.tl-block.unknown-present { background: rgba(180, 180, 190, 0.35); } /* faint grey */
+.tl-block.unknown-present { background: rgba(74, 158, 255, 0.55); } /* blue */
 
 .timeline-feeds {
   position: relative;
@@ -477,7 +477,7 @@ footer {
 }
 .legend-dot.asleep { background: rgba(76, 175, 80, 0.85); }
 .legend-dot.falling-asleep { background: rgba(139, 195, 74, 0.85); }
-.legend-dot.unknown-present { background: rgba(180, 180, 190, 0.35); }
+.legend-dot.unknown-present { background: rgba(74, 158, 255, 0.55); }
 .legend-dot.awake { background: rgba(240, 180, 41, 0.85); }
 .legend-dot.absent { background: rgba(170, 170, 175, 0.7); }
 
@@ -828,6 +828,110 @@ footer {
   .safety-grid { grid-template-columns: 1fr; }
 }
 
+/* ---------------------------------------------------------------------
+   Mobile (≤600px). Augments the other two @media blocks rather than
+   replacing them — the 700px block above already collapses most grids,
+   the 600px block near the top already shrinks the status bar. This
+   block focuses on the remaining friction points on phone-sized
+   viewports: 3-col grids → 1-col, card headers that currently rely on
+   `float:right` for their controls, tap-target sizing for dropdowns
+   and nav buttons, and tab-bar horizontal scroll.
+   --------------------------------------------------------------------- */
+@media (max-width: 600px) {
+  /* Tighter gutters so cards use the full viewport width */
+  main { padding: 10px 6px; }
+  .card { padding: 14px 12px; }
+  .tab-panel { gap: 14px; }
+
+  /* Grids: fully single-column on phones */
+  .perf-grid { grid-template-columns: 1fr; }
+  .train-grid { grid-template-columns: 1fr; }
+  .safety-grid { grid-template-columns: 1fr; }
+  .face-metrics-grid { grid-template-columns: 1fr; }
+
+  /* Card headers: become wrap-able flex so inline range pickers, subtitle
+     spans, and the `float:right` clusters from Pending Corrections / BIRDEYE
+     Classifiers / System Load stack gracefully instead of overlapping.
+     The !important overrides the handful of inline float:right styles
+     set in index.html (block-detail-close, system-usage-refresh, the
+     retrain button group on BIRDEYE Classifiers). */
+  .card h2 {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    font-size: 1rem;
+    margin-bottom: 12px;
+  }
+  .card h2 > [style*="float:right"],
+  .card h2 > [style*="float: right"] {
+    float: none !important;
+    margin-left: auto;
+  }
+
+  /* Tab bar: let it scroll horizontally rather than cram 3 tabs into
+     a too-narrow viewport. Overflow-scroll + touch momentum is the
+     iOS-friendly pattern. */
+  .tab-bar {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;  /* hide the scrollbar; visual scroll cue is the tab edge */
+  }
+  .tab-bar::-webkit-scrollbar { display: none; }
+  .tab-btn {
+    padding: 12px 14px;
+    font-size: 0.9rem;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* Tap targets: the 3px-vertical dropdowns and 2px-vertical nav arrows
+     fail the 44px iOS HIG / 48dp Android Material touch-target rule.
+     Bump them to ~36px tall here — still compact, but reliably tappable. */
+  .detail-select {
+    min-height: 36px;
+    padding: 6px 10px;
+    font-size: 0.9rem;
+  }
+  .tl-nav-btn {
+    min-height: 36px;
+    padding: 6px 12px;
+  }
+
+  /* Legend + chips wrap on a narrow screen (they're already flex rows;
+     tighten the gap and drop font size so they fit without horizontal
+     scroll on a 360px viewport). */
+  .timeline-legend {
+    font-size: 0.7rem;
+    gap: 8px 12px;
+    flex-wrap: wrap;
+  }
+  .bassinet-chart-legend {
+    gap: 8px 12px;
+    font-size: 0.7rem;
+  }
+  .corrections-breakdown { flex-wrap: wrap; }
+
+  /* Bassinet chart: 7-30 days of bars on a narrow screen need tighter
+     gaps and smaller labels to stay legible without horizontal scroll. */
+  .bassinet-bars-row { gap: 3px; }
+  .bassinet-bar-label { font-size: 0.55rem; }
+  .bassinet-24h-line span { font-size: 0.55rem; }
+
+  /* Eye-state metric card: already uses auto-fit grid, but the 280px
+     minimum forces 1-col under 600px anyway. Tighten the internal
+     padding so the SVG gets more width. */
+  .eye-metric-card { padding: 8px; }
+
+  /* Pipeline-history table: numeric columns can get compressed on mobile,
+     so let the cells wrap inside .table-wrap's horizontal scroll. */
+  .pipeline-history-table th,
+  .pipeline-history-table td {
+    white-space: normal;
+  }
+}
+
 /* Safety panel: per-classifier confusion + per-class P/R/F1 */
 .safety-grid {
   display: grid;
@@ -1056,14 +1160,14 @@ footer {
 .bassinet-bar-seg.asleep { background: rgba(76, 175, 80, 0.85); }            /* green */
 .bassinet-bar-seg.falling-asleep { background: rgba(139, 195, 74, 0.85); }   /* light green */
 .bassinet-bar-seg.awake { background: rgba(240, 180, 41, 0.85); }            /* yellow */
-.bassinet-bar-seg.unknown-in { background: rgba(180, 180, 190, 0.35); }      /* faint grey */
+.bassinet-bar-seg.unknown-in { background: rgba(74, 158, 255, 0.55); }       /* blue */
 .bassinet-bar-seg.out { background: rgba(170, 170, 175, 0.7); }              /* grey */
 
 /* Legend dots — mirror the segment colors so the legend reads true to the bars */
 .legend-dot.bassinet-legend-asleep { background: rgba(76, 175, 80, 0.85); }
 .legend-dot.bassinet-legend-falling-asleep { background: rgba(139, 195, 74, 0.85); }
 .legend-dot.bassinet-legend-awake { background: rgba(240, 180, 41, 0.85); }
-.legend-dot.bassinet-legend-unknown-in { background: rgba(180, 180, 190, 0.35); }
+.legend-dot.bassinet-legend-unknown-in { background: rgba(74, 158, 255, 0.55); }
 .legend-dot.bassinet-legend-out { background: rgba(170, 170, 175, 0.7); }
 .bassinet-bar-label {
   font-size: 0.65rem;
@@ -1342,6 +1446,344 @@ footer {
   border-radius: 50%;
   margin-right: 4px;
   vertical-align: middle;
+}
+
+/* ============================================================
+   Air Quality tab
+   ------------------------------------------------------------
+   Calm nursery palette over the dashboard's existing dark theme.
+   Status colors:
+     good     — sage      (#86c7a8)
+     moderate — butter    (#e8c574)
+     poor     — apricot   (#e89c5a)
+     critical — soft rose (#e07b7b)
+   These are chosen to feel reassuring rather than urgent —
+   even "critical" is a muted rose, not a fire-engine red. The
+   alert/comfort-score panels lean on left-edge accents and
+   tinted backdrops rather than full-bleed color so the page
+   stays calm while still being scannable.
+   ============================================================ */
+
+.aq-section-hidden { display: none !important; }
+
+/* Status pills + tints reused across hero cards, comfort score, alerts,
+   recommendations, and the bad-zone shading. */
+.aq-status-good     { --aq-tint: #86c7a8; --aq-tint-bg: rgba(134, 199, 168, 0.10); }
+.aq-status-moderate { --aq-tint: #e8c574; --aq-tint-bg: rgba(232, 197, 116, 0.10); }
+.aq-status-poor     { --aq-tint: #e89c5a; --aq-tint-bg: rgba(232, 156,  90, 0.12); }
+.aq-status-critical { --aq-tint: #e07b7b; --aq-tint-bg: rgba(224, 123, 123, 0.14); }
+.aq-status-none     { --aq-tint: #6c7382; --aq-tint-bg: rgba(108, 115, 130, 0.08); }
+
+.aq-status-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #1d2230;
+  background: var(--aq-tint, #999);
+}
+.aq-pill-good     { background: #86c7a8; color: #1c3528; }
+.aq-pill-moderate { background: #e8c574; color: #3a2c10; }
+.aq-pill-poor     { background: #e89c5a; color: #3a2210; }
+.aq-pill-critical { background: #e07b7b; color: #3a1414; }
+
+/* --- Hero snapshot grid --- */
+.aq-hero-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+.aq-hero-card {
+  position: relative;
+  padding: 12px 14px 12px 16px;
+  background: var(--aq-tint-bg, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.06));
+  border-left: 3px solid var(--aq-tint, #6c7382);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.aq-hero-label {
+  font-size: 0.78rem;
+  color: var(--text-dim, #889);
+  letter-spacing: 0.01em;
+}
+.aq-hero-value {
+  font-size: 1.6rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text, #ddd);
+}
+.aq-hero-unit {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--text-dim, #889);
+  margin-left: 4px;
+}
+.aq-hero-alt {
+  font-size: 0.7rem;
+  font-weight: 400;
+  color: var(--text-dim, #889);
+}
+.aq-hero-detail {
+  font-size: 0.78rem;
+  color: var(--text-dim, #aab);
+  line-height: 1.35;
+  margin-top: 2px;
+}
+.aq-hero-impact {
+  font-size: 0.72rem;
+  color: var(--text-dim, #889);
+  line-height: 1.45;
+  font-style: italic;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  padding-top: 6px;
+  margin-top: 6px;
+}
+
+/* --- Comfort score --- */
+.aq-score-grid {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) 1fr;
+  gap: 18px;
+  align-items: center;
+  margin-top: 6px;
+}
+.aq-score-pillar {
+  padding: 14px 18px;
+  border-radius: 10px;
+  background: var(--aq-tint-bg, rgba(255, 255, 255, 0.03));
+  border-left: 4px solid var(--aq-tint, #6c7382);
+}
+.aq-score-number {
+  font-size: 3.2rem;
+  font-weight: 700;
+  color: var(--aq-tint, #ddd);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.aq-score-label {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text, #ddd);
+  margin-top: 4px;
+  letter-spacing: 0.02em;
+}
+.aq-score-driver-note {
+  font-size: 0.78rem;
+  color: var(--text-dim, #aab);
+  margin-top: 6px;
+  line-height: 1.35;
+}
+.aq-score-drivers {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.aq-driver-row {
+  display: grid;
+  grid-template-columns: 110px 1fr 36px;
+  gap: 10px;
+  align-items: center;
+  font-size: 0.8rem;
+}
+.aq-driver-label {
+  color: var(--text, #ccc);
+  display: flex;
+  justify-content: space-between;
+}
+.aq-driver-weight {
+  color: var(--text-dim, #889);
+  font-size: 0.7rem;
+}
+.aq-driver-bar {
+  height: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.aq-driver-fill {
+  height: 100%;
+  background: var(--aq-tint, #6c7382);
+  border-radius: 4px;
+  transition: width 0.5s ease;
+}
+.aq-driver-sub {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim, #aab);
+}
+
+/* --- Alerts --- */
+.aq-alert {
+  padding: 10px 12px;
+  background: var(--aq-tint-bg, rgba(255, 255, 255, 0.03));
+  border-left: 3px solid var(--aq-tint, #6c7382);
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+.aq-alert:last-child { margin-bottom: 0; }
+.aq-alert-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+}
+.aq-alert-metric {
+  font-weight: 600;
+  color: var(--text, #ddd);
+}
+.aq-alert-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim, #aab);
+}
+.aq-alert-when {
+  margin-left: auto;
+  color: var(--text-dim, #889);
+  font-size: 0.75rem;
+}
+.aq-alert-action {
+  font-size: 0.82rem;
+  color: var(--text-dim, #bbc);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+/* --- Insights --- */
+.aq-insight {
+  padding: 10px 12px 10px 14px;
+  border-left: 3px solid #7aa6c9;
+  background: rgba(122, 166, 201, 0.06);
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+.aq-insight:last-child { margin-bottom: 0; }
+.aq-insight-title {
+  font-weight: 600;
+  color: var(--text, #ddd);
+  font-size: 0.9rem;
+  margin-bottom: 2px;
+}
+.aq-insight-body {
+  font-size: 0.82rem;
+  color: var(--text-dim, #bbc);
+  line-height: 1.45;
+}
+
+/* --- Recommendations --- */
+.aq-rec {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border-left: 3px solid #9bbf99;
+  background: rgba(155, 191, 153, 0.06);
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+.aq-rec:last-child { margin-bottom: 0; }
+.aq-rec-icon {
+  font-size: 1.4rem;
+  line-height: 1;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.aq-rec-title {
+  font-weight: 600;
+  color: var(--text, #ddd);
+  font-size: 0.9rem;
+}
+.aq-rec-body {
+  font-size: 0.82rem;
+  color: var(--text-dim, #bbc);
+  margin-top: 2px;
+  line-height: 1.45;
+}
+
+/* --- Sensor health --- */
+.aq-health-body { margin-top: 4px; }
+.aq-health-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  font-size: 0.82rem;
+}
+.aq-health-row > div {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.06));
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.aq-health-key {
+  font-size: 0.72rem;
+  color: var(--text-dim, #889);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.aq-health-val {
+  font-weight: 500;
+  color: var(--text, #ddd);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Bad-zone shading on the trend charts --- */
+.aq-badzone {
+  fill: rgba(224, 123, 123, 0.10);
+  stroke: rgba(224, 123, 123, 0.18);
+  stroke-width: 1;
+}
+
+/* Air Quality tab — reuses .eye-metric-* classes; only the chart layout
+   and title row are custom. */
+.aq-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+}
+.aq-svg {
+  /* Width:100% from .eye-metric-svg; height:auto comes from viewBox aspect.
+     The 6:1 viewBox renders height = container_width / 6 — visually wide
+     enough for time series without dominating vertical space. */
+  width: 100%;
+  height: auto;
+}
+.aq-axis-text {
+  font-size: 11px;
+}
+.aq-legend {
+  margin: 4px 0 0 0;
+  font-size: 0.78rem;
+}
+.aq-legend .legend-label {
+  color: var(--text-dim, #889);
+  margin-right: 4px;
+}
+.aq-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+.aq-latest {
+  font-size: 1rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.aq-unit {
+  font-size: 0.7rem;
+  font-weight: 400;
+  color: var(--text-dim, #889);
+  margin-left: 2px;
 }
 
 /* Recap tab */

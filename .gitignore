@@ -11,6 +11,11 @@ skills/classifieds-poster/
 # Baby monitor data (frames, logs, CSVs)
 skills/baby-monitor/data/
 
+# AirGradient logger runtime artifacts (DB + logs + venv)
+skills/airgradient-logger/data/
+skills/airgradient-logger/logs/
+skills/airgradient-logger/venv/
+
 # Python
 __pycache__/
 *.pyc

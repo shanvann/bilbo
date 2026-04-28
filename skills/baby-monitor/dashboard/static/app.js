@@ -2334,6 +2334,7 @@ async function loadAll() {
     loadPipelineHistory(),
     loadEyeStateDailyMetrics(),
     loadSystemUsage(),
+    loadAirQuality(),
   ]);
   document.getElementById('footer-refresh').textContent =
     'Last refreshed: ' + new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York' });
@@ -2560,7 +2561,7 @@ function setActiveTab(name, opts) {
 }
 
 function initTabs() {
-  const validTabs = ['monitor', 'models', 'events'];
+  const validTabs = ['monitor', 'models', 'events', 'air-quality'];
   // 'recap' was a separate tab until 2026-04-18 when it was merged into
   // Events; redirect old hash/localStorage values so bookmarks still land.
   const redirect = (name) => (name === 'recap' ? 'events' : name);
@@ -2745,6 +2746,426 @@ function renderEyeMetricChart(metric, rows) {
   `;
 }
 
+// --- Air Quality tab ---
+// Time-series charts driven by /api/air-quality, which reads the AirGradient
+// logger DB at ~/airgradient-logger/airgradient.db (see airgradient-logger
+// project). Same SVG charting style as the eye-state daily metrics; one
+// chart per metric (CO2, PM2.5, temp, humidity) with a shared time-range
+// selector. Server returns bucket-averaged points so the polyline never has
+// to render more than ~360 segments regardless of window length.
+const AQ_METRICS = [
+  { key: 'co2',         label: 'CO₂',         unit: 'ppm',   color: '#f06b6b', fmt: v => Math.round(v).toString(), badZoneKey: 'co2' },
+  { key: 'pm25',        label: 'PM2.5',       unit: 'µg/m³', color: '#9b6bff', fmt: v => v.toFixed(1),             badZoneKey: 'pm25' },
+  // Temperature is stored as °C in the AirGradient DB; convert at render
+  // time so the data layer stays canonical (C) and only the UI shows °F.
+  { key: 'temp',        label: 'Temperature', unit: '°F',    color: '#4a9eff',
+    fmt: v => v.toFixed(1), transform: c => c * 9 / 5 + 32, badZoneKey: 'temp' },
+  { key: 'rh',          label: 'Humidity',    unit: '%',     color: '#3ec5a8', fmt: v => v.toFixed(0),             badZoneKey: 'rh' },
+  { key: 'tvoc_index',  label: 'TVOC',        unit: 'idx',   color: '#e8a23a', fmt: v => Math.round(v).toString(), badZoneKey: 'tvoc_index' },
+];
+
+const AQ_STATUS_LABEL = {
+  good: 'Good',
+  moderate: 'Moderate',
+  poor: 'Poor',
+  critical: 'Critical',
+};
+
+// Vline colors by bassinet state — match the Monitor-tab timeline legend so
+// users have one mental model for state colors across the dashboard.
+const AQ_STATE_COLORS = {
+  Asleep:        'rgba(76, 175, 80, 0.85)',
+  FallingAsleep: 'rgba(139, 195, 74, 0.85)',
+  Awake:         'rgba(240, 180, 41, 0.85)',
+  Unknown:       'rgba(74, 158, 255, 0.55)',
+  not_present:   'rgba(170, 170, 175, 0.7)',
+};
+const AQ_STATE_LABEL = {
+  Asleep: 'Asleep',
+  FallingAsleep: 'Falling asleep',
+  Awake: 'Awake',
+  Unknown: 'Unknown (in bassinet)',
+  not_present: 'Out of bassinet',
+};
+
+async function loadAirQuality() {
+  const grid = document.getElementById('air-quality-grid');
+  const note = document.getElementById('air-quality-note');
+  const asof = document.getElementById('air-quality-asof');
+  const range = document.getElementById('air-quality-range');
+  if (!grid || !range) return;
+  const hours = range.value;
+  try {
+    const res = await fetch('/api/air-quality?hours=' + encodeURIComponent(hours));
+    const data = await res.json();
+    const points = data.points || [];
+
+    // Empty / no-data state — collapse all dependent sections, show note.
+    if (data.note || !points.length) {
+      grid.innerHTML = '';
+      note.style.display = '';
+      note.textContent = data.note || 'No readings in this window.';
+      asof.textContent = '';
+      ['aq-score-card', 'aq-alerts-card', 'aq-insights-card', 'aq-recs-card']
+        .forEach(id => document.getElementById(id).classList.add('aq-section-hidden'));
+      _renderAqHealth(data.health || null);
+      _renderAqHeroCards(null);
+      return;
+    }
+    note.style.display = 'none';
+    note.textContent = '';
+
+    if (data.latest && data.latest.t) {
+      const ts = new Date(data.latest.t);
+      asof.textContent = 'latest ' + ts.toLocaleString('en-US', {
+        timeZone: 'America/New_York', month: 'short', day: 'numeric',
+        hour: 'numeric', minute: '2-digit',
+      });
+    } else {
+      asof.textContent = '';
+    }
+
+    _renderAqHeroCards(data.statuses || null);
+    _renderAqScore(data.score || null);
+    _renderAqAlerts(data.alerts || []);
+    _renderAqInsights(data.insights || []);
+    _renderAqRecs(data.recommendations || []);
+    _renderAqHealth(data.health || null);
+
+    document.getElementById('aq-trend-range').textContent =
+      _aqRangeLabel(parseInt(hours, 10));
+    const transitions = data.transitions || [];
+    const badZones = data.badZones || {};
+    grid.innerHTML = AQ_METRICS.map(m =>
+      renderAirQualityChart(m, points, data.latest, transitions, badZones[m.badZoneKey] || [])
+    ).join('');
+  } catch (e) {
+    grid.innerHTML = '';
+    note.style.display = '';
+    note.textContent = 'Error: ' + e.message;
+    asof.textContent = '';
+  }
+}
+
+function _aqRangeLabel(hours) {
+  if (hours < 24) return `last ${hours} hr`;
+  if (hours === 24) return 'last 24 hr';
+  if (hours % 24 === 0) return `last ${hours / 24} day${hours === 24 ? '' : 's'}`;
+  return `last ${hours} hr`;
+}
+
+// --- Hero snapshot cards ---
+// `impact` is the static "why this matters for baby" line — always the same
+// per metric regardless of the current value. The dynamic per-status detail
+// (e.g. "Within the safe-sleep range") still comes from the API.
+const AQ_HERO_ORDER = [
+  { key: 'temp',     label: 'Temperature', icon: '🌡️',  fmt: pickTempFmt,
+    impact: 'A cool nursery (20–23°C / 68–73°F) is one of the strongest known SIDS-risk modifiers — both overheating and cold disrupt infant sleep.' },
+  { key: 'humidity', label: 'Humidity',    icon: '💧',  fmt: v => `${Math.round(v)}`,
+    impact: 'Babies have small airways that dry air below 35% irritates quickly; humidity above 65% promotes mold and dust-mite growth.' },
+  { key: 'co2',      label: 'CO₂',         icon: '🫁',  fmt: v => `${Math.round(v)}`,
+    impact: 'Elevated nursery CO₂ is associated with shallower, more fragmented infant sleep and reduced daytime alertness.' },
+  { key: 'pm25',     label: 'PM2.5',       icon: '🌫️', fmt: v => v.toFixed(1),
+    impact: 'Fine particles bypass infant nasal filtering and lodge deep in developing lungs, raising the risk of wheezing and respiratory illness.' },
+  { key: 'tvoc',     label: 'TVOC',        icon: '🌿',  fmt: v => `${Math.round(v)}`,
+    impact: 'Volatile organic compounds from cleaners, plug-ins, paints, and new furniture irritate developing airways and have been linked to infant respiratory illness.' },
+];
+// Temperature renders dual unit in the hero card.
+function pickTempFmt(c) {
+  const f = c * 9 / 5 + 32;
+  return `${c.toFixed(1)}<span class="aq-hero-alt"> · ${f.toFixed(0)}°F</span>`;
+}
+
+function _renderAqHeroCards(statuses) {
+  const grid = document.getElementById('aq-hero-grid');
+  if (!statuses) {
+    grid.innerHTML = '<div class="muted" style="padding:12px">No live snapshot.</div>';
+    return;
+  }
+  grid.innerHTML = AQ_HERO_ORDER.map(m => {
+    const s = statuses[m.key];
+    if (!s) {
+      return `<div class="aq-hero-card aq-status-none">
+                <div class="aq-hero-label">${m.icon} ${m.label}</div>
+                <div class="aq-hero-value">—</div>
+                <div class="aq-hero-detail muted">No reading</div>
+                <div class="aq-hero-impact">${m.impact}</div>
+              </div>`;
+    }
+    const valHtml = m.fmt(s.value);
+    return `<div class="aq-hero-card aq-status-${s.level}">
+              <div class="aq-hero-label">${m.icon} ${m.label}</div>
+              <div class="aq-hero-value">${valHtml}<span class="aq-hero-unit">${s.unit || ''}</span></div>
+              <div class="aq-status-pill aq-pill-${s.level}">${AQ_STATUS_LABEL[s.level] || s.level}</div>
+              <div class="aq-hero-detail">${s.headline}. ${s.detail}</div>
+              <div class="aq-hero-impact">${m.impact}</div>
+            </div>`;
+  }).join('');
+}
+
+// --- Comfort score ---
+function _renderAqScore(score) {
+  const card = document.getElementById('aq-score-card');
+  const body = document.getElementById('aq-score-body');
+  if (!score) {
+    card.classList.add('aq-section-hidden');
+    return;
+  }
+  card.classList.remove('aq-section-hidden');
+  // Map label -> tint class.
+  const tint = score.score >= 90 ? 'good'
+             : score.score >= 75 ? 'moderate'
+             : score.score >= 55 ? 'poor'
+             : 'critical';
+  // Top driver(s) pulling the score down.
+  const worst = score.drivers[0];
+  const worstNote = worst && worst.sub < 90
+    ? `Driving the score down: <strong>${worst.label}</strong> (${worst.sub.toFixed(0)}/100).`
+    : 'All metrics are pulling their weight.';
+
+  const bars = score.drivers.map(d => {
+    const sub = Math.max(0, Math.min(100, d.sub));
+    const lvl = sub >= 90 ? 'good' : sub >= 70 ? 'moderate' : sub >= 50 ? 'poor' : 'critical';
+    return `<div class="aq-driver-row">
+              <div class="aq-driver-label">${d.label}
+                <span class="aq-driver-weight">×${d.weight}%</span>
+              </div>
+              <div class="aq-driver-bar"><div class="aq-driver-fill aq-status-${lvl}" style="width:${sub}%"></div></div>
+              <div class="aq-driver-sub">${sub.toFixed(0)}</div>
+            </div>`;
+  }).join('');
+
+  body.innerHTML = `
+    <div class="aq-score-grid">
+      <div class="aq-score-pillar aq-status-${tint}">
+        <div class="aq-score-number">${Math.round(score.score)}</div>
+        <div class="aq-score-label">${score.label}</div>
+        <div class="aq-score-driver-note">${worstNote}</div>
+      </div>
+      <div class="aq-score-drivers">${bars}</div>
+    </div>
+  `;
+}
+
+// --- Alerts ---
+function _renderAqAlerts(alerts) {
+  const card = document.getElementById('aq-alerts-card');
+  const body = document.getElementById('aq-alerts-body');
+  if (!alerts.length) {
+    card.classList.add('aq-section-hidden');
+    return;
+  }
+  card.classList.remove('aq-section-hidden');
+  body.innerHTML = alerts.map(a => {
+    const t = new Date(a.t);
+    const when = t.toLocaleString('en-US', {
+      timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit'
+    });
+    return `<div class="aq-alert aq-status-${a.severity === 'critical' ? 'critical' : a.severity === 'warning' ? 'poor' : 'moderate'}">
+              <div class="aq-alert-head">
+                <span class="aq-status-pill aq-pill-${a.severity === 'critical' ? 'critical' : a.severity === 'warning' ? 'poor' : 'moderate'}">${a.severity.toUpperCase()}</span>
+                <span class="aq-alert-metric">${a.metric}</span>
+                <span class="aq-alert-value">${a.value} ${a.unit}</span>
+                <span class="aq-alert-when">${when}</span>
+              </div>
+              <div class="aq-alert-action">${a.action}</div>
+            </div>`;
+  }).join('');
+}
+
+// --- Insights & recommendations ---
+function _renderAqInsights(items) {
+  const card = document.getElementById('aq-insights-card');
+  const body = document.getElementById('aq-insights-body');
+  if (!items.length) {
+    card.classList.add('aq-section-hidden');
+    return;
+  }
+  card.classList.remove('aq-section-hidden');
+  body.innerHTML = items.map(i =>
+    `<div class="aq-insight">
+       <div class="aq-insight-title">${i.title}</div>
+       <div class="aq-insight-body">${i.body}</div>
+     </div>`
+  ).join('');
+}
+
+function _renderAqRecs(items) {
+  const card = document.getElementById('aq-recs-card');
+  const body = document.getElementById('aq-recs-body');
+  if (!items.length) {
+    card.classList.add('aq-section-hidden');
+    return;
+  }
+  card.classList.remove('aq-section-hidden');
+  body.innerHTML = items.map(r =>
+    `<div class="aq-rec">
+       <div class="aq-rec-icon">${r.icon || '•'}</div>
+       <div class="aq-rec-text">
+         <div class="aq-rec-title">${r.title}</div>
+         <div class="aq-rec-body">${r.body}</div>
+       </div>
+     </div>`
+  ).join('');
+}
+
+// --- Sensor health ---
+function _renderAqHealth(h) {
+  const body = document.getElementById('aq-health-body');
+  if (!h) {
+    body.innerHTML = '<div class="muted">No health data.</div>';
+    return;
+  }
+  const verdictPill = {
+    ok: '<span class="aq-status-pill aq-pill-good">OK</span>',
+    gappy: '<span class="aq-status-pill aq-pill-moderate">Gappy</span>',
+    stale: '<span class="aq-status-pill aq-pill-poor">Stale</span>',
+    no_data: '<span class="aq-status-pill aq-pill-critical">No data</span>',
+  }[h.verdict] || '';
+
+  const lastReadingHtml = h.lastReading
+    ? new Date(h.lastReading).toLocaleString('en-US', {
+        timeZone: 'America/New_York', month: 'short', day: 'numeric',
+        hour: 'numeric', minute: '2-digit', second: '2-digit',
+      })
+    : '—';
+
+  const since = h.secondsSinceLast == null ? '—'
+              : h.secondsSinceLast < 90 ? `${h.secondsSinceLast}s ago`
+              : h.secondsSinceLast < 5400 ? `${Math.round(h.secondsSinceLast / 60)} min ago`
+              : `${Math.round(h.secondsSinceLast / 3600)} hr ago`;
+
+  body.innerHTML = `
+    <div class="aq-health-row">
+      <div><span class="aq-health-key">Last reading</span><span class="aq-health-val">${lastReadingHtml}</span></div>
+      <div><span class="aq-health-key">Since</span><span class="aq-health-val">${since}</span></div>
+      <div><span class="aq-health-key">Samples in window</span><span class="aq-health-val">${h.samples}${h.expected ? ' / ' + h.expected : ''}</span></div>
+      <div><span class="aq-health-key">Missing</span><span class="aq-health-val">${h.missingPct == null ? '—' : h.missingPct.toFixed(1) + '%'}</span></div>
+      <div><span class="aq-health-key">Status</span><span class="aq-health-val">${verdictPill}</span></div>
+    </div>
+  `;
+}
+
+function renderAirQualityChart(metric, points, latest, transitions, badZones) {
+  // Wide viewBox so the SVG, sized via CSS to width:100%/height:auto, fills
+  // the full row and stretches the time axis horizontally. The 6:1 aspect
+  // (1200×200) gives the polyline plenty of horizontal resolution without
+  // making each card too tall on wide screens.
+  const W = 1200, H = 200;
+  const PAD = { top: 14, right: 16, bottom: 30, left: 52 };
+  const plotW = W - PAD.left - PAD.right;
+  const plotH = H - PAD.top - PAD.bottom;
+
+  // Optional unit conversion (e.g. °C → °F) applied at render time only.
+  const tx = metric.transform || (v => v);
+
+  const vals = points.map(p => p[metric.key]).filter(v => v != null).map(tx);
+  if (!vals.length) {
+    return `<div class="eye-metric-card">
+              <div class="eye-metric-title">${metric.label}</div>
+              <div class="muted" style="padding:24px 0;text-align:center;font-size:0.8rem">No ${metric.label} samples</div>
+            </div>`;
+  }
+  let yMin = Math.min(...vals), yMax = Math.max(...vals);
+  if (yMin === yMax) { yMin -= 1; yMax += 1; }
+  const span = yMax - yMin;
+  yMin -= span * 0.08;
+  yMax += span * 0.08;
+
+  const ts = points.map(p => new Date(p.t).getTime());
+  const tMin = ts[0], tMax = ts[ts.length - 1];
+  const xAt = t => PAD.left + ((t - tMin) / Math.max(1, tMax - tMin)) * plotW;
+  const yAt = v => PAD.top + (1 - (v - yMin) / (yMax - yMin)) * plotH;
+
+  // preserveAspectRatio="xMidYMid meet" + viewBox 1200×200 keeps the chart
+  // at a fixed 6:1 aspect: scales smoothly with container width, no text
+  // distortion. CSS sets width:100%; height:auto; the rendered height comes
+  // out to (container_width / 6), giving the time axis room to breathe on
+  // wide screens without becoming square on narrow ones.
+  let svg = `<svg viewBox="0 0 ${W} ${H}" class="eye-metric-svg aq-svg" preserveAspectRatio="xMidYMid meet">`;
+
+  // Bad-zone shading — drawn before everything so it sits behind gridlines,
+  // vlines, and the polyline. Each span clamps to the visible window.
+  for (const z of badZones || []) {
+    const zStart = Math.max(tMin, new Date(z.tStart).getTime());
+    const zEnd = Math.min(tMax, new Date(z.tEnd).getTime());
+    if (zEnd <= zStart) continue;
+    const x1 = xAt(zStart);
+    const x2 = xAt(zEnd);
+    svg += `<rect x="${x1}" y="${PAD.top}" width="${Math.max(2, x2 - x1)}" `
+        +  `height="${plotH}" class="aq-badzone"/>`;
+  }
+
+  // Y gridlines + labels (min / mid / max).
+  for (const frac of [0, 0.5, 1]) {
+    const v = yMin + frac * (yMax - yMin);
+    const y = yAt(v);
+    svg += `<line x1="${PAD.left}" y1="${y}" x2="${W - PAD.right}" y2="${y}" class="eye-metric-grid"/>`;
+    svg += `<text x="${PAD.left - 6}" y="${y + 3}" class="eye-metric-axis aq-axis-text" text-anchor="end">${metric.fmt(v)}</text>`;
+  }
+
+  // X labels: start / middle / end. Format adapts to the window length.
+  const spanMs = tMax - tMin;
+  const fmtTime = ms => {
+    const d = new Date(ms);
+    if (spanMs > 36 * 3600 * 1000) {
+      return d.toLocaleString('en-US', { timeZone: 'America/New_York', month: 'numeric', day: 'numeric' });
+    }
+    return d.toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
+  };
+  const labelTimes = [tMin, tMin + spanMs / 2, tMax];
+  for (const t of labelTimes) {
+    svg += `<text x="${xAt(t)}" y="${H - PAD.bottom + 16}" class="eye-metric-axis aq-axis-text" text-anchor="middle">${fmtTime(t)}</text>`;
+  }
+
+  // Vlines at bassinet state-change boundaries — drawn between gridlines and
+  // the polyline so the data line stays visually dominant. Title element
+  // gives a hover tooltip with the timestamp + new state.
+  for (const tr of transitions || []) {
+    const t = new Date(tr.timestamp).getTime();
+    if (t < tMin || t > tMax) continue;
+    const color = AQ_STATE_COLORS[tr.state] || 'rgba(255,255,255,0.3)';
+    const label = AQ_STATE_LABEL[tr.state] || tr.state || 'Unknown';
+    const x = xAt(t);
+    const tip = fmtTime(t) + ' → ' + label;
+    svg += `<line x1="${x}" y1="${PAD.top}" x2="${x}" y2="${H - PAD.bottom}" `
+        +  `stroke="${color}" stroke-width="2" stroke-opacity="0.55" vector-effect="non-scaling-stroke">`
+        +  `<title>${tip}</title></line>`;
+  }
+
+  // Polyline; broken at nulls so missing readings are gaps, not interpolated.
+  let segment = [];
+  const flush = () => {
+    if (segment.length >= 2) {
+      svg += `<polyline points="${segment.join(' ')}" class="eye-metric-line" stroke="${metric.color}" vector-effect="non-scaling-stroke"/>`;
+    }
+    segment = [];
+  };
+  points.forEach(p => {
+    const raw = p[metric.key];
+    if (raw == null) { flush(); return; }
+    segment.push(`${xAt(new Date(p.t).getTime())},${yAt(tx(raw))}`);
+  });
+  flush();
+
+  svg += `</svg>`;
+
+  const latestVal = latest && latest[metric.key];
+  const latestDisplay = latestVal != null ? metric.fmt(tx(latestVal)) : null;
+  const titleRight = latestDisplay != null
+    ? `<span class="aq-latest" style="color:${metric.color}">${latestDisplay} <span class="aq-unit">${metric.unit}</span></span>`
+    : '';
+  return `
+    <div class="eye-metric-card">
+      <div class="eye-metric-title aq-title">
+        <span>${metric.label}</span>
+        ${titleRight}
+      </div>
+      ${svg}
+    </div>
+  `;
+}
+
 // --- Recap tab ---
 // Day-in-a-minute time-lapse. Clicking Generate POSTs to /api/recap/generate,
 // which stitches the day's frames via ffmpeg and caches the MP4 by
@@ -2833,5 +3254,6 @@ document.getElementById('events-range').addEventListener('change', loadEvents);
 document.getElementById('bassinet-days').addEventListener('change', loadBassinetChart);
 document.getElementById('pipeline-history-days').addEventListener('change', loadPipelineHistory);
 document.getElementById('eye-metrics-days').addEventListener('change', loadEyeStateDailyMetrics);
+document.getElementById('air-quality-range').addEventListener('change', loadAirQuality);
 loadAll();
 setInterval(loadAll, REFRESH_INTERVAL_SEC * 1000);

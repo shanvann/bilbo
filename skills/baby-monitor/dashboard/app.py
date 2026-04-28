@@ -3,10 +3,12 @@
 
 import csv
 import json
+import math
 import os
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -28,6 +30,17 @@ ACTIVITY_CSV = DATA_DIR / "activity-log.csv"
 CORRECTIONS_LOG = DATA_DIR / "corrections.jsonl"
 VIDEOS_DIR = DATA_DIR / "videos"
 ET = timezone(timedelta(hours=-4))  # America/New_York (EDT)
+
+# AirGradient logger DB. The logger lives as a sibling skill at
+# skills/airgradient-logger/ (merged 2026-04-28); the dashboard reads its
+# DB read-only via URI, so the writer (a launchd agent) and the dashboard
+# never contend on a journal lock. The default resolves relative to this
+# file: skills/baby-monitor/dashboard/ → ../../airgradient-logger/data/.
+AIRGRADIENT_DB_PATH = os.environ.get(
+    "AIRGRADIENT_DB_PATH",
+    str(Path(__file__).resolve().parent.parent.parent / "airgradient-logger" / "data" / "airgradient.db"),
+)
+AIR_QUALITY_MAX_POINTS = 360
 
 
 # ---------------------------------------------------------------------------
@@ -91,23 +104,20 @@ def index():
 @app.route("/api/status")
 def api_status():
     db = get_db()
-    entries = db.get_recent_entries(50)  # only need recent for status
-    if not entries:
+    last = db.get_last_entry()
+    if not last:
         return jsonify({"error": "no data"}), 404
 
-    last = entries[-1]
     ts = parse_ts(last.get("timestamp"))
     now = datetime.now(timezone.utc)
 
-    # Walk backwards to find when current state started
-    current_present = last.get("babyPresent")
+    # Use SQL to find the oldest entry in the current contiguous (babyPresent,
+    # state) run — a 50-entry walk-back capped duration at ~50m once the baby
+    # had been out of bassinet (or in any single state) for longer.
+    current_present = bool(last.get("babyPresent"))
     current_state = last.get("state")
-    state_start = ts
-
-    for e in reversed(entries[:-1]):
-        if e.get("babyPresent") != current_present or e.get("state") != current_state:
-            break
-        state_start = parse_ts(e.get("timestamp")) or state_start
+    run_start_ts = db.find_current_run_start(current_present, current_state)
+    state_start = parse_ts(run_start_ts) or ts
 
     duration = now - state_start if state_start else timedelta(0)
 
@@ -857,6 +867,137 @@ def api_system_usage():
     """
     from system_usage import gather as _gather_system_usage
     return jsonify(_gather_system_usage())
+
+
+_AQ_NUMERIC_KEYS = ("co2", "pm25", "temp", "rh", "tvoc_index")
+
+
+def _bucket_air_quality(rows: list[dict], max_points: int) -> list[dict]:
+    """Down-sample raw 1-minute readings to <= max_points by averaging
+    consecutive buckets. Each bucket's timestamp is the median row's. None
+    values are skipped per-field; if a whole bucket is None for a field, the
+    output is None and the chart will show a gap."""
+    n = len(rows)
+    if n <= max_points:
+        return rows
+    bucket_size = math.ceil(n / max_points)
+    out = []
+    for i in range(0, n, bucket_size):
+        chunk = rows[i:i + bucket_size]
+        mid = chunk[len(chunk) // 2]
+        agg = {"t": mid["t"]}
+        for key in _AQ_NUMERIC_KEYS:
+            vals = [r[key] for r in chunk if r[key] is not None]
+            agg[key] = round(sum(vals) / len(vals), 2) if vals else None
+        out.append(agg)
+    return out
+
+
+@app.route("/api/air-quality")
+def api_air_quality():
+    """Time-series readings from the AirGradient logger DB.
+
+    Reads ~/airgradient-logger/airgradient.db (override via AIRGRADIENT_DB_PATH)
+    read-only, so the logger's writes never contend with the dashboard's
+    reads. Down-samples to AIR_QUALITY_MAX_POINTS by bucket-averaging. Returns
+    {hours, points: [{t, co2, pm25, temp, rh}], latest, note} — `note` is set
+    when the DB is missing or empty so the UI can show a friendly message.
+    """
+    try:
+        hours = int(request.args.get("hours", 24))
+    except ValueError:
+        hours = 24
+    hours = max(1, min(hours, 720))
+
+    if not Path(AIRGRADIENT_DB_PATH).exists():
+        return jsonify({
+            "hours": hours,
+            "points": [],
+            "latest": None,
+            "note": f"AirGradient DB not found at {AIRGRADIENT_DB_PATH}",
+        })
+
+    # SELECT projection: pulls the typed columns + tvoc_index out of the raw
+    # JSON blob. tvoc_index is the human-meaningful 0–500 sensor index;
+    # tvoc_raw (also stored) is the raw Sensirion register value. We didn't
+    # break tvoc_index out into its own column when the logger schema was
+    # set, but raw_json preserves the full payload, so json_extract recovers
+    # it without a schema migration.
+    SELECT_COLS = (
+        "SELECT recorded_at, co2_ppm, pm25, temperature_c, humidity_pct, "
+        "json_extract(raw_json, '$.tvocIndex') AS tvoc_index "
+    )
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        # URI read-only — coexists with the logger's writer without lock waits.
+        conn = sqlite3.connect(f"file:{AIRGRADIENT_DB_PATH}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            SELECT_COLS + "FROM readings WHERE recorded_at >= ? ORDER BY recorded_at ASC",
+            (cutoff,),
+        ).fetchall()
+        latest_row = conn.execute(
+            SELECT_COLS + "FROM readings ORDER BY recorded_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+    except sqlite3.Error as e:
+        return jsonify({
+            "hours": hours,
+            "points": [],
+            "latest": None,
+            "note": f"sqlite error: {e}",
+        }), 200
+
+    def _row_to_point(r):
+        tv = r["tvoc_index"]
+        return {
+            "t": r["recorded_at"],
+            "co2": r["co2_ppm"],
+            "pm25": r["pm25"],
+            "temp": r["temperature_c"],
+            "rh": r["humidity_pct"],
+            "tvoc_index": int(tv) if tv is not None else None,
+        }
+
+    # raw_points: full 1-minute resolution — used for analysis (alerts,
+    # insights, health %). display_points: bucketed for the chart polylines
+    # so the SVG never has to render more than ~360 segments.
+    raw_points = [_row_to_point(r) for r in rows]
+    display_points = _bucket_air_quality(list(raw_points), AIR_QUALITY_MAX_POINTS)
+
+    latest = _row_to_point(latest_row) if latest_row is not None else None
+
+    # Bassinet state transitions in the same window — overlaid as vlines on
+    # each chart so the user can correlate AQ excursions with state changes.
+    db = get_db()
+    transitions = db.get_state_transitions(start=cutoff)
+
+    # Computed analysis — see dashboard/aq_analysis.py for the rules.
+    import aq_analysis as _aq
+    score = _aq.comfort_score(latest)
+    statuses = _aq.latest_with_status(latest)
+    alerts = _aq.compute_alerts(raw_points, latest)
+    insights = _aq.compute_insights(raw_points, latest)
+    recommendations = _aq.compute_recommendations(latest)
+    bad_zones = _aq.compute_bad_zones(raw_points)
+    health = _aq.compute_health(raw_points, latest)
+
+    note = None if raw_points else "No readings in this window."
+
+    return jsonify({
+        "hours": hours,
+        "points": display_points,
+        "latest": latest,
+        "statuses": statuses,
+        "score": score,
+        "alerts": alerts,
+        "insights": insights,
+        "recommendations": recommendations,
+        "badZones": bad_zones,
+        "health": health,
+        "transitions": transitions,
+        "note": note,
+    })
 
 
 @app.route("/api/mark-reviewed", methods=["POST"])

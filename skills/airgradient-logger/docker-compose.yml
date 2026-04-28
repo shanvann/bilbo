@@ -1,0 +1,12 @@
+services:
+  airgradient-logger:
+    build: .
+    container_name: airgradient-logger
+    restart: unless-stopped
+    environment:
+      AIRGRADIENT_URL: http://192.168.x.x/measures/current
+      POLL_SECONDS: "60"
+      LOG_LEVEL: INFO
+    volumes:
+      - ./data:/data
+    stop_grace_period: 10s

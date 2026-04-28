@@ -1,0 +1,28 @@
+[Unit]
+Description=AirGradient local data logger
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=airgradient
+Group=airgradient
+WorkingDirectory=/opt/airgradient-logger
+Environment=AIRGRADIENT_URL=http://192.168.x.x/measures/current
+Environment=DB_PATH=/var/lib/airgradient/airgradient.db
+Environment=POLL_SECONDS=60
+ExecStart=/opt/airgradient-logger/venv/bin/python /opt/airgradient-logger/airgradient_logger.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/airgradient
+
+[Install]
+WantedBy=multi-user.target

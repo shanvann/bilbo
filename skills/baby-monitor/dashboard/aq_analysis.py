@@ -76,15 +76,23 @@ def status_humidity(rh):
 
 
 def status_tvoc(idx):
+    # Sensirion VOC Index is relative to a rolling 24-h baseline (100 = baseline).
+    # Bands per AirGradient's reference guide
+    # (https://www.airgradient.com/blog/explaining-voc-tvoc-and-voc-index/):
+    #   1-100   below baseline   • 101-199 slight increase
+    #   200-249 moderate         • 250-349 significant
+    #   350-500 severe
+    # Collapsed to our 4 levels: GOOD covers baseline + slight noise; CRITICAL
+    # starts at the article's "severe" line (350).
     if idx is None:
         return None, "No reading", ""
     if idx < 150:
-        return GOOD, "Clean", "Normal VOC baseline."
+        return GOOD, "At baseline", "VOC index near the 24-h rolling baseline."
     if idx < 250:
-        return MODERATE, "Elevated", "Recent product use? Watch the spike."
-    if idx < 400:
-        return POOR, "Strong source", "VOC source nearby — ventilate."
-    return CRITICAL, "Very high", "Identify and remove the VOC source."
+        return MODERATE, "Slight increase", "Recent product use? Watch the spike."
+    if idx < 350:
+        return POOR, "Significant increase", "VOC source nearby — ventilate."
+    return CRITICAL, "Severe", "Identify and remove the VOC source."
 
 
 def latest_with_status(latest):
@@ -150,10 +158,12 @@ def _sub_humidity(rh):
 
 
 def _sub_tvoc(idx):
+    # Linear ramp from baseline (100, full credit) to "severe" (350, zero credit).
+    # Bands per https://www.airgradient.com/blog/explaining-voc-tvoc-and-voc-index/.
     if idx is None: return None
     if idx <= 100: return 100.0
-    if idx >= 500: return 0.0
-    return _clamp(100 * (1 - (idx - 100) / (500 - 100)), 0, 100)
+    if idx >= 350: return 0.0
+    return _clamp(100 * (1 - (idx - 100) / (350 - 100)), 0, 100)
 
 
 _METRIC_LABEL = {

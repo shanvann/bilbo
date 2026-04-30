@@ -489,6 +489,8 @@ Captured frames are needed for retraining classifiers, backtesting detection cha
 
 **Decision:** 10 GB cap. At 1-min intervals and ~433 KB/frame this holds roughly 17 days of frames — down from ~67 days at the old 4-min cadence, which is the main tradeoff of the faster sampling rate. Still enough for multi-week backtests and for retraining on a meaningful history. Oldest-first pruning kicks in once the directory exceeds the cap. If you want more retention, either raise `MAX_FRAMES_KB` in `scripts/lib/config.py` or move frames to external storage on a nightly cron.
 
+**Training-aware exception (issue #5).** `enforce_disk_limit()` skips pruning while a training run is active (`lib.training_state.is_running()`). Long trainings iterate `self.samples` populated at `__init__`; if retention deletes frames mid-run, `__getitem__` hits `None` images and recurse-resamples, which gets very slow once many adjacent samples go missing. Disk overshoot during a training run is bounded — at 1 frame/min × ~600 KB, a 6-hour run adds ~210 MB, well under the 10 GB cap.
+
 ### Storage: SQLite vs JSONL
 
 How to store and query monitoring data efficiently.

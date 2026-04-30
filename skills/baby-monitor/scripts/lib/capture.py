@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import CAPTURE_TIMEOUT, FRAMES_DIR, MAX_FRAMES_KB
+from .training_state import is_running as _training_is_running
 
 log = logging.getLogger("monitor")
 
@@ -49,6 +50,16 @@ def capture_frame(rtsp_url: str) -> Path:
 
 
 def enforce_disk_limit():
+    # Issue #5: skip pruning while a training run is active. Long trainings
+    # iterate through `self.samples` populated at __init__; if retention
+    # prunes frames out from under the dataloader, __getitem__ hits None
+    # images and has to recurse-resample (slow). Disk overshoot during a
+    # training run is bounded — at 1 capture/min × ~600 KB, a 6-hour run
+    # adds ~210 MB to the 10 GB cap. is_running() self-cleans on dead PID.
+    if _training_is_running():
+        log.debug("cleanup: training in progress, skipping prune")
+        return
+
     frames = sorted(FRAMES_DIR.glob("frame_*.jpg"), key=lambda p: p.stat().st_mtime)
     total_kb = sum(f.stat().st_size for f in frames) // 1024
     log.debug("cleanup: %d frames, %dKB total, limit %dKB", len(frames), total_kb, MAX_FRAMES_KB)

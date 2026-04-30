@@ -1875,10 +1875,22 @@ footer {
 .aq-svg {
   /* Width:100% from .eye-metric-svg; height:auto comes from viewBox aspect.
      The 6:1 viewBox renders height = container_width / 6 — visually wide
-     enough for time series without dominating vertical space. */
+     enough for time series without dominating vertical space.
+     White background so the translucent state bands and the spike-red
+     polyline segments read with high contrast (the rest of the dashboard
+     is dark-themed; charts are intentionally inverted). */
   width: 100%;
   height: auto;
+  background: #ffffff;
+  border-radius: 4px;
 }
+/* Scoped dark-on-white overrides for AQ charts only — the eye-state daily
+   metrics chart shares the .eye-metric-* base classes and stays on the
+   dark theme. */
+.aq-svg .eye-metric-grid { stroke: rgba(0, 0, 0, 0.10); }
+.aq-svg .aq-grid-minor   { stroke: rgba(0, 0, 0, 0.07); }
+.aq-svg .eye-metric-axis,
+.aq-svg .aq-axis-text    { fill: #555; }
 .aq-axis-text {
   font-size: 11px;
 }

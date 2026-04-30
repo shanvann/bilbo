@@ -495,6 +495,15 @@ footer {
 }
 .tl-nav-btn:hover { background: #2a3a4a; color: #fff; }
 .tl-today-btn { font-size: 0.8rem; padding: 2px 8px; }
+.section-window-hint {
+  font-size: 0.7rem;
+  font-weight: normal;
+  color: var(--text-dim, #889);
+  margin-left: 10px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
 .tl-date-picker {
   background: var(--card-bg, #1e2a3a);
   color: #dde;
@@ -1354,6 +1363,109 @@ footer {
 .sys-proc-table tr.sys-proc-warm td:last-child {
   color: inherit;
 }
+
+/* Pipeline-health watchdog banner + method-mix bar */
+.ph-watchdog {
+  margin: 4px 0 2px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  border-left: 3px solid;
+}
+.ph-watchdog-ok {
+  background: rgba(76, 175, 80, 0.08);
+  border-left-color: var(--accent-green);
+  color: var(--text-dim, #889);
+}
+.ph-watchdog-bad {
+  background: rgba(244, 67, 54, 0.12);
+  border-left-color: var(--accent-red);
+  color: var(--accent-red);
+  font-weight: 600;
+}
+.ph-method-bar {
+  display: flex;
+  height: 22px;
+  width: 100%;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--card-bg, #1e2a3a);
+  border: 1px solid #334;
+}
+.ph-method-seg {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+  color: rgba(255, 255, 255, 0.92);
+  white-space: nowrap;
+  overflow: hidden;
+  letter-spacing: 0.02em;
+}
+.ph-method-pixel-diff { background: rgba(170, 170, 175, 0.6); color: #1a1f2a; }
+.ph-method-birdeye    { background: rgba(74, 158, 255, 0.75); }
+.ph-method-cloud      { background: rgba(240, 180, 41, 0.85); color: #1a1f2a; }
+.ph-method-unknown    { background: rgba(120, 120, 130, 0.6); }
+
+/* Classification Rate chart */
+.cr-legend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 0.78rem;
+  color: var(--text-dim, #889);
+  margin: 4px 0 10px;
+}
+.cr-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 140px;
+  padding: 6px 0 4px;
+  border-bottom: 1px solid #334;
+  position: relative;
+}
+.cr-bar {
+  flex: 1 1 0;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  cursor: default;
+}
+.cr-stack {
+  display: flex;
+  flex-direction: column-reverse;
+  width: 100%;
+  height: 100%;
+  border-radius: 2px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.02);
+}
+.cr-seg { width: 100%; }
+.cr-birdeye        { background: rgba(76, 175, 80, 0.85); }   /* green: model handled */
+.cr-pixel-diff     { background: rgba(170, 170, 175, 0.6); }  /* grey: empty */
+.cr-cloud-success  { background: rgba(240, 180, 41, 0.85); }  /* yellow: cloud filled in */
+.cr-cloud-failed   { background: rgba(244, 67, 54, 0.9); }    /* red: cloud failed */
+.cr-missing        { background: rgba(120, 120, 130, 0.18); border-top: 1px dashed rgba(244, 67, 54, 0.4); }
+.cr-axis {
+  position: relative;
+  height: 16px;
+  margin-top: 4px;
+  font-size: 0.7rem;
+  color: var(--text-dim, #889);
+}
+.cr-axis-label {
+  position: absolute;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+/* Legend dots reuse the .legend-dot pattern from .timeline-legend */
+.legend-dot.cr-birdeye        { background: rgba(76, 175, 80, 0.85); }
+.legend-dot.cr-pixel-diff     { background: rgba(170, 170, 175, 0.6); }
+.legend-dot.cr-cloud-success  { background: rgba(240, 180, 41, 0.85); }
+.legend-dot.cr-cloud-failed   { background: rgba(244, 67, 54, 0.9); }
+.legend-dot.cr-missing        { background: rgba(120, 120, 130, 0.18); border: 1px dashed rgba(244, 67, 54, 0.5); }
 
 /* Section description */
 .section-desc {

@@ -20,7 +20,7 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
 # Add scripts/ to path so we can import lib.db
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from lib.db import get_db, get_entries
+from lib.db import get_db, get_entries, get_connection
 
 app = Flask(__name__, static_folder="static")
 
@@ -156,12 +156,18 @@ def api_timeline():
     db = get_db()
 
     if date_str:
+        # `date` means the overnight window that began on this ET date:
+        # 4 PM ET on `date` → 11 AM ET on `date + 1` (19 h). The Timeline
+        # is the night-of-sleep view; daytime out-of-bassinet stretches
+        # are excluded by design.
         import zoneinfo
         et = zoneinfo.ZoneInfo("America/New_York")
-        day_start = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=et)
-        day_end = day_start + timedelta(hours=24)
-        cutoff = day_start.astimezone(timezone.utc)
-        end_cutoff = day_end.astimezone(timezone.utc)
+        night_start = datetime.strptime(date_str, "%Y-%m-%d").replace(
+            hour=16, tzinfo=et
+        )
+        night_end = night_start + timedelta(hours=19)
+        cutoff = night_start.astimezone(timezone.utc)
+        end_cutoff = night_end.astimezone(timezone.utc)
     else:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         end_cutoff = datetime.now(timezone.utc)
@@ -860,13 +866,385 @@ def api_correction_discard():
 def api_system_usage():
     """Snapshot of machine load, memory, disk, and baby-monitor processes.
 
-    Exposed for the Models-tab "System Load" card. Pure stdlib — implemented
+    Exposed for the System tab's "System Load" card. Pure stdlib — implemented
     in dashboard/system_usage.py so it can also be run as a CLI without the
     Flask process. Directory-size lookups inside are cached for 60s so the
     10s-poll UI doesn't re-walk data/frames/ on every tick.
     """
     from system_usage import gather as _gather_system_usage
     return jsonify(_gather_system_usage())
+
+
+# Health checks need a freshness boundary and a gap threshold. Both live
+# here so they're easy to retune later.
+PIPELINE_FRESH_SEC = 5 * 60        # frames < 5 min old → "fresh"
+PIPELINE_STALE_SEC = 15 * 60       # 5–15 min → "stale"; >15 min → "down"
+PIPELINE_GAP_THRESHOLD_MIN = 10    # gaps under this don't count
+PIPELINE_NOMINAL_INTERVAL_SEC = 60 # launchd StartInterval for com.baby-monitor
+
+
+def _parse_launchctl_list_baby_monitor() -> list[dict]:
+    """Parse `launchctl list` rows for baby-monitor jobs.
+
+    Each row is `<pid>\\t<lastExit>\\t<label>`. PID `-` means not currently
+    running (which is the *expected* state for the cron-style monitor and
+    watchdog jobs — they run, exit, and are re-launched on StartInterval).
+    A non-zero `lastExit` on those means the most recent tick crashed.
+
+    Returns an empty list if `launchctl` isn't on PATH or returned an error
+    — the panel will surface that as a UI warning rather than a hard 500.
+    """
+    try:
+        proc = subprocess.run(
+            ["launchctl", "list"], capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+
+    # Job kinds — we know the schedule because we own these plists. The
+    # `kind` label is consumed by the UI to render the right freshness
+    # signal (persistent jobs are "down" if PID is missing; scheduled
+    # jobs are "down" only if lastExit != 0).
+    kinds = {
+        "com.baby-monitor": "scheduled",          # 1-min capture
+        "com.baby-monitor-watchdog": "scheduled", # 2-min staleness check
+        "com.baby-monitor-dashboard": "persistent",
+        # Retrain is supposed to be unloaded (manual-only policy). If it shows
+        # up here, surface it — non-zero lastExit already renders red on the
+        # frontend, so a silently-crashing daily run becomes visible.
+        "com.baby-monitor-retrain": "scheduled",
+    }
+
+    jobs = []
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        pid_str, exit_str, label = parts[0], parts[1], parts[2]
+        if label not in kinds:
+            continue
+        try:
+            last_exit = int(exit_str)
+        except ValueError:
+            last_exit = None
+        pid = None
+        if pid_str.isdigit():
+            pid = int(pid_str)
+        jobs.append({
+            "label": label,
+            "kind": kinds[label],
+            "pid": pid,
+            "lastExit": last_exit,
+        })
+    # Stable display order: capture → watchdog → dashboard → retrain.
+    order = [
+        "com.baby-monitor",
+        "com.baby-monitor-watchdog",
+        "com.baby-monitor-dashboard",
+        "com.baby-monitor-retrain",
+    ]
+    jobs.sort(key=lambda j: order.index(j["label"]) if j["label"] in order else 99)
+    return jobs
+
+
+@app.route("/api/pipeline-health")
+def api_pipeline_health():
+    """Operational health of the baby-monitor capture pipeline.
+
+    Surfaces capture freshness, gap timeline, detection-method mix, launchd
+    job state, and the watchdog's view of the current outage (if any). Read
+    by the System-tab "Pipeline Health" card on a 10s polling loop.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=24)
+    cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    get_db()  # ensures init_db() has run before raw queries
+    conn = get_connection()
+
+    # --- Last entry / freshness ---
+    last_row = conn.execute(
+        "SELECT timestamp FROM entries ORDER BY timestamp DESC LIMIT 1"
+    ).fetchone()
+    last_entry: dict | None = None
+    if last_row:
+        last_ts_str = last_row["timestamp"]
+        last_dt = datetime.strptime(last_ts_str, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        age_sec = int((now - last_dt).total_seconds())
+        if age_sec < PIPELINE_FRESH_SEC:
+            freshness = "fresh"
+        elif age_sec < PIPELINE_STALE_SEC:
+            freshness = "stale"
+        else:
+            freshness = "down"
+        last_entry = {
+            "timestamp": last_ts_str,
+            "ageSeconds": age_sec,
+            "freshness": freshness,
+        }
+
+    # --- Captures in last 24 h ---
+    actual_24h = conn.execute(
+        "SELECT COUNT(*) FROM entries WHERE timestamp > ?", (cutoff_str,),
+    ).fetchone()[0]
+    nominal_per_24h = (24 * 3600) // PIPELINE_NOMINAL_INTERVAL_SEC  # 1440
+
+    # --- Gaps > threshold in last 24 h ---
+    rows = conn.execute(
+        "SELECT timestamp FROM entries WHERE timestamp > ? ORDER BY timestamp ASC",
+        (cutoff_str,),
+    ).fetchall()
+    gap_items = []
+    total_missed_sec = 0.0
+    threshold_sec = PIPELINE_GAP_THRESHOLD_MIN * 60
+    for i in range(1, len(rows)):
+        a = datetime.strptime(rows[i - 1]["timestamp"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        b = datetime.strptime(rows[i]["timestamp"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        gap_sec = (b - a).total_seconds()
+        if gap_sec > threshold_sec:
+            total_missed_sec += gap_sec
+            gap_items.append({
+                "start": rows[i - 1]["timestamp"],
+                "end": rows[i]["timestamp"],
+                "minutes": round(gap_sec / 60, 1),
+            })
+    # Tail gap: from the last entry to now (if it's already past threshold,
+    # this is the *currently-running* outage). Surfaced separately so the UI
+    # can render it as "ongoing".
+    ongoing_gap = None
+    if rows:
+        last_dt = datetime.strptime(rows[-1]["timestamp"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        gap_to_now = (now - last_dt).total_seconds()
+        if gap_to_now > threshold_sec:
+            ongoing_gap = {
+                "start": rows[-1]["timestamp"],
+                "minutes": round(gap_to_now / 60, 1),
+            }
+    # Newest first so the most recent gaps render at the top.
+    gap_items.sort(key=lambda g: g["end"], reverse=True)
+
+    # --- Detection-method mix ---
+    method_rows = conn.execute(
+        "SELECT detection_method, COUNT(*) c FROM entries "
+        "WHERE timestamp > ? GROUP BY detection_method ORDER BY c DESC",
+        (cutoff_str,),
+    ).fetchall()
+    total_methods = sum(r["c"] for r in method_rows) or 1
+    detection_methods = [
+        {
+            "method": r["detection_method"] or "unknown",
+            "count": r["c"],
+            "pct": round(100.0 * r["c"] / total_methods, 1),
+        }
+        for r in method_rows
+    ]
+
+    # --- Cloud API call metrics ---
+    # Cloud is *attempted* whenever BIRDEYE bails (birdeyeFallback is set in
+    # the row's data JSON). It *succeeds* if the resulting row is tagged
+    # detection_method='vision-api'; it *fails* if cloudUnavailable=true.
+    # Querying the JSON columns is fine at this volume (~1-2k rows / 24 h).
+    cloud_attempted = conn.execute(
+        "SELECT COUNT(*) FROM entries WHERE timestamp > ? "
+        "AND json_extract(data, '$.birdeyeFallback') IS NOT NULL",
+        (cutoff_str,),
+    ).fetchone()[0]
+    cloud_succeeded = conn.execute(
+        "SELECT COUNT(*) FROM entries WHERE timestamp > ? "
+        "AND detection_method = 'vision-api'",
+        (cutoff_str,),
+    ).fetchone()[0]
+    cloud_failed = conn.execute(
+        "SELECT COUNT(*) FROM entries WHERE timestamp > ? "
+        "AND json_extract(data, '$.cloudUnavailable') = 1",
+        (cutoff_str,),
+    ).fetchone()[0]
+    # `insufficient_quota` is a distinct OpenAI failure mode (account out of
+    # credit) — surfacing it separately tells the user "top up the account"
+    # vs. transient errors which usually self-heal. Match on "exceeded your
+    # current quota" (the human-readable phrase OpenAI emits for this case)
+    # because monitor.py truncates the reason at 200 chars, which falls
+    # before the `'type': 'insufficient_quota'` field.
+    quota_exhausted = conn.execute(
+        "SELECT COUNT(*) FROM entries WHERE timestamp > ? "
+        "AND json_extract(data, '$.cloudUnavailable') = 1 "
+        "AND json_extract(data, '$.cloudUnavailableReason') "
+        "    LIKE '%exceeded your current quota%'",
+        (cutoff_str,),
+    ).fetchone()[0]
+    last_failure_row = conn.execute(
+        "SELECT timestamp, json_extract(data, '$.cloudUnavailableReason') AS reason "
+        "FROM entries WHERE json_extract(data, '$.cloudUnavailable') = 1 "
+        "ORDER BY timestamp DESC LIMIT 1"
+    ).fetchone()
+    last_failure = None
+    if last_failure_row and last_failure_row["reason"]:
+        last_failure = {
+            "timestamp": last_failure_row["timestamp"],
+            "reason": last_failure_row["reason"],
+        }
+    cloud_calls = {
+        "attempted": cloud_attempted,
+        "succeeded": cloud_succeeded,
+        "failed": cloud_failed,
+        "quotaExhausted": quota_exhausted,
+        "lastFailure": last_failure,
+    }
+
+    # --- launchd jobs ---
+    launchd_jobs = _parse_launchctl_list_baby_monitor()
+
+    # --- Watchdog state file ---
+    watchdog: dict | None = None
+    wd_path = DATA_DIR / "watchdog-state.json"
+    if wd_path.is_file():
+        try:
+            wd = json.loads(wd_path.read_text())
+            watchdog = {
+                "outageStartedAt": wd.get("outage_started_at"),
+                "outageActive": bool(wd.get("outage_started_at")),
+                "lastAlertAt": wd.get("last_alert_at"),
+                "lastAlertKind": wd.get("last_alert_kind"),
+            }
+        except (OSError, json.JSONDecodeError):
+            watchdog = None
+
+    return jsonify({
+        "asOf": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "lastEntry": last_entry,
+        "captures24h": {
+            "actual": actual_24h,
+            "nominal": nominal_per_24h,
+            "intervalSec": PIPELINE_NOMINAL_INTERVAL_SEC,
+        },
+        "gaps24h": {
+            "thresholdMin": PIPELINE_GAP_THRESHOLD_MIN,
+            "count": len(gap_items),
+            "totalMissedMin": round(total_missed_sec / 60, 1),
+            "items": gap_items[:20],
+            "ongoing": ongoing_gap,
+        },
+        "detectionMethods24h": detection_methods,
+        "cloudCalls24h": cloud_calls,
+        "launchdJobs": launchd_jobs,
+        "watchdog": watchdog,
+    })
+
+
+@app.route("/api/classification-rate")
+def api_classification_rate():
+    """Per-bucket classification outcomes for the System-tab chart.
+
+    Bucket = 1 hour by default; ?bucketMin overrides. For each bucket we
+    return counts split by outcome class so the UI can stack-render and
+    the user can spot capture gaps and cloud-failure spikes at a glance.
+
+    Outcome classes:
+      - birdeye:           BIRDEYE handled the frame cleanly (healthy)
+      - pixel-diff:        Empty bassinet, classified by pixel-diff (healthy)
+      - cloud-success:     BIRDEYE bailed, cloud API filled in (degraded ok)
+      - cloud-failed:      BIRDEYE bailed, cloud also failed (cloudUnavailable=true)
+      - other:             anything else (stub, future detection methods)
+    """
+    try:
+        hours = int(request.args.get("hours", 24))
+        bucket_min = int(request.args.get("bucketMin", 60))
+    except ValueError:
+        return jsonify({"error": "hours and bucketMin must be integers"}), 400
+    hours = max(1, min(hours, 168))  # 1h .. 7d
+    bucket_min = max(5, min(bucket_min, 360))  # 5min .. 6h
+
+    get_db()
+    conn = get_connection()
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=hours)
+
+    # Pre-compute the bucket boundaries in UTC. Aligning to whole UTC hours
+    # for hourly buckets makes the chart labels (rendered ET on the UI) line
+    # up with clock time rather than drifting by a few seconds per refresh.
+    bucket_sec = bucket_min * 60
+    if bucket_sec >= 3600 and 3600 % bucket_sec == 0:
+        # Snap "now" down to the next bucket boundary so the rightmost
+        # bucket represents the in-progress slot, not a partial slice.
+        anchor = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    else:
+        anchor = now.replace(second=0, microsecond=0)
+        # Round up to next bucket
+        offset = (anchor.minute * 60) % bucket_sec
+        anchor = anchor + timedelta(seconds=bucket_sec - offset) if offset else anchor
+
+    n_buckets = max(1, int((hours * 3600) // bucket_sec))
+    starts = [anchor - timedelta(seconds=(n_buckets - i) * bucket_sec) for i in range(n_buckets)]
+
+    # Fetch all rows in window with the fields we need to bucket. JSON
+    # extract pulls birdeyeFallback / cloudUnavailable from the data blob.
+    rows = conn.execute(
+        "SELECT timestamp, detection_method, "
+        "       json_extract(data, '$.birdeyeFallback')   AS birdeye_fallback, "
+        "       json_extract(data, '$.cloudUnavailable')  AS cloud_unavailable "
+        "FROM entries WHERE timestamp > ?",
+        (cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),),
+    ).fetchall()
+
+    def classify(r) -> str:
+        if r["cloud_unavailable"] in (1, "1", True):
+            return "cloud-failed"
+        m = r["detection_method"]
+        if m == "vision-api":
+            return "cloud-success"
+        if m == "birdeye":
+            return "birdeye"
+        if m == "pixel-diff":
+            return "pixel-diff"
+        return "other"
+
+    # Bin
+    bins = []
+    for s in starts:
+        bins.append({
+            "start": s.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "endExclusive": (s + timedelta(seconds=bucket_sec)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "birdeye": 0,
+            "pixel-diff": 0,
+            "cloud-success": 0,
+            "cloud-failed": 0,
+            "other": 0,
+            "total": 0,
+        })
+
+    if bins:
+        first_start_ts = datetime.strptime(bins[0]["start"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        for r in rows:
+            try:
+                ts = datetime.strptime(r["timestamp"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            idx = int((ts - first_start_ts).total_seconds() // bucket_sec)
+            if idx < 0 or idx >= len(bins):
+                continue
+            cls = classify(r)
+            bins[idx][cls] += 1
+            bins[idx]["total"] += 1
+
+    nominal_per_bucket = bucket_sec // PIPELINE_NOMINAL_INTERVAL_SEC
+
+    return jsonify({
+        "asOf": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "hours": hours,
+        "bucketMin": bucket_min,
+        "nominalPerBucket": nominal_per_bucket,
+        "buckets": bins,
+    })
 
 
 _AQ_NUMERIC_KEYS = ("co2", "pm25", "temp", "rh", "tvoc_index")
@@ -1141,10 +1519,16 @@ def _resolve_ffmpeg() -> str:
 
 
 def _recap_date_range_utc(date_str: str) -> tuple[str, str]:
-    """ET date (YYYY-MM-DD) → [start_utc, end_utc] ISO-Z strings (inclusive)."""
+    """ET date (YYYY-MM-DD) → [start_utc, end_utc] ISO-Z strings.
+
+    A "date" here means the *night* that began on that ET date: 4 PM ET on
+    `date` through 11 AM ET on `date + 1`. The baby is out of the bassinet
+    for most of the daytime window we exclude, so trimming to the overnight
+    span gives a continuous-sleep recap rather than a jumpy day montage.
+    """
     y, m, d = (int(x) for x in date_str.split("-"))
-    start_et = datetime(y, m, d, 0, 0, 0, tzinfo=ET)
-    end_et = datetime(y, m, d, 23, 59, 59, tzinfo=ET)
+    start_et = datetime(y, m, d, 16, 0, 0, tzinfo=ET)
+    end_et = (start_et + timedelta(hours=19)).replace(minute=0, second=0)
     to_z = lambda dt: dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return to_z(start_et), to_z(end_et)
 
@@ -1201,8 +1585,13 @@ def api_recap_generate():
 
     start_utc, end_utc = _recap_date_range_utc(date_str)
     entries = get_entries(start=start_utc, end=end_utc)
+    # In-bassinet only — out-of-bassinet frames make the recap visually
+    # noisy (empty crib, motion blur from putdowns, lighting changes during
+    # carry-away) and obscure the actual sleep narrative. Existing cached
+    # MP4s will auto-invalidate because the frame_count meta will differ.
     frame_paths = [e["frame"] for e in entries
-                   if e.get("frame") and os.path.isfile(e["frame"])]
+                   if e.get("babyPresent")
+                   and e.get("frame") and os.path.isfile(e["frame"])]
 
     if not frame_paths:
         return jsonify({"status": "empty", "date": date_str, "fps": fps, "frame_count": 0})

@@ -55,6 +55,11 @@ launchd (every 1 min) → capture frame (ffmpeg)
   → If BIRDEYE bails (no_face_detected / low_confidence / hard error):
        Cloud API fallback (GPT-4o) writes primary fields; BIRDEYE result
        is still stored as the `shadow` audit dict.
+       If the cloud API itself fails (transport error, insufficient_quota,
+       timeout): degrade to BIRDEYE primary, set `cloudUnavailable=true`,
+       and on the `low_confidence` path promote the `eyeState` prediction
+       to a real `Awake`/`Asleep` rawState rather than `Unknown` — the
+       4-of-6 temporal smoother still gates the smoothed `state`.
   → Dual-write: SQLite (primary) + JSONL (append-only backup)
   → Temporal smoothing: 4-of-6 consecutive eyes_open/closed → Awake/Asleep
        (carry forward otherwise, Unknown as last resort)
@@ -253,7 +258,7 @@ Live at `http://localhost:5555`. Runs as a persistent launchd service.
 6. **Pipeline** (Models tab) — selectable range (10m–1w): cloud cost, BIRDEYE latency, monitoring gaps (>10 min).
 7. **Pipeline History** (Models tab, added 2026-04-18) — per-ET-day table of how each captured frame was decided: Captures · Pixel-diff · BIRDEYE · Cloud API (each shown as count + % of captures) · Cost (cloud × $0.01) · BIRDEYE model version(s) (% of BIRDEYE's slice, sums to ~100%). 7/14/30-day window selector. Makes the pre/post-flip cost delta visible at a glance.
 8. **Eye-State Daily Metrics** (Models tab, added 2026-04-19) — three SVG line charts (Precision · Recall · F1) per ET day, with one line per class (eyes_open, eyes_closed). Truth = dashboard corrections + reviewed-as-correct frames; predictions = `shadow_birdeye_eye` (BIRDEYE's immutable audit trail), so dashboard re-labels don't contaminate the prediction side. Days with zero ground-truth support for a class render as a gap, not 0. 7/14/30-day window selector. Makes daily improvement (or regressions) after retraining visible at a glance.
-9. **Daily Recap** (Events tab, added 2026-04-18) — stitches a day's frames into an MP4 time-lapse via ffmpeg. Date picker + fps selector (15/30/60), server-side cache under `data/videos/recap_<date>_fps<N>.mp4` reused as long as the frame count matches. First generation ~8–30 s; cache hit is instant.
+9. **Daily Recap** (Events tab, added 2026-04-18) — stitches a day's frames into an MP4 time-lapse via ffmpeg. **In-bassinet frames only** (where `babyPresent=true`); out-of-bassinet stretches (empty crib, putdown blur) are skipped so the recap stays focused on the sleep narrative. Date picker + fps selector (15/30/60), server-side cache under `data/videos/recap_<date>_fps<N>.mp4` reused as long as the frame count matches. First generation ~8–30 s; cache hit is instant.
 10. **Recent Events** (Events tab) — state transitions (placed/removed/fell asleep/woke up), selectable count.
 11. **Air Quality** (Air Quality tab, added 2026-04-28) — rich dashboard over the AirGradient logger DB, not just charts. Stack of: Hero snapshot cards (Temperature, Humidity, CO₂, PM2.5, TVOC) with status pill (Good/Moderate/Poor/Critical) + dynamic interpretation + static "how this affects baby" line; Baby Comfort Score (0–100 weighted composite — PM2.5 30 %, CO₂ 25 %, Temp 20 %, Humidity 15 %, TVOC 10 %) with per-driver bars showing which metric is pulling the score down; Active Alerts (severity-coded, current threshold breaches + spike detection); Insights (rule-based pattern detection: overnight CO₂ climb, evening PM2.5 spike, humidity drift, overnight summary); What to do now (right-now recommendations tied to the snapshot); Trend charts for all five metrics (1h / 6h / 24h / 3d / 7d / 30d range selector) with bad-zone shading on the metric's "poor" band, plus bassinet state-change vlines (Asleep / FallingAsleep / Awake / Unknown / out-of-bassinet) so AQ excursions correlate against putdowns and wake-ups; Sensor Health footer (last reading, samples vs expected, missing %, OK/Gappy/Stale verdict). Analysis logic lives in `dashboard/aq_analysis.py` (pure functions, no Flask), driven by `/api/air-quality?hours=N`.
 

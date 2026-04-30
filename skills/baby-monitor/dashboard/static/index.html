@@ -41,6 +41,7 @@
       <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="models" id="tab-models">Models</button>
       <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="events" id="tab-events">Events</button>
       <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="air-quality" id="tab-air-quality">Air Quality</button>
+      <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="system" id="tab-system">System</button>
     </nav>
 
     <!-- =============== Monitor tab =============== -->
@@ -58,10 +59,11 @@
     <!-- Timeline -->
     <section class="card">
       <h2>Timeline
+        <span class="section-window-hint">overnight · 4 PM → 11 AM ET</span>
         <button id="tl-prev" class="tl-nav-btn">◀</button>
         <input type="date" id="tl-date" class="tl-date-picker">
         <button id="tl-next" class="tl-nav-btn">▶</button>
-        <button id="tl-today" class="tl-nav-btn tl-today-btn">Today</button>
+        <button id="tl-today" class="tl-nav-btn tl-today-btn">Tonight</button>
       </h2>
       <div class="timeline-legend">
         <span class="legend-item"><span class="legend-dot asleep"></span> Asleep</span>
@@ -161,15 +163,6 @@
 
     <!-- =============== Models tab =============== -->
     <div class="tab-panel" role="tabpanel" data-tab="models" aria-labelledby="tab-models" hidden>
-
-    <!-- System Load -->
-    <section class="card" id="system-usage-card">
-      <h2>System Load
-        <span class="subtitle" id="system-usage-asof"></span>
-        <span style="float:right;font-size:0.75rem;color:var(--text-muted)" id="system-usage-refresh"></span>
-      </h2>
-      <div id="system-usage-body"></div>
-    </section>
 
     <!-- Pending Corrections -->
     <details class="card" id="corrections-card">
@@ -345,6 +338,7 @@
     <!-- Daily Recap (video) — merged into Events 2026-04-18 -->
     <section class="card">
       <h2>Daily Recap
+        <span class="section-window-hint">overnight · 4 PM → 11 AM ET</span>
         <button id="recap-prev" class="tl-nav-btn">◀</button>
         <input type="date" id="recap-date" class="tl-date-picker">
         <button id="recap-next" class="tl-nav-btn">▶</button>
@@ -359,7 +353,7 @@
       <div id="recap-info" class="recap-info"></div>
       <div class="recap-video-wrap">
         <video id="recap-video" class="recap-video" controls preload="metadata" style="display:none"></video>
-        <div id="recap-placeholder" class="recap-placeholder">Pick a date and click Generate. Stitching ~1440 frames takes 10–30 s.</div>
+        <div id="recap-placeholder" class="recap-placeholder">Pick a date and click Generate. Recap covers the overnight window (4 PM → 11 AM ET) for that date and includes in-bassinet frames only — out-of-bassinet stretches are skipped so the video is one continuous chunk of sleep. Stitching takes 10–30 s.</div>
       </div>
     </section>
     <!-- Recent Events Table -->
@@ -471,6 +465,49 @@
 
     </div><!-- /air-quality-panel -->
 
+    <!-- =============== System tab =============== -->
+    <div class="tab-panel" role="tabpanel" data-tab="system" aria-labelledby="tab-system" hidden>
+
+    <!-- Pipeline Health -->
+    <section class="card" id="pipeline-health-card">
+      <h2>Pipeline Health
+        <span class="subtitle" id="pipeline-health-asof"></span>
+        <span style="float:right;font-size:0.75rem;color:var(--text-muted)">capture · launchd · gaps · watchdog</span>
+      </h2>
+      <div id="pipeline-health-body"></div>
+    </section>
+
+    <!-- Classification Rate (per-bucket stacked outcomes) -->
+    <section class="card" id="classification-rate-card">
+      <h2>Classification Rate
+        <select id="cr-range" class="detail-select" style="margin-left:8px">
+          <option value="6">Last 6 h</option>
+          <option value="24" selected>Last 24 h</option>
+          <option value="72">Last 3 d</option>
+          <option value="168">Last 7 d</option>
+        </select>
+      </h2>
+      <div class="cr-legend">
+        <span class="legend-item"><span class="legend-dot cr-birdeye"></span> BIRDEYE</span>
+        <span class="legend-item"><span class="legend-dot cr-pixel-diff"></span> Pixel-diff (empty)</span>
+        <span class="legend-item"><span class="legend-dot cr-cloud-success"></span> Cloud succeeded</span>
+        <span class="legend-item"><span class="legend-dot cr-cloud-failed"></span> Cloud failed</span>
+        <span class="legend-item"><span class="legend-dot cr-missing"></span> Missing</span>
+      </div>
+      <div id="classification-rate-body"></div>
+    </section>
+
+    <!-- System Load -->
+    <section class="card" id="system-usage-card">
+      <h2>System Load
+        <span class="subtitle" id="system-usage-asof"></span>
+        <span style="float:right;font-size:0.75rem;color:var(--text-muted)" id="system-usage-refresh"></span>
+      </h2>
+      <div id="system-usage-body"></div>
+    </section>
+
+    </div><!-- /system-panel -->
+
   </main>
 
   <footer>
@@ -483,6 +520,6 @@
     </div>
   </footer>
 
-  <script src="/static/app.js?v=35"></script>
+  <script src="/static/app.js?v=39"></script>
 </body>
 </html>

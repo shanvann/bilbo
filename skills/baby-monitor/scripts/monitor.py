@@ -296,36 +296,95 @@ def main():
             log.warning("pipeline: birdeye fallback=%s, calling cloud API",
                         fallback_reason)
             try:
+                # `analyze_frame` is supposed to wrap every transport/SDK
+                # error in RuntimeError, but the broad except below is a
+                # belt-and-suspenders so a new SDK exception class can't
+                # silently kill the tick again (see incidents 2026-04-22
+                # and 2026-04-30; project_cloud_fallback_crash_safety memory).
                 analysis = analyze_frame(frame_path, api_key, anthropic_key)
-            except RuntimeError as e:
-                log.error("pipeline: cloud API fallback also failed - %s", e)
-                _output("error", error=str(e), frame=str(frame_path))
-                return 1
+                cloud_err = None
+            except Exception as e:  # noqa: BLE001
+                cloud_err = e
+                analysis = None
+                log.error("pipeline: cloud API fallback failed (%s) - %s",
+                          type(e).__name__, e)
 
-            flat = flatten_analysis(analysis, str(frame_path))
-            flat["diffScore"] = round(diff_score, 2) if diff_score >= 0 else None
-            flat["birdeyeFallback"] = fallback_reason
+            if analysis is not None:
+                flat = flatten_analysis(analysis, str(frame_path))
+                flat["diffScore"] = round(diff_score, 2) if diff_score >= 0 else None
+                flat["birdeyeFallback"] = fallback_reason
 
-            # Heuristic: if state is "Unknown", baby is present, and position
-            # matches the previous frame, infer "Asleep" (baby hasn't moved,
-            # likely sleeping). Kept from the pre-flip pipeline.
-            if flat.get("state") == "Unknown" and flat.get("babyPresent"):
-                prev = get_db().get_last_entry()
-                if prev and prev.get("babyPresent") and prev.get("sleepPosition") == flat.get("sleepPosition"):
-                    if flat.get("sleepPosition") != "Unknown":
-                        log.info("heuristic: state Unknown -> Asleep (position unchanged: %s)",
-                                 flat.get("sleepPosition"))
-                        flat["state"] = "Asleep"
-                        flat["stateInferred"] = True
+                # Heuristic: if state is "Unknown", baby is present, and position
+                # matches the previous frame, infer "Asleep" (baby hasn't moved,
+                # likely sleeping). Kept from the pre-flip pipeline.
+                if flat.get("state") == "Unknown" and flat.get("babyPresent"):
+                    prev = get_db().get_last_entry()
+                    if prev and prev.get("babyPresent") and prev.get("sleepPosition") == flat.get("sleepPosition"):
+                        if flat.get("sleepPosition") != "Unknown":
+                            log.info("heuristic: state Unknown -> Asleep (position unchanged: %s)",
+                                     flat.get("sleepPosition"))
+                            flat["state"] = "Asleep"
+                            flat["stateInferred"] = True
 
-            # Save head position from cloud API for the next BIRDEYE
-            # tick's adaptive crop (the trainable face detector is the
-            # primary source now, but the head crop is still a useful
-            # last-resort fallback inside BIRDEYE).
-            head_pos = flat.get("headPosition")
-            if isinstance(head_pos, dict) and head_pos.get("visible", False):
-                from lib.classifiers import save_head_state
-                save_head_state(head_pos["x"], head_pos["y"], source="cloud-api")
+                # Save head position from cloud API for the next BIRDEYE
+                # tick's adaptive crop (the trainable face detector is the
+                # primary source now, but the head crop is still a useful
+                # last-resort fallback inside BIRDEYE).
+                head_pos = flat.get("headPosition")
+                if isinstance(head_pos, dict) and head_pos.get("visible", False):
+                    from lib.classifiers import save_head_state
+                    save_head_state(head_pos["x"], head_pos["y"], source="cloud-api")
+            else:
+                # Cloud API failed → degrade to BIRDEYE-as-primary. The
+                # `low_confidence` and `no_face_detected` BIRDEYE outputs
+                # already carry a complete entry shape (state="Unknown",
+                # presence/face/eye metadata, "Unknown" placeholders for
+                # the cloud-only fields). On `hard_error`, BIRDEYE returned
+                # nothing — synthesize a minimal stub so the row still
+                # lands in the DB and there's no gap.
+                log.warning("pipeline: degrading to BIRDEYE primary "
+                            "(cloud unavailable, fallback=%s)", fallback_reason)
+                if birdeye_result is not None:
+                    flat = dict(birdeye_result)
+                    # On low_confidence, BIRDEYE *did* produce an eyeState
+                    # — its confidence was just below the cloud-fallback
+                    # threshold. With cloud unavailable, that prediction is
+                    # the best signal we have, so promote it from Unknown
+                    # to Awake/Asleep. The temporal smoother will still
+                    # require STATE_CONFIRM_RUN consecutive readings before
+                    # the smoothed `state` flips, so a single bad
+                    # low-confidence frame can't move the dashboard.
+                    if flat.get("eyeState") in ("eyes_open", "eyes_closed"):
+                        flat["state"] = (
+                            "Awake" if flat["eyeState"] == "eyes_open" else "Asleep"
+                        )
+                else:
+                    flat = {
+                        "babyPresent": None,
+                        "state": "Unknown",
+                        "detectionMethod": "stub",
+                        "modelUsed": "none",
+                        "sleepPosition": "Unknown",
+                        "objectsInBassinet": "Unknown",
+                        "swaddle": "Unknown",
+                        "headCovering": "Unknown",
+                        "lighting": "Unknown",
+                        "bodyPosture": "Unknown",
+                        "pacifierEngaged": "Unknown",
+                        "bassinetCondition": "Unknown",
+                        "hazards": "Unknown",
+                        "bassinetLocation": "Unknown",
+                        "captureMode": "Unknown",
+                        "cameraTimestamp": None,
+                    }
+                flat["diffScore"] = round(diff_score, 2) if diff_score >= 0 else None
+                flat["birdeyeFallback"] = fallback_reason
+                flat["cloudUnavailable"] = True
+                # Keep the reason machine-readable: SDK class name + a
+                # truncated message. Pipeline-health surfaces both.
+                flat["cloudUnavailableReason"] = (
+                    f"{type(cloud_err).__name__}: {str(cloud_err)[:200]}"
+                )
 
         # Always populate the audit-trail fields from BIRDEYE's output,
         # even on fallback frames where the cloud API wrote the primary

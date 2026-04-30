@@ -113,6 +113,13 @@ FALLING_ASLEEP_MAX_MINUTES = 30
 # ---------------------------------------------------------------------------
 EDGE_ALERT_COOLDOWN_MIN = 30
 
+# Global kill-switch for outbound Telegram alerts. When False, every call to
+# `send_telegram_alert` short-circuits with a debug log instead of hitting the
+# Bot API. Disabled 2026-04-30 while reliability work is in progress — flip
+# back to True (and review wake/asleep/edge/safety/watchdog rules) before
+# re-enabling notifications.
+TELEGRAM_ALERTS_ENABLED = False
+
 # ---------------------------------------------------------------------------
 # Alert state files
 # ---------------------------------------------------------------------------

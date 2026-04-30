@@ -271,6 +271,9 @@ class PresenceDataset(Dataset):
     def __getitem__(self, idx):
         path, label = self.samples[idx]
         frame = cv2.imread(str(path))
+        if frame is None:
+            # File pruned by retention mid-training (TOCTOU vs __init__ check).
+            return self.__getitem__((idx + 1) % len(self.samples))
         crop = crop_bassinet(frame)
         rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
         if self.transform:
@@ -358,6 +361,8 @@ class EyeStateDataset(Dataset):
     def __getitem__(self, idx):
         path, label, norm_bbox = self.samples[idx]
         frame = cv2.imread(str(path))
+        if frame is None:
+            return self.__getitem__((idx + 1) % len(self.samples))
         bass = crop_bassinet(frame)
         h, w = bass.shape[:2]
 
@@ -407,6 +412,8 @@ class FaceCropDataset(Dataset):
     def __getitem__(self, idx):
         path, label = self.samples[idx]
         img = cv2.imread(str(path))
+        if img is None:
+            return self.__getitem__((idx + 1) % len(self.samples))
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         if self.transform:
             rgb = self.transform(rgb)
@@ -873,6 +880,8 @@ class FaceDetectorDataset(Dataset):
     def __getitem__(self, idx):
         path, bbox = self.samples[idx]
         frame = cv2.imread(str(path))
+        if frame is None:
+            return self.__getitem__((idx + 1) % len(self.samples))
         bass = crop_bassinet(frame)
         rgb = cv2.cvtColor(bass, cv2.COLOR_BGR2RGB)
 

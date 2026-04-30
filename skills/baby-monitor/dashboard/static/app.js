@@ -3154,15 +3154,15 @@ const AQ_STATUS_LABEL = {
   critical: 'Critical',
 };
 
-// State-band fill colors. Lower-alpha than the legend swatches because the
-// bands span the full chart height — at high opacity they'd overpower the
-// metric line. FallingAsleep is intentionally absent: its periods are
+// State-band fill colors. Tuned for the white chart background — alphas
+// here read as visible pastel tints; on a dark background they'd look
+// washed out. FallingAsleep is intentionally absent: its periods are
 // merged into the preceding state's band to keep the chart legible.
 const AQ_STATE_FILLS = {
-  Asleep:      'rgba(76, 175, 80, 0.13)',
-  Awake:       'rgba(240, 180, 41, 0.13)',
-  Unknown:     'rgba(74, 158, 255, 0.08)',
-  not_present: 'rgba(170, 170, 175, 0.10)',
+  Asleep:      'rgba(76, 175, 80, 0.22)',
+  Awake:       'rgba(240, 180, 41, 0.22)',
+  Unknown:     'rgba(74, 158, 255, 0.14)',
+  not_present: 'rgba(120, 120, 120, 0.16)',
 };
 const AQ_STATE_LABEL = {
   Asleep: 'Asleep',

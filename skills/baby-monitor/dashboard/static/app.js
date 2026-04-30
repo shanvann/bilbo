@@ -3131,15 +3131,20 @@ function renderEyeMetricChart(metric, rows) {
 // chart per metric (CO2, PM2.5, temp, humidity) with a shared time-range
 // selector. Server returns bucket-averaged points so the polyline never has
 // to render more than ~360 segments regardless of window length.
+// All trend-chart lines share one calm blue. The metric is identified by
+// the chart title and Y-axis labels; using a single line colour means
+// "this segment is red" reliably reads as "the metric is in a bad zone"
+// (see SPIKE_COLOR in renderAirQualityChart) regardless of which chart.
+const AQ_LINE_COLOR = '#4a9eff';
 const AQ_METRICS = [
-  { key: 'co2',         label: 'CO₂',         unit: 'ppm',   color: '#f06b6b', fmt: v => Math.round(v).toString(), badZoneKey: 'co2' },
-  { key: 'pm25',        label: 'PM2.5',       unit: 'µg/m³', color: '#9b6bff', fmt: v => v.toFixed(1),             badZoneKey: 'pm25' },
+  { key: 'co2',         label: 'CO₂',         unit: 'ppm',   fmt: v => Math.round(v).toString(), badZoneKey: 'co2' },
+  { key: 'pm25',        label: 'PM2.5',       unit: 'µg/m³', fmt: v => v.toFixed(1),             badZoneKey: 'pm25' },
   // Temperature is stored as °C in the AirGradient DB; convert at render
   // time so the data layer stays canonical (C) and only the UI shows °F.
-  { key: 'temp',        label: 'Temperature', unit: '°F',    color: '#4a9eff',
+  { key: 'temp',        label: 'Temperature', unit: '°F',
     fmt: v => v.toFixed(1), transform: c => c * 9 / 5 + 32, badZoneKey: 'temp' },
-  { key: 'rh',          label: 'Humidity',    unit: '%',     color: '#3ec5a8', fmt: v => v.toFixed(0),             badZoneKey: 'rh' },
-  { key: 'tvoc_index',  label: 'TVOC',        unit: 'idx',   color: '#e8a23a', fmt: v => Math.round(v).toString(), badZoneKey: 'tvoc_index' },
+  { key: 'rh',          label: 'Humidity',    unit: '%',     fmt: v => v.toFixed(0),             badZoneKey: 'rh' },
+  { key: 'tvoc_index',  label: 'TVOC',        unit: 'idx',   fmt: v => Math.round(v).toString(), badZoneKey: 'tvoc_index' },
 ];
 
 const AQ_STATUS_LABEL = {
@@ -3237,7 +3242,10 @@ function _aqRangeLabel(hours) {
 // per metric regardless of the current value. The dynamic per-status detail
 // (e.g. "Within the safe-sleep range") still comes from the API.
 const AQ_HERO_ORDER = [
-  { key: 'temp',     label: 'Temperature', icon: '🌡️',  fmt: pickTempFmt,
+  // unit:'' suppresses the auto-appended hero unit because pickTempFmt
+  // already renders °F directly after the primary value (so the alt °C
+  // doesn't get stranded between two unit labels).
+  { key: 'temp',     label: 'Temperature', icon: '🌡️',  fmt: pickTempFmt, unit: '',
     impact: 'A cool nursery (20–23°C / 68–73°F) is one of the strongest known SIDS-risk modifiers — both overheating and cold disrupt infant sleep.' },
   { key: 'humidity', label: 'Humidity',    icon: '💧',  fmt: v => `${Math.round(v)}`,
     impact: 'Babies have small airways that dry air below 35% irritates quickly; humidity above 65% promotes mold and dust-mite growth.' },
@@ -3250,10 +3258,10 @@ const AQ_HERO_ORDER = [
     learnMore: { url: 'https://www.airgradient.com/blog/explaining-voc-tvoc-and-voc-index/',
                  label: 'How to read the VOC Index →' } },
 ];
-// Temperature renders dual unit in the hero card.
+// Temperature: F is the primary display, C shown small as a secondary alt.
 function pickTempFmt(c) {
   const f = c * 9 / 5 + 32;
-  return `${c.toFixed(1)}<span class="aq-hero-alt"> · ${f.toFixed(0)}°F</span>`;
+  return `${f.toFixed(0)}°F<span class="aq-hero-alt"> · ${c.toFixed(1)}°C</span>`;
 }
 
 function _renderAqHeroCards(statuses) {
@@ -3273,12 +3281,16 @@ function _renderAqHeroCards(statuses) {
               </div>`;
     }
     const valHtml = m.fmt(s.value);
+    // m.unit overrides backend s.unit (for temp, where the formatter
+    // emits °F itself and we want the auto-unit suppressed). An empty
+    // string in m.unit is intentional — only fall through on undefined.
+    const unit = m.unit !== undefined ? m.unit : (s.unit || '');
     const learnMoreHtml = m.learnMore
       ? `<a class="aq-hero-learnmore" href="${m.learnMore.url}" target="_blank" rel="noopener">${m.learnMore.label}</a>`
       : '';
     return `<div class="aq-hero-card aq-status-${s.level}">
               <div class="aq-hero-label">${m.icon} ${m.label}</div>
-              <div class="aq-hero-value">${valHtml}<span class="aq-hero-unit">${s.unit || ''}</span></div>
+              <div class="aq-hero-value">${valHtml}<span class="aq-hero-unit">${unit}</span></div>
               <div class="aq-status-pill aq-pill-${s.level}">${AQ_STATUS_LABEL[s.level] || s.level}</div>
               <div class="aq-hero-detail">${s.headline}. ${s.detail}</div>
               <div class="aq-hero-impact">${m.impact}</div>
@@ -3566,7 +3578,7 @@ function renderAirQualityChart(metric, points, latest, transitions, badZones) {
     const raw = p[metric.key];
     if (raw == null) { flush(); return; }
     const t = new Date(p.t).getTime();
-    const wantColor = inBadZone(t) ? SPIKE_COLOR : metric.color;
+    const wantColor = inBadZone(t) ? SPIKE_COLOR : AQ_LINE_COLOR;
     if (segmentColor && segmentColor !== wantColor) {
       const lastPt = segment[segment.length - 1];
       flush();
@@ -3582,7 +3594,7 @@ function renderAirQualityChart(metric, points, latest, transitions, badZones) {
   const latestVal = latest && latest[metric.key];
   const latestDisplay = latestVal != null ? metric.fmt(tx(latestVal)) : null;
   const titleRight = latestDisplay != null
-    ? `<span class="aq-latest" style="color:${metric.color}">${latestDisplay} <span class="aq-unit">${metric.unit}</span></span>`
+    ? `<span class="aq-latest" style="color:${AQ_LINE_COLOR}">${latestDisplay} <span class="aq-unit">${metric.unit}</span></span>`
     : '';
   return `
     <div class="eye-metric-card">

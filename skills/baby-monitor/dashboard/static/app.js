@@ -3246,7 +3246,9 @@ const AQ_HERO_ORDER = [
   { key: 'pm25',     label: 'PM2.5',       icon: '🌫️', fmt: v => v.toFixed(1),
     impact: 'Fine particles bypass infant nasal filtering and lodge deep in developing lungs, raising the risk of wheezing and respiratory illness.' },
   { key: 'tvoc',     label: 'TVOC',        icon: '🌿',  fmt: v => `${Math.round(v)}`,
-    impact: 'Volatile organic compounds from cleaners, plug-ins, paints, and new furniture irritate developing airways and have been linked to infant respiratory illness.' },
+    impact: 'Volatile organic compounds from cleaners, plug-ins, paints, and new furniture irritate developing airways and have been linked to infant respiratory illness.',
+    learnMore: { url: 'https://www.airgradient.com/blog/explaining-voc-tvoc-and-voc-index/',
+                 label: 'How to read the VOC Index →' } },
 ];
 // Temperature renders dual unit in the hero card.
 function pickTempFmt(c) {
@@ -3271,12 +3273,16 @@ function _renderAqHeroCards(statuses) {
               </div>`;
     }
     const valHtml = m.fmt(s.value);
+    const learnMoreHtml = m.learnMore
+      ? `<a class="aq-hero-learnmore" href="${m.learnMore.url}" target="_blank" rel="noopener">${m.learnMore.label}</a>`
+      : '';
     return `<div class="aq-hero-card aq-status-${s.level}">
               <div class="aq-hero-label">${m.icon} ${m.label}</div>
               <div class="aq-hero-value">${valHtml}<span class="aq-hero-unit">${s.unit || ''}</span></div>
               <div class="aq-status-pill aq-pill-${s.level}">${AQ_STATUS_LABEL[s.level] || s.level}</div>
               <div class="aq-hero-detail">${s.headline}. ${s.detail}</div>
               <div class="aq-hero-impact">${m.impact}</div>
+              ${learnMoreHtml}
             </div>`;
   }).join('');
 }

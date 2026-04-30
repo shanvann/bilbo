@@ -1657,6 +1657,16 @@ footer {
   padding-top: 6px;
   margin-top: 6px;
 }
+.aq-hero-learnmore {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 0.72rem;
+  color: var(--accent, #6db4ff);
+  text-decoration: none;
+}
+.aq-hero-learnmore:hover {
+  text-decoration: underline;
+}
 
 /* --- Comfort score --- */
 .aq-score-grid {

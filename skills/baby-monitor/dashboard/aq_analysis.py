@@ -79,20 +79,23 @@ def status_tvoc(idx):
     # Sensirion VOC Index is relative to a rolling 24-h baseline (100 = baseline).
     # Bands per AirGradient's reference guide
     # (https://www.airgradient.com/blog/explaining-voc-tvoc-and-voc-index/):
-    #   1-100   below baseline   • 101-199 slight increase
-    #   200-249 moderate         • 250-349 significant
-    #   350-500 severe
-    # Collapsed to our 4 levels: GOOD covers baseline + slight noise; CRITICAL
-    # starts at the article's "severe" line (350).
+    #   <100    below baseline       • 101-199 slight increase
+    #   200-249 moderate increase    • 250-349 significant increase
+    #   350-500 severe increase
+    # The article's 250 (significant) and 350 (severe) boundaries are honored
+    # exactly. The 150 GOOD/MODERATE cut is *not* in the article — it's our
+    # headroom for natural sensor noise around the rolling 100 baseline so
+    # the tile doesn't flap. Our MODERATE band (150-249) spans the article's
+    # "slight" and "moderate" zones, so we label it generically.
     if idx is None:
         return None, "No reading", ""
     if idx < 150:
-        return GOOD, "At baseline", "VOC index near the 24-h rolling baseline."
+        return GOOD, "Near baseline", "VOC index near the 24-h rolling baseline."
     if idx < 250:
-        return MODERATE, "Slight increase", "Recent product use? Watch the spike."
+        return MODERATE, "Above baseline", "Recent product use? Watch the spike."
     if idx < 350:
         return POOR, "Significant increase", "VOC source nearby — ventilate."
-    return CRITICAL, "Severe", "Identify and remove the VOC source."
+    return CRITICAL, "Severe increase", "Identify and remove the VOC source."
 
 
 def latest_with_status(latest):

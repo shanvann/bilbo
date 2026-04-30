@@ -373,9 +373,13 @@ def update_entry(timestamp: str, updates: dict) -> bool:
         if isinstance(shadow.get("birdeyeTimings"), dict) else None
     )
 
-    # Update indexed columns too
+    # Update indexed columns too. baby_present is included so the typed
+    # column stays in sync when an eyeState correction flips
+    # not_in_bassinet ↔ in-bassinet (training and aggregation queries
+    # filter on the typed column, not the JSON blob).
     conn.execute("""
         UPDATE entries SET
+            baby_present = ?,
             state = ?, eye_state = ?, eye_state_edited = ?,
             eye_state_corrected_at = ?, shadow_model_version = ?,
             shadow_birdeye_present = ?, shadow_birdeye_eye = ?,
@@ -383,6 +387,7 @@ def update_entry(timestamp: str, updates: dict) -> bool:
             data = ?
         WHERE timestamp = ?
     """, (
+        1 if entry.get("babyPresent") else 0,
         entry.get("state"),
         entry.get("eyeState"),
         1 if entry.get("eyeStateEdited") else 0,

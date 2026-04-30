@@ -3149,18 +3149,18 @@ const AQ_STATUS_LABEL = {
   critical: 'Critical',
 };
 
-// Vline colors by bassinet state — match the Monitor-tab timeline legend so
-// users have one mental model for state colors across the dashboard.
-const AQ_STATE_COLORS = {
-  Asleep:        'rgba(76, 175, 80, 0.85)',
-  FallingAsleep: 'rgba(139, 195, 74, 0.85)',
-  Awake:         'rgba(240, 180, 41, 0.85)',
-  Unknown:       'rgba(74, 158, 255, 0.55)',
-  not_present:   'rgba(170, 170, 175, 0.7)',
+// State-band fill colors. Lower-alpha than the legend swatches because the
+// bands span the full chart height — at high opacity they'd overpower the
+// metric line. FallingAsleep is intentionally absent: its periods are
+// merged into the preceding state's band to keep the chart legible.
+const AQ_STATE_FILLS = {
+  Asleep:      'rgba(76, 175, 80, 0.13)',
+  Awake:       'rgba(240, 180, 41, 0.13)',
+  Unknown:     'rgba(74, 158, 255, 0.08)',
+  not_present: 'rgba(170, 170, 175, 0.10)',
 };
 const AQ_STATE_LABEL = {
   Asleep: 'Asleep',
-  FallingAsleep: 'Falling asleep',
   Awake: 'Awake',
   Unknown: 'Unknown (in bassinet)',
   not_present: 'Out of bassinet',
@@ -3468,8 +3468,30 @@ function renderAirQualityChart(metric, points, latest, transitions, badZones) {
   // wide screens without becoming square on narrow ones.
   let svg = `<svg viewBox="0 0 ${W} ${H}" class="eye-metric-svg aq-svg" preserveAspectRatio="xMidYMid meet">`;
 
-  // Bad-zone shading — drawn before everything so it sits behind gridlines,
-  // vlines, and the polyline. Each span clamps to the visible window.
+  // State bands — translucent fill spans showing the baby's bassinet state
+  // across the chart, so the air-quality line can be read in the context
+  // of "asleep / awake / out of bassinet" at a glance. FallingAsleep is
+  // collapsed into the preceding non-transitional state to avoid clutter.
+  // Drawn first so bad-zones, gridlines, and the polyline all layer on top.
+  const stateTransitions = (transitions || []).filter(tr => tr.state !== 'FallingAsleep');
+  for (let i = 0; i < stateTransitions.length; i++) {
+    const tr = stateTransitions[i];
+    const next = stateTransitions[i + 1];
+    const startMs = Math.max(tMin, new Date(tr.timestamp).getTime());
+    const endMs = Math.min(tMax, next ? new Date(next.timestamp).getTime() : tMax);
+    if (endMs <= startMs) continue;
+    const fill = AQ_STATE_FILLS[tr.state];
+    if (!fill) continue;
+    const x1 = xAt(startMs);
+    const x2 = xAt(endMs);
+    const tip = (AQ_STATE_LABEL[tr.state] || tr.state) + ' · '
+              + new Date(startMs).toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
+    svg += `<rect x="${x1}" y="${PAD.top}" width="${Math.max(1, x2 - x1)}" `
+        +  `height="${plotH}" fill="${fill}"><title>${tip}</title></rect>`;
+  }
+
+  // Bad-zone shading — drawn after state bands so the AQ-concerning red
+  // overlay sits on top of the state context. Each span clamps to window.
   for (const z of badZones || []) {
     const zStart = Math.max(tMin, new Date(z.tStart).getTime());
     const zEnd = Math.min(tMax, new Date(z.tEnd).getTime());
@@ -3488,8 +3510,34 @@ function renderAirQualityChart(metric, points, latest, transitions, badZones) {
     svg += `<text x="${PAD.left - 6}" y="${y + 3}" class="eye-metric-axis aq-axis-text" text-anchor="end">${metric.fmt(v)}</text>`;
   }
 
-  // X labels: start / middle / end. Format adapts to the window length.
+  // Minor X gridlines — every 2 ET wall-clock hours so the chart picks up
+  // diurnal rhythm at a glance. Anchored to even local hours (not arbitrary
+  // window offsets) so the lines fall on times the X-axis labels match.
+  // Auto-coarsen on long windows so we never draw more than ~36 minor lines.
+  const HOUR_MS = 3600 * 1000;
   const spanMs = tMax - tMin;
+  let minorStepH = 2;
+  if (spanMs / (minorStepH * HOUR_MS) > 60) minorStepH = 12;
+  else if (spanMs / (minorStepH * HOUR_MS) > 36) minorStepH = 6;
+  const minorStepMs = minorStepH * HOUR_MS;
+  const _etParts = (ms) => {
+    const out = {};
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', hour12: false,
+    }).formatToParts(new Date(ms)).forEach(p => { out[p.type] = p.value; });
+    return { h: parseInt(out.hour, 10) % 24, m: parseInt(out.minute, 10) };
+  };
+  const startEt = _etParts(tMin);
+  const onBoundary = (startEt.h % minorStepH === 0 && startEt.m === 0);
+  const hoursToNext = onBoundary ? 0 : (minorStepH - (startEt.h % minorStepH));
+  const firstTickMs = tMin + (hoursToNext * 60 - startEt.m) * 60 * 1000;
+  for (let t = firstTickMs; t <= tMax; t += minorStepMs) {
+    const x = xAt(t);
+    if (x < PAD.left || x > W - PAD.right) continue;
+    svg += `<line x1="${x}" y1="${PAD.top}" x2="${x}" y2="${H - PAD.bottom}" class="aq-grid-minor"/>`;
+  }
+
+  // X labels: start / middle / end. Format adapts to the window length.
   const fmtTime = ms => {
     const d = new Date(ms);
     if (spanMs > 36 * 3600 * 1000) {
@@ -3502,20 +3550,7 @@ function renderAirQualityChart(metric, points, latest, transitions, badZones) {
     svg += `<text x="${xAt(t)}" y="${H - PAD.bottom + 16}" class="eye-metric-axis aq-axis-text" text-anchor="middle">${fmtTime(t)}</text>`;
   }
 
-  // Vlines at bassinet state-change boundaries — drawn between gridlines and
-  // the polyline so the data line stays visually dominant. Title element
-  // gives a hover tooltip with the timestamp + new state.
-  for (const tr of transitions || []) {
-    const t = new Date(tr.timestamp).getTime();
-    if (t < tMin || t > tMax) continue;
-    const color = AQ_STATE_COLORS[tr.state] || 'rgba(255,255,255,0.3)';
-    const label = AQ_STATE_LABEL[tr.state] || tr.state || 'Unknown';
-    const x = xAt(t);
-    const tip = fmtTime(t) + ' → ' + label;
-    svg += `<line x1="${x}" y1="${PAD.top}" x2="${x}" y2="${H - PAD.bottom}" `
-        +  `stroke="${color}" stroke-width="2" stroke-opacity="0.55" vector-effect="non-scaling-stroke">`
-        +  `<title>${tip}</title></line>`;
-  }
+  // (State context is drawn as bands above; no per-transition vlines.)
 
   // Polyline; broken at nulls so missing readings are gaps, not interpolated.
   let segment = [];

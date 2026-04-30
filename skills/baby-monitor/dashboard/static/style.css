@@ -1876,12 +1876,12 @@ footer {
   /* Width:100% from .eye-metric-svg; height:auto comes from viewBox aspect.
      The 6:1 viewBox renders height = container_width / 6 — visually wide
      enough for time series without dominating vertical space.
-     White background so the translucent state bands and the spike-red
-     polyline segments read with high contrast (the rest of the dashboard
-     is dark-themed; charts are intentionally inverted). */
+     Soft light-gray background — the rest of the dashboard is dark-themed,
+     and a pure-white chart was eye-searing. Cool light gray contrasts the
+     state bands (green/yellow/blue) and spike-red without glare. */
   width: 100%;
   height: auto;
-  background: #ffffff;
+  background: #eceef2;
   border-radius: 4px;
 }
 /* Scoped dark-on-white overrides for AQ charts only — the eye-state daily

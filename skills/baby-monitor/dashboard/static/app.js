@@ -3154,15 +3154,17 @@ const AQ_STATUS_LABEL = {
   critical: 'Critical',
 };
 
-// State-band fill colors. Tuned for the white chart background — alphas
-// here read as visible pastel tints; on a dark background they'd look
-// washed out. FallingAsleep is intentionally absent: its periods are
-// merged into the preceding state's band to keep the chart legible.
+// State-band fill colors. Tuned for the soft light-gray chart background.
+// not_present uses a darker neutral tone (no hue to lean on) so a long
+// out-of-bassinet stretch reads clearly against the cool-gray bg. Other
+// states have enough hue that 0.22 alpha is plenty. FallingAsleep is
+// intentionally absent: its periods are merged into the preceding
+// state's band to keep the chart legible.
 const AQ_STATE_FILLS = {
   Asleep:      'rgba(76, 175, 80, 0.22)',
   Awake:       'rgba(240, 180, 41, 0.22)',
-  Unknown:     'rgba(74, 158, 255, 0.14)',
-  not_present: 'rgba(120, 120, 120, 0.16)',
+  Unknown:     'rgba(74, 158, 255, 0.20)',
+  not_present: 'rgba(70, 80, 95, 0.28)',
 };
 const AQ_STATE_LABEL = {
   Asleep: 'Asleep',

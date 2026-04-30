@@ -113,14 +113,38 @@ function showFrameModal(framePath) {
 // ---------------------------------------------------------------------------
 // Timeline
 // ---------------------------------------------------------------------------
-let timelineDate = null; // null = today (live), 'YYYY-MM-DD' = specific date
+// The Timeline is a *night-of-sleep* view: 4 PM ET on date X through 11 AM
+// ET on date X+1 (19 h). Daytime is excluded by design — the baby is out of
+// the bassinet for most of it and the timeline becomes a wall of grey.
+const TL_WINDOW_HOURS = 19;
+const TL_WINDOW_START_HOUR_ET = 16; // 4 PM ET
+let timelineDate = null; // null = current night (live), 'YYYY-MM-DD' = the date the night started on
+
+// Returns the date (YYYY-MM-DD ET) that the *current* night belongs to:
+// today if it's already past 4 PM ET, otherwise yesterday (we're still in
+// last night's tail).
+function currentNightDateET() {
+  const nowEtParts = new Date().toLocaleString('en-US', {
+    timeZone: 'America/New_York', hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit',
+  });
+  // en-US gives e.g. "04/30/2026, 09" — robust enough for our needs.
+  const m = nowEtParts.match(/(\d{2})\/(\d{2})\/(\d{4}),?\s+(\d{2})/);
+  if (!m) return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const [, mm, dd, yyyy, hh] = m;
+  const todayStr = `${yyyy}-${mm}-${dd}`;
+  if (parseInt(hh, 10) >= TL_WINDOW_START_HOUR_ET) return todayStr;
+  // Before 4 PM ET — the active night started yesterday.
+  const d = new Date(`${todayStr}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
 
 function initTimelineNav() {
   const picker = document.getElementById('tl-date');
-  // Default to today
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  picker.value = today;
-  picker.max = today;
+  const nightDate = currentNightDateET();
+  picker.value = nightDate;
+  picker.max = nightDate;
 
   picker.addEventListener('change', () => {
     timelineDate = picker.value;
@@ -136,31 +160,33 @@ function initTimelineNav() {
   document.getElementById('tl-next').addEventListener('click', () => {
     const d = new Date(picker.value + 'T12:00:00');
     d.setDate(d.getDate() + 1);
-    const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-    if (d.toISOString().slice(0, 10) > todayStr) return;
+    const maxStr = currentNightDateET();
+    if (d.toISOString().slice(0, 10) > maxStr) return;
     picker.value = d.toISOString().slice(0, 10);
     timelineDate = picker.value;
     loadTimeline();
   });
   document.getElementById('tl-today').addEventListener('click', () => {
     timelineDate = null;
-    picker.value = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    picker.value = currentNightDateET();
     loadTimeline();
   });
 }
 
 async function loadTimeline() {
   try {
-    const url = timelineDate
-      ? '/api/timeline?date=' + timelineDate
-      : '/api/timeline?hours=24';
+    // Both modes now use a date — live mode just resolves to the current
+    // night via currentNightDateET(). The server interprets `date` as 4 PM
+    // ET (date) → 11 AM ET (date + 1).
+    const dateForApi = timelineDate || currentNightDateET();
+    const url = '/api/timeline?date=' + dateForApi;
     const res = await fetch(url);
     const data = await res.json();
     const entries = data.entries || [];
 
     if (entries.length === 0) {
       document.getElementById('timeline-bar').innerHTML =
-        '<div style="padding:8px;color:var(--text-dim)">No data for this date</div>';
+        '<div style="padding:8px;color:var(--text-dim)">No data for this night (4 PM → 11 AM ET)</div>';
       document.getElementById('timeline-labels').innerHTML = '';
       // no timeline entries
       return;
@@ -168,27 +194,22 @@ async function loadTimeline() {
 
     // Timeline stats now handled by bassinet chart
 
-    // For a specific date: midnight to midnight ET
-    // For today/live: last 24h
-    let start, end;
-    if (timelineDate) {
-      // Parse as ET midnight
-      start = new Date(timelineDate + 'T00:00:00');
-      // Adjust for ET offset (approximate — good enough for display)
-      const etNow = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
-      const etOffset = new Date(etNow).getTimezoneOffset();
-      start = new Date(timelineDate + 'T00:00:00-04:00'); // EDT
-      end = new Date(start.getTime() + 24 * 3600000);
-    } else {
-      end = new Date();
-      start = new Date(end.getTime() - 24 * 3600000);
-    }
-    const totalMs = 24 * 3600000;
+    // Window: 4 PM ET on date → 11 AM ET on date + 1 (19 h). EDT offset
+    // (-04:00) is hardcoded — same convention used elsewhere in this file
+    // and matches the ET constant in app.py. Will need updating if we
+    // ever care about correct rendering across DST flips.
+    const start = new Date(dateForApi + 'T16:00:00-04:00');
+    const end = new Date(start.getTime() + TL_WINDOW_HOURS * 3600000);
+    const totalMs = TL_WINDOW_HOURS * 3600000;
 
-    // Build labels (every 3h)
+    // Build labels every 2 h plus the 19 h cap so the right edge is
+    // labelled (4p, 6p, 8p, 10p, 12a, 2a, 4a, 6a, 8a, 10a, 11a).
     const labelsEl = document.getElementById('timeline-labels');
     labelsEl.innerHTML = '';
-    for (let h = 0; h <= 24; h += 3) {
+    const labelHours = [];
+    for (let h = 0; h <= TL_WINDOW_HOURS; h += 2) labelHours.push(h);
+    if (labelHours[labelHours.length - 1] !== TL_WINDOW_HOURS) labelHours.push(TL_WINDOW_HOURS);
+    for (const h of labelHours) {
       const t = new Date(start.getTime() + h * 3600000);
       const label = document.createElement('span');
       label.textContent = t.toLocaleTimeString('en-US', {
@@ -223,7 +244,11 @@ async function loadTimeline() {
     }
 
     const merged = [];
-    const timelineEnd = timelineDate ? end : new Date();
+    // Clamp at min(end, now): live nights stop the bar at "now", past
+    // nights fill the full 19 h, and looking at a finished night after
+    // 11 AM ET (the gap before the next night begins) still renders
+    // correctly instead of overflowing past 100 %.
+    const timelineEnd = new Date(Math.min(end.getTime(), Date.now()));
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i];
       const cat = stateCategory(e);
@@ -2334,6 +2359,8 @@ async function loadAll() {
     loadPipelineHistory(),
     loadEyeStateDailyMetrics(),
     loadSystemUsage(),
+    loadPipelineHealth(),
+    loadClassificationRate(),
     loadAirQuality(),
   ]);
   document.getElementById('footer-refresh').textContent =
@@ -2341,7 +2368,7 @@ async function loadAll() {
 }
 
 // ---------------------------------------------------------------------------
-// System Load (Models tab)
+// System Load (System tab)
 // ---------------------------------------------------------------------------
 // Backed by /api/system-usage (dashboard/system_usage.py). Polled every 10s
 // so the panel tracks in close-to-real-time — useful when the user kicks
@@ -2405,7 +2432,8 @@ function _renderSystemUsage(data) {
   const disk = data.disk || [];
   const bm = (data.babyMonitor && data.babyMonitor.sizes) || {};
   const bmProcs = (data.babyMonitor && data.babyMonitor.processes) || [];
-  const top = data.topProcesses || [];
+  const topByCpu = data.topProcesses || [];
+  const topByMem = data.topByMemory || [];
 
   let html = '';
 
@@ -2428,17 +2456,22 @@ function _renderSystemUsage(data) {
     + '</div>';
   html += '</div>';
 
-  // Memory
+  // Memory — pressure metric only (active + wired + compressed). macOS
+  // pins file cache in the "inactive" pool and reclaims it on demand;
+  // counting that as "used" would peg the tile near 100% on a healthy
+  // box. Subtitle calls out the cache and free portions so the user can
+  // reconcile this number against per-process RSS in the consumers table.
   const memCls = mem.usedPct == null ? ''
     : (mem.usedPct >= 90 ? 'bad' : (mem.usedPct >= 75 ? 'warn' : 'good'));
   html += '<div class="sys-tile">';
-  html += '<div class="sys-tile-label">Memory</div>';
+  html += '<div class="sys-tile-label">Memory pressure</div>';
   html += '<div class="sys-tile-value ' + memCls + '">'
     + (mem.usedPct != null ? mem.usedPct.toFixed(1) + '%' : '—')
     + '</div>';
-  html += '<div class="sys-tile-note" title="Pages that are free, active, inactive, wired, or compressed, reported via vm_stat. usedPct = (total − free) / total.">'
+  html += '<div class="sys-tile-note" title="Memory pressure = (active + wired + compressed) / total. Inactive pages are macOS file cache and count as available — they get reclaimed the instant any process needs RAM. Per-process RSS in the consumers table will sum toward this number, not the &quot;total used&quot; you see in raw vm_stat output.">'
     + _fmtBytes(mem.totalBytes) + ' total · '
-    + _fmtBytes(mem.compressedBytes) + ' compressed'
+    + (mem.cachedPct != null ? mem.cachedPct.toFixed(0) + '% cache · ' : '')
+    + (mem.freePct != null ? mem.freePct.toFixed(0) + '% free' : '')
     + '</div>';
   html += '</div>';
 
@@ -2471,6 +2504,31 @@ function _renderSystemUsage(data) {
 
   html += '</div>';
 
+  // --- Top resource consumers (single highest CPU, single highest mem) ---
+  html += '<div class="sys-section-label">Top resource consumers</div>';
+  html += '<table class="sys-proc-table"><thead><tr>';
+  html += '<th>Rank</th><th>PID</th><th>CPU</th><th>Mem</th><th>RSS</th><th>Elapsed</th><th>Command</th>';
+  html += '</tr></thead><tbody>';
+  const _topRow = function (label, p) {
+    if (!p) {
+      return '<tr><td>' + label + '</td><td colspan="6" class="safety-empty" style="padding:4px 0">no data</td></tr>';
+    }
+    const hot = p.cpuPct >= 100 ? 'sys-proc-hot' : (p.cpuPct >= 25 ? 'sys-proc-warm' : '');
+    let s = '<tr class="' + hot + '">';
+    s += '<td><strong>' + label + '</strong></td>';
+    s += '<td class="num">' + p.pid + '</td>';
+    s += '<td class="num">' + (p.cpuPct != null ? p.cpuPct.toFixed(1) + '%' : '—') + '</td>';
+    s += '<td class="num">' + (p.memPct != null ? p.memPct.toFixed(1) + '%' : '—') + '</td>';
+    s += '<td class="num">' + _fmtBytes((p.rssKb || 0) * 1024) + '</td>';
+    s += '<td class="num">' + (p.etime || '—') + '</td>';
+    s += '<td>' + (p.command || '—') + '</td>';
+    s += '</tr>';
+    return s;
+  };
+  html += _topRow('Top CPU', topByCpu[0]);
+  html += _topRow('Top mem', topByMem[0]);
+  html += '</tbody></table>';
+
   // --- Baby-monitor processes (always shown; explains whose load this is) ---
   html += '<div class="sys-section-label">Baby-monitor processes</div>';
   if (bmProcs.length === 0) {
@@ -2480,14 +2538,6 @@ function _renderSystemUsage(data) {
       + '</div>';
   } else {
     html += _sysProcessTable(bmProcs, { showScript: true });
-  }
-
-  // --- Top CPU processes ---
-  html += '<div class="sys-section-label">Top processes (by CPU)</div>';
-  if (top.length === 0) {
-    html += '<div class="safety-empty" style="padding:4px 0">No process data.</div>';
-  } else {
-    html += _sysProcessTable(top.slice(0, 6), { showScript: false });
   }
 
   body.innerHTML = html;
@@ -2518,17 +2568,345 @@ function _sysProcessTable(rows, opts) {
   return html;
 }
 
-// Kick off a 10s polling loop for the System Load card. Separate from the
+// ---------------------------------------------------------------------------
+// Pipeline Health (System tab)
+// ---------------------------------------------------------------------------
+// Backed by /api/pipeline-health. Surfaces capture freshness, gap timeline,
+// detection-method mix, launchd job state, and the watchdog's outage view.
+// Polled every 10s on the same cadence as System Load.
+async function loadPipelineHealth() {
+  try {
+    const res = await fetch('/api/pipeline-health');
+    if (!res.ok) throw new Error('http ' + res.status);
+    const data = await res.json();
+    _renderPipelineHealth(data);
+  } catch (err) {
+    console.error('pipeline-health error:', err);
+    const el = document.getElementById('pipeline-health-body');
+    if (el) el.innerHTML = '<div class="safety-empty">Failed to load pipeline health.</div>';
+  }
+}
+
+function _fmtAge(secs) {
+  if (secs == null) return '—';
+  if (secs < 60) return secs + 's';
+  const m = Math.floor(secs / 60);
+  if (m < 60) return m + 'm ' + (secs % 60) + 's';
+  const h = Math.floor(m / 60);
+  return h + 'h ' + (m % 60) + 'm';
+}
+
+function _renderPipelineHealth(data) {
+  const body = document.getElementById('pipeline-health-body');
+  const asOfEl = document.getElementById('pipeline-health-asof');
+  if (!body) return;
+
+  if (asOfEl) {
+    asOfEl.textContent = data.asOf
+      ? '(as of ' + new Date(data.asOf).toLocaleTimeString('en-US', {
+          timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit',
+          second: '2-digit', hour12: true,
+        }) + ')'
+      : '';
+  }
+
+  const last = data.lastEntry || {};
+  const caps = data.captures24h || {};
+  const gaps = data.gaps24h || {};
+  const methods = data.detectionMethods24h || [];
+  const cloud = data.cloudCalls24h || {};
+  const jobs = data.launchdJobs || [];
+  const wd = data.watchdog;
+
+  let html = '';
+
+  // --- Headline tiles: capture freshness / 24 h volume / open gap ---
+  html += '<div class="sys-headline-row">';
+
+  const freshClass = last.freshness === 'fresh' ? 'good'
+    : (last.freshness === 'stale' ? 'warn' : 'bad');
+  html += '<div class="sys-tile">';
+  html += '<div class="sys-tile-label">Last frame</div>';
+  html += '<div class="sys-tile-value ' + freshClass + '">'
+    + (last.ageSeconds != null ? _fmtAge(last.ageSeconds) + ' ago' : 'no data')
+    + '</div>';
+  html += '<div class="sys-tile-note" title="Time since the most recent DB entry. Capture cadence is one frame per minute.">'
+    + (last.timestamp ? formatTimeET(last.timestamp) : '—')
+    + ' · ' + (last.freshness || 'unknown')
+    + '</div>';
+  html += '</div>';
+
+  const cov = caps.actual != null && caps.nominal
+    ? Math.min(100, (caps.actual / caps.nominal) * 100)
+    : null;
+  const covClass = cov == null ? '' : (cov >= 95 ? 'good' : (cov >= 80 ? 'warn' : 'bad'));
+  html += '<div class="sys-tile">';
+  html += '<div class="sys-tile-label">Captures (24 h)</div>';
+  html += '<div class="sys-tile-value ' + covClass + '">'
+    + (caps.actual != null ? caps.actual : '—')
+    + ' <span class="sys-tile-sub">/ ' + (caps.nominal || '—') + '</span></div>';
+  html += '<div class="sys-tile-note" title="Actual rows in the entries table over the last 24 hours vs. the nominal count given the launchd interval.">'
+    + (cov != null ? cov.toFixed(0) + '% of nominal' : '—')
+    + ' · 1 frame / ' + (caps.intervalSec || 60) + 's'
+    + '</div>';
+  html += '</div>';
+
+  const ongoing = gaps.ongoing;
+  const ongoingClass = ongoing ? 'bad' : 'good';
+  html += '<div class="sys-tile">';
+  html += '<div class="sys-tile-label">Open gap</div>';
+  html += '<div class="sys-tile-value ' + ongoingClass + '">'
+    + (ongoing ? ongoing.minutes.toFixed(0) + ' min' : 'none')
+    + '</div>';
+  html += '<div class="sys-tile-note" title="A gap is in-progress when no frame has arrived for longer than the gap threshold.">'
+    + (ongoing ? 'since ' + formatTimeET(ongoing.start) : 'capture is current')
+    + '</div>';
+  html += '</div>';
+
+  html += '<div class="sys-tile">';
+  html += '<div class="sys-tile-label">Gaps &gt; ' + (gaps.thresholdMin || 10) + ' min (24 h)</div>';
+  const gapValClass = (gaps.count || 0) === 0 ? 'good' : ((gaps.count || 0) <= 2 ? 'warn' : 'bad');
+  html += '<div class="sys-tile-value ' + gapValClass + '">'
+    + (gaps.count != null ? gaps.count : '—')
+    + '</div>';
+  html += '<div class="sys-tile-note" title="Count of consecutive-frame gaps exceeding the threshold. Total missed minutes is the sum of those gap durations.">'
+    + (gaps.totalMissedMin != null ? gaps.totalMissedMin.toFixed(0) + ' min total missed' : '—')
+    + '</div>';
+  html += '</div>';
+
+  // Cloud calls — split attempted / succeeded / failed in one tile so a
+  // 429 storm is visible at a glance.
+  const cAtt = cloud.attempted || 0;
+  const cFail = cloud.failed || 0;
+  const cSucc = cloud.succeeded || 0;
+  const cQuota = cloud.quotaExhausted || 0;
+  let cloudCls = 'good';
+  if (cAtt === 0) cloudCls = '';
+  else if (cFail === 0) cloudCls = 'good';
+  else if (cFail / cAtt < 0.2) cloudCls = 'warn';
+  else cloudCls = 'bad';
+  // Quota exhaustion is a distinct, actionable state — paint it red even
+  // when the overall failure rate would otherwise be a warn, since it
+  // doesn't self-heal until the account is topped up.
+  if (cQuota > 0) cloudCls = 'bad';
+  html += '<div class="sys-tile" title="Cloud API is the BIRDEYE fallback path: it runs only when the local model bails (no_face_detected or low_confidence) or hard-errors. failed = the row was persisted with cloudUnavailable=true so capture continues with BIRDEYE primary. quota = OpenAI insufficient_quota subset of failed; account needs a top-up.">';
+  html += '<div class="sys-tile-label">Cloud calls (24 h)</div>';
+  html += '<div class="sys-tile-value ' + cloudCls + '">'
+    + cAtt + ' <span class="sys-tile-sub">/ ' + cFail + ' failed</span></div>';
+  let cloudNote;
+  if (cQuota > 0) {
+    cloudNote = '<strong>' + cQuota + ' quota-exhausted</strong> (OpenAI insufficient_quota — top up account)';
+  } else if (cloud.lastFailure) {
+    const reason = (cloud.lastFailure.reason || '').toString().slice(0, 60);
+    cloudNote = 'last fail ' + formatTimeET(cloud.lastFailure.timestamp)
+      + ' · <code>' + reason + '</code>';
+  } else if (cAtt === 0) {
+    cloudNote = 'no fallbacks needed';
+  } else {
+    cloudNote = cSucc + ' succeeded · no recent failures';
+  }
+  html += '<div class="sys-tile-note">' + cloudNote + '</div>';
+  html += '</div>';
+
+  html += '</div>'; // /sys-headline-row
+
+  // --- launchd jobs ---
+  html += '<div class="sys-section-label">launchd jobs</div>';
+  if (jobs.length === 0) {
+    html += '<div class="safety-empty" style="padding:4px 0">'
+      + 'launchctl unavailable — can\'t verify scheduled job state.'
+      + '</div>';
+  } else {
+    html += '<table class="sys-proc-table"><thead><tr>';
+    html += '<th>Label</th><th>Kind</th><th>State</th><th>PID</th><th>Last exit</th>';
+    html += '</tr></thead><tbody>';
+    for (const j of jobs) {
+      // Persistent jobs are healthy when PID > 0. Scheduled jobs are
+      // healthy when lastExit == 0 — they're *expected* to have no PID
+      // most of the time because launchd re-launches them per interval.
+      let state, stateCls;
+      if (j.kind === 'persistent') {
+        state = j.pid ? 'running' : 'down';
+        stateCls = j.pid ? 'sys-proc-warm' : 'sys-proc-hot';
+      } else {
+        if (j.lastExit === 0) {
+          state = j.pid ? 'running' : 'idle (ok)';
+          stateCls = '';
+        } else {
+          state = 'last exit ' + (j.lastExit != null ? j.lastExit : '?');
+          stateCls = 'sys-proc-hot';
+        }
+      }
+      html += '<tr class="' + stateCls + '">';
+      html += '<td><code>' + j.label + '</code></td>';
+      html += '<td>' + j.kind + '</td>';
+      html += '<td>' + state + '</td>';
+      html += '<td class="num">' + (j.pid != null ? j.pid : '—') + '</td>';
+      html += '<td class="num">' + (j.lastExit != null ? j.lastExit : '—') + '</td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+  }
+
+  // --- Watchdog state ---
+  html += '<div class="sys-section-label">Watchdog</div>';
+  if (!wd) {
+    html += '<div class="safety-empty" style="padding:4px 0">'
+      + 'No watchdog state file (data/watchdog-state.json). The watchdog hasn\'t run yet, or this is a fresh install.'
+      + '</div>';
+  } else if (wd.outageActive) {
+    const since = wd.outageStartedAt ? formatTimeET(wd.outageStartedAt) : '—';
+    html += '<div class="ph-watchdog ph-watchdog-bad">';
+    html += 'Outage in progress · started ' + since;
+    if (wd.lastAlertKind) html += ' · last alert: ' + wd.lastAlertKind;
+    html += '</div>';
+  } else {
+    html += '<div class="ph-watchdog ph-watchdog-ok">No active outage.';
+    if (wd.lastAlertAt) html += ' Last alert ' + formatTimeET(wd.lastAlertAt) + '.';
+    html += '</div>';
+  }
+
+  // --- Detection-method mix (24 h) ---
+  html += '<div class="sys-section-label">Detection method mix (24 h)</div>';
+  if (methods.length === 0) {
+    html += '<div class="safety-empty" style="padding:4px 0">No entries in the last 24 h.</div>';
+  } else {
+    html += '<div class="ph-method-bar">';
+    for (const m of methods) {
+      const cls = 'ph-method-' + (m.method || 'unknown').replace(/[^a-z0-9-]/gi, '-');
+      html += '<div class="ph-method-seg ' + cls + '" style="width:' + m.pct + '%" '
+        + 'title="' + m.method + ': ' + m.count + ' frames (' + m.pct + '%)">'
+        + (m.pct >= 8 ? m.method + ' ' + m.pct + '%' : '') + '</div>';
+    }
+    html += '</div>';
+  }
+
+  // --- Recent gaps table ---
+  if ((gaps.items || []).length > 0) {
+    html += '<div class="sys-section-label">Recent gaps</div>';
+    html += '<table class="sys-proc-table"><thead><tr>';
+    html += '<th>Start (ET)</th><th>End (ET)</th><th>Duration</th>';
+    html += '</tr></thead><tbody>';
+    for (const g of gaps.items) {
+      html += '<tr>';
+      html += '<td>' + formatTimeET(g.start) + '</td>';
+      html += '<td>' + formatTimeET(g.end) + '</td>';
+      html += '<td class="num">' + g.minutes.toFixed(1) + ' min</td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+  }
+
+  body.innerHTML = html;
+}
+
+// ---------------------------------------------------------------------------
+// Classification Rate (System tab)
+// ---------------------------------------------------------------------------
+// Stacked-bucket chart showing how many frames per bucket landed in each
+// outcome class (birdeye / pixel-diff / cloud-success / cloud-failed) plus
+// a "missing" remainder when the bucket fell short of the nominal capture
+// count. Designed for at-a-glance gap detection — short or hollow bars
+// pop out of a wall of green.
+const CR_OUTCOMES = ['birdeye', 'pixel-diff', 'cloud-success', 'cloud-failed'];
+
+async function loadClassificationRate() {
+  try {
+    const hours = parseInt(document.getElementById('cr-range').value, 10) || 24;
+    // Pick a bucket size that yields ~24-48 bars regardless of range.
+    const bucketMin = hours <= 6 ? 15 : (hours <= 24 ? 60 : (hours <= 72 ? 180 : 360));
+    const res = await fetch('/api/classification-rate?hours=' + hours + '&bucketMin=' + bucketMin);
+    if (!res.ok) throw new Error('http ' + res.status);
+    const data = await res.json();
+    _renderClassificationRate(data);
+  } catch (err) {
+    console.error('classification-rate error:', err);
+    const el = document.getElementById('classification-rate-body');
+    if (el) el.innerHTML = '<div class="safety-empty">Failed to load classification rate.</div>';
+  }
+}
+
+function _renderClassificationRate(data) {
+  const body = document.getElementById('classification-rate-body');
+  if (!body) return;
+  const buckets = data.buckets || [];
+  const nominal = data.nominalPerBucket || 1;
+  if (buckets.length === 0) {
+    body.innerHTML = '<div class="safety-empty">No data in window.</div>';
+    return;
+  }
+
+  // Scale: every bucket's bar fills nominal vertically. If actual exceeds
+  // nominal (rare — clock skew, replays), clamp; if short, the deficit is
+  // rendered as the "missing" segment so gaps are visually obvious.
+  const scaleMax = Math.max(nominal, ...buckets.map((b) => b.total || 0));
+
+  let html = '<div class="cr-bars">';
+  for (const b of buckets) {
+    const total = b.total || 0;
+    const missing = Math.max(0, nominal - total);
+    // Tooltip lines
+    const tipLines = [
+      formatTimeET(b.start) + ' → ' + formatTimeET(b.endExclusive),
+      total + ' / ' + nominal + ' captured',
+    ];
+    for (const k of CR_OUTCOMES) {
+      if (b[k]) tipLines.push('  ' + k + ': ' + b[k]);
+    }
+    if (missing > 0) tipLines.push('  missing: ' + missing);
+    const title = tipLines.join('\n');
+
+    html += '<div class="cr-bar" title="' + title.replace(/"/g, '&quot;') + '">';
+    html += '<div class="cr-stack">';
+    // Stack from bottom up; missing block sits on top so a partial bucket
+    // shows as "real captures down low + a hollow chunk above".
+    for (const k of CR_OUTCOMES) {
+      const c = b[k] || 0;
+      if (c === 0) continue;
+      const h = (c / scaleMax) * 100;
+      html += '<div class="cr-seg cr-' + k + '" style="height:' + h + '%"></div>';
+    }
+    if (missing > 0) {
+      const h = (missing / scaleMax) * 100;
+      html += '<div class="cr-seg cr-missing" style="height:' + h + '%"></div>';
+    }
+    html += '</div>';
+    html += '</div>';
+  }
+  html += '</div>';
+
+  // Time-axis labels — one per ~6 buckets, in ET.
+  html += '<div class="cr-axis">';
+  const step = Math.max(1, Math.round(buckets.length / 8));
+  for (let i = 0; i < buckets.length; i++) {
+    if (i % step === 0 || i === buckets.length - 1) {
+      const t = new Date(buckets[i].start);
+      const label = t.toLocaleTimeString('en-US', {
+        timeZone: 'America/New_York', hour: 'numeric', hour12: true,
+      });
+      html += '<span class="cr-axis-label" style="left:' + ((i + 0.5) / buckets.length * 100) + '%">' + label + '</span>';
+    }
+  }
+  html += '</div>';
+
+  body.innerHTML = html;
+}
+
+// Kick off a 10s polling loop for both System-tab cards. Separate from the
 // main loadAll() cadence so it's lightweight and refreshes during retrain
 // without jittering the other panels.
 setInterval(loadSystemUsage, 10000);
+setInterval(loadPipelineHealth, 10000);
+// Classification chart refreshes less aggressively — buckets are coarse
+// (15min – 6h) and the data only changes meaningfully on the same cadence.
+setInterval(loadClassificationRate, 60000);
 
 // --- Tab switching ---
-// The main content is split into three tabs: Monitor (live watching),
-// Models (pending corrections, BIRDEYE classifiers, shadow experiments,
-// pipeline stats), and Events (recent events table). Active tab is
-// persisted in localStorage and reflected in the URL hash so links and
-// reloads land on the right view.
+// Tabs: Monitor (live watching), Models (pending corrections, BIRDEYE
+// classifiers, shadow experiments, pipeline stats), Events (recent events
+// table), Air Quality (CO₂/PM2.5/temp/RH), and System (host load + capture
+// pipeline health). Active tab is persisted in localStorage and reflected
+// in the URL hash so links and reloads land on the right view.
 function setActiveTab(name, opts) {
   const push = opts && opts.push;
   const buttons = document.querySelectorAll('.tab-btn');
@@ -3173,9 +3551,12 @@ function renderAirQualityChart(metric, points, latest, transitions, badZones) {
 // matches, so repeat clicks are instant.
 function initRecap() {
   const picker = document.getElementById('recap-date');
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  picker.value = today;
-  picker.max = today;
+  // The picker value is the date the *night* started on — the recap
+  // covers 4 PM ET (date) → 11 AM ET (date + 1). Default to the current
+  // night so freshly-loaded dashboards show the most relevant recap.
+  const nightDate = currentNightDateET();
+  picker.value = nightDate;
+  picker.max = nightDate;
 
   const bump = (days) => {
     const d = new Date(picker.value + 'T12:00:00');
@@ -3255,5 +3636,6 @@ document.getElementById('bassinet-days').addEventListener('change', loadBassinet
 document.getElementById('pipeline-history-days').addEventListener('change', loadPipelineHistory);
 document.getElementById('eye-metrics-days').addEventListener('change', loadEyeStateDailyMetrics);
 document.getElementById('air-quality-range').addEventListener('change', loadAirQuality);
+document.getElementById('cr-range').addEventListener('change', loadClassificationRate);
 loadAll();
 setInterval(loadAll, REFRESH_INTERVAL_SEC * 1000);

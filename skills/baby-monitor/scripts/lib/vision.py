@@ -197,6 +197,33 @@ def analyze_frame(image_path: Path, api_key: str, anthropic_key: str = None) -> 
                 # Bad response -> try next model immediately (don't retry same model)
                 break
 
+            except Exception as e:  # noqa: BLE001
+                # Catch-all for SDK exceptions that aren't urllib/Timeout/JSON.
+                # The OpenAI Python SDK raises its own typed errors
+                # (RateLimitError, APITimeoutError, AuthenticationError, …)
+                # subclassing OpenAIError, NOT urllib.error.HTTPError; ditto
+                # for the Anthropic SDK. Without this branch they propagate
+                # raw and crash the tick (incident 2026-04-22, recurred
+                # 2026-04-30 — see project memory). Re-classify into the
+                # same retry/fall-through ladder as URLError so the chain
+                # exhausts cleanly and `analyze_frame` always raises
+                # RuntimeError on failure.
+                elapsed = time.monotonic() - t0
+                last_err = f"{provider}/{model}: {type(e).__name__}: {e}"
+                log.warning("analyze: %s/%s SDK error (%.1fs): %s", provider, model, elapsed, last_err)
+                # Retry once for transient classes (rate limit / timeout);
+                # for everything else, drop straight to the next model.
+                name = type(e).__name__
+                transient = name in ("RateLimitError", "APITimeoutError", "APIConnectionError",
+                                      "InternalServerError", "ServiceUnavailableError")
+                if transient and attempt < API_RETRIES:
+                    wait = 2 ** attempt
+                    log.info("analyze: retrying %s in %ds (transient %s)", model, wait, name)
+                    time.sleep(wait)
+                    continue
+                log.info("analyze: %s/%s exhausted on SDK error, falling to next model", provider, model)
+                break
+
     log.error("analyze: all models exhausted, last error: %s", last_err)
     raise RuntimeError(f"All models failed: {last_err}")
 

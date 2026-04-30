@@ -16,6 +16,7 @@ from .config import (
     BURST_AWAKE_THRESHOLD,
     EDGE_ALERT_COOLDOWN_MIN,
     JSONL_FILE,
+    TELEGRAM_ALERTS_ENABLED,
     WAKE_COOLDOWN_MIN,
     WAKE_WINDOW,
 )
@@ -314,6 +315,14 @@ def reset_wake_cooldown():
 
 def send_telegram_alert(message: str, env: dict, alert_id: str = None):
     """Send alert via Telegram Bot API, optionally with feedback buttons."""
+    # Global kill-switch — see lib/config.py::TELEGRAM_ALERTS_ENABLED. Gating
+    # here (rather than at every call site in monitor.py / watchdog.py) means
+    # one flag silences wake, asleep, edge, safety, AND watchdog notifications.
+    if not TELEGRAM_ALERTS_ENABLED:
+        log.info("telegram-alert: suppressed (TELEGRAM_ALERTS_ENABLED=False) — would have sent: %s",
+                 message.splitlines()[0][:120] if message else "")
+        return False
+
     bot_token = env.get("TELEGRAM_BOT_TOKEN") or env.get("BILBO_BOT_TOKEN")
     chat_id = env.get("TELEGRAM_CHAT_ID")
 

@@ -63,9 +63,16 @@ def _load() -> dict:
 def _memory() -> dict:
     """Memory snapshot via `vm_stat` (macOS) — page counts → bytes.
 
-    Returns usedPct as `(total - free) / total`, which matches how macOS
-    Activity Monitor labels "Memory Pressure" at the high-level: compressed
-    + wired + active pages all count as "used" even if inactive is evictable.
+    `usedPct` is the *memory pressure* metric — `(active + wired +
+    compressed) / total`. macOS aggressively pins file-cache pages in the
+    "inactive" pool, which the kernel reclaims the moment any allocator
+    needs them; treating those as "used" makes a healthy 8 GB box look
+    99 % full and obscures real pressure. `cachedPct` and `freePct` are
+    surfaced alongside so the breakdown adds up to 100 %.
+
+    Reconciliation note: a process's RSS (which `ps` reports) excludes
+    file cache entirely, so summing `memPct` across processes will only
+    approach `usedPct` — never `(usedPct + cachedPct)` — by design.
     """
     try:
         out = subprocess.run(
@@ -96,13 +103,23 @@ def _memory() -> dict:
     compressed = _pages("Pages occupied by compressor")
     total_pages = free + active + inactive + wired + compressed
     total = total_pages * page_size
+    used_bytes = (active + wired + compressed) * page_size
+    inactive_bytes = inactive * page_size
+    free_bytes = free * page_size
     return {
         "totalBytes": total,
-        "freeBytes": free * page_size,
+        "freeBytes": free_bytes,
         "activeBytes": active * page_size,
+        "inactiveBytes": inactive_bytes,
         "wiredBytes": wired * page_size,
         "compressedBytes": compressed * page_size,
-        "usedPct": round((total - free * page_size) / total * 100, 1) if total else None,
+        # Pressure metric — ignores reclaimable cache.
+        "usedPct": round(used_bytes / total * 100, 1) if total else None,
+        # File cache + speculative pages — reclaimable on demand.
+        "cachedPct": round(inactive_bytes / total * 100, 1) if total else None,
+        "freePct": round(free_bytes / total * 100, 1) if total else None,
+        # Convenience: what an allocator effectively has access to.
+        "availableBytes": free_bytes + inactive_bytes,
     }
 
 
@@ -206,25 +223,32 @@ def _short_command(cmd: str) -> str:
     return Path(head).name or cmd[:40]
 
 
-def _classify(procs: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Return (top_by_cpu, baby_monitor_processes).
+def _classify(procs: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    """Return (top_by_cpu, top_by_memory, baby_monitor_processes).
 
     Baby-monitor procs are extracted by keyword match on the full command;
-    they may also appear in top_by_cpu if they're truly busy.
+    they may also appear in the top-by-* lists if they're truly busy.
+
+    Top-by-memory is sorted by RSS (resident set size) — the actual memory
+    pages held in physical RAM. memPct from `ps` reflects the same value
+    relative to total system memory but RSS is what's user-meaningful when
+    looking at a single process.
     """
     bm = []
     for p in procs:
         script = next((k for k in BABY_MONITOR_KEYWORDS if k in p["command"]), None)
         if script:
             bm.append({**p, "script": script, "command": _short_command(p["command"])})
-    top = sorted(procs, key=lambda r: r["cpuPct"], reverse=True)[:8]
-    top = [{**p, "command": _short_command(p["command"])} for p in top]
-    return top, bm
+    top_cpu = sorted(procs, key=lambda r: r["cpuPct"], reverse=True)[:8]
+    top_cpu = [{**p, "command": _short_command(p["command"])} for p in top_cpu]
+    top_mem = sorted(procs, key=lambda r: (r.get("rssKb") or 0), reverse=True)[:8]
+    top_mem = [{**p, "command": _short_command(p["command"])} for p in top_mem]
+    return top_cpu, top_mem, bm
 
 
 def gather() -> dict:
     procs = _ps_full()
-    top, bm_procs = _classify(procs)
+    top_cpu, top_mem, bm_procs = _classify(procs)
     return {
         "asOf": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "load": _load(),
@@ -234,7 +258,8 @@ def gather() -> dict:
             "sizes": _baby_monitor_sizes(),
             "processes": bm_procs,
         },
-        "topProcesses": top,
+        "topProcesses": top_cpu,
+        "topByMemory": top_mem,
     }
 
 

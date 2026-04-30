@@ -1857,13 +1857,6 @@ footer {
   font-variant-numeric: tabular-nums;
 }
 
-/* --- Bad-zone shading on the trend charts --- */
-.aq-badzone {
-  fill: rgba(224, 123, 123, 0.10);
-  stroke: rgba(224, 123, 123, 0.18);
-  stroke-width: 1;
-}
-
 /* --- Minor (every-2-hour) X gridlines on the trend charts --- */
 .aq-grid-minor {
   stroke: rgba(255, 255, 255, 0.05);

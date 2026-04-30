@@ -3490,17 +3490,13 @@ function renderAirQualityChart(metric, points, latest, transitions, badZones) {
         +  `height="${plotH}" fill="${fill}"><title>${tip}</title></rect>`;
   }
 
-  // Bad-zone shading — drawn after state bands so the AQ-concerning red
-  // overlay sits on top of the state context. Each span clamps to window.
-  for (const z of badZones || []) {
-    const zStart = Math.max(tMin, new Date(z.tStart).getTime());
-    const zEnd = Math.min(tMax, new Date(z.tEnd).getTime());
-    if (zEnd <= zStart) continue;
-    const x1 = xAt(zStart);
-    const x2 = xAt(zEnd);
-    svg += `<rect x="${x1}" y="${PAD.top}" width="${Math.max(2, x2 - x1)}" `
-        +  `height="${plotH}" class="aq-badzone"/>`;
-  }
+  // (Bad-zone periods are now indicated by recolouring the polyline itself
+  // — see the segmenting logic below.)
+  const badZoneSpans = (badZones || []).map(z => ({
+    start: new Date(z.tStart).getTime(),
+    end: new Date(z.tEnd).getTime(),
+  }));
+  const inBadZone = (t) => badZoneSpans.some(z => t >= z.start && t <= z.end);
 
   // Y gridlines + labels (min / mid / max).
   for (const frac of [0, 0.5, 1]) {
@@ -3553,17 +3549,31 @@ function renderAirQualityChart(metric, points, latest, transitions, badZones) {
   // (State context is drawn as bands above; no per-transition vlines.)
 
   // Polyline; broken at nulls so missing readings are gaps, not interpolated.
+  // Bad-zone periods recolour the segment red instead of the metric colour;
+  // we duplicate the boundary point across adjacent segments so the visual
+  // line stays continuous through the colour change.
+  const SPIKE_COLOR = '#e74c3c';
   let segment = [];
+  let segmentColor = null;
   const flush = () => {
-    if (segment.length >= 2) {
-      svg += `<polyline points="${segment.join(' ')}" class="eye-metric-line" stroke="${metric.color}" vector-effect="non-scaling-stroke"/>`;
+    if (segment.length >= 2 && segmentColor) {
+      svg += `<polyline points="${segment.join(' ')}" class="eye-metric-line" stroke="${segmentColor}" vector-effect="non-scaling-stroke"/>`;
     }
     segment = [];
+    segmentColor = null;
   };
   points.forEach(p => {
     const raw = p[metric.key];
     if (raw == null) { flush(); return; }
-    segment.push(`${xAt(new Date(p.t).getTime())},${yAt(tx(raw))}`);
+    const t = new Date(p.t).getTime();
+    const wantColor = inBadZone(t) ? SPIKE_COLOR : metric.color;
+    if (segmentColor && segmentColor !== wantColor) {
+      const lastPt = segment[segment.length - 1];
+      flush();
+      segment = [lastPt];
+    }
+    segmentColor = wantColor;
+    segment.push(`${xAt(t)},${yAt(tx(raw))}`);
   });
   flush();
 

@@ -580,6 +580,17 @@ def api_update_entry():
         updates["eyeState"] = new_eye_state
         updates["eyeStateEdited"] = True
         updates["eyeStateCorrectedAt"] = now
+        # Keep babyPresent (and the derived state) consistent with the
+        # eyeState correction. The timeline classifier reads babyPresent
+        # first (app.js::stateCategory) — without this lockstep flip,
+        # correcting to "not_in_bassinet" leaves babyPresent=true and the
+        # block keeps rendering as "Unknown (in bassinet)". The temporal
+        # smoother will re-derive state on the next backfill_state.py run.
+        if new_eye_state == "not_in_bassinet":
+            updates["babyPresent"] = False
+            updates["state"] = "not_present"
+        elif new_eye_state in ("eyes_open", "eyes_closed", "face_not_visible"):
+            updates["babyPresent"] = True
     if new_face_bbox is not None:
         # null clears the correction, dict sets it
         updates["faceBboxCorrected"] = new_face_bbox if new_face_bbox else None

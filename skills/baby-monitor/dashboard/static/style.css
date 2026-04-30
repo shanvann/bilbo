@@ -1864,6 +1864,13 @@ footer {
   stroke-width: 1;
 }
 
+/* --- Minor (every-2-hour) X gridlines on the trend charts --- */
+.aq-grid-minor {
+  stroke: rgba(255, 255, 255, 0.05);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+}
+
 /* Air Quality tab — reuses .eye-metric-* classes; only the chart layout
    and title row are custom. */
 .aq-grid {

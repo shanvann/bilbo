@@ -412,6 +412,179 @@ def api_bassinet_daily():
     return jsonify({"days": result})
 
 
+@app.route("/api/sleep-trend")
+def api_sleep_trend():
+    """Per-night 15-min slot grid for the Sleep Analysis tab.
+
+    Each "night" spans 4pm ET on date D through 11am ET on date D+1
+    (19h, 76 slots of 15 min). The night is labelled by the date it
+    started in ET. For each slot we pick the dominant cell state by
+    summed duration of entries falling in the slot.
+    """
+    import zoneinfo
+    et = zoneinfo.ZoneInfo("America/New_York")
+
+    days = int(request.args.get("days", 14))
+    if days < 1:
+        days = 1
+    if days > 60:
+        days = 60
+
+    SLOT_MIN = 15
+    NIGHT_START_HOUR = 16   # 4pm
+    NIGHT_END_HOUR = 11     # 11am next day
+    SPAN_HOURS = (24 - NIGHT_START_HOUR) + NIGHT_END_HOUR  # 19
+    SLOTS_PER_NIGHT = SPAN_HOURS * (60 // SLOT_MIN)        # 76
+
+    now_et = datetime.now(timezone.utc).astimezone(et)
+    today_et = now_et.date()
+    # Newest night first. A night's row is only included once its 4pm
+    # start has actually arrived — otherwise the top row is empty until
+    # the evening rolls around.
+    most_recent = today_et if now_et.hour >= NIGHT_START_HOUR else today_et - timedelta(days=1)
+    night_dates = [most_recent - timedelta(days=i) for i in range(days)]
+
+    # Pull a window covering all nights in one query: from the earliest
+    # night-start to the latest night-end, both in UTC.
+    earliest_start = datetime.combine(
+        night_dates[-1],
+        datetime.min.time().replace(hour=NIGHT_START_HOUR),
+        tzinfo=et,
+    ).astimezone(timezone.utc)
+    latest_end = datetime.combine(
+        night_dates[0] + timedelta(days=1),
+        datetime.min.time().replace(hour=NIGHT_END_HOUR),
+        tzinfo=et,
+    ).astimezone(timezone.utc)
+
+    db = get_db()
+    raw = db.get_entries(
+        start=earliest_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        end=latest_end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+    # Bucket pass: for each entry, attribute its duration (until the next
+    # entry, capped at 1h to skip gaps) to the slot of its starting timestamp.
+    # Slots are keyed by (night_date, slot_index).
+    # Cell categories: "asleep" (Asleep + FallingAsleep), "awake", "out",
+    # "unknown" (in-bassinet but state unknown), "none" (no data).
+    def categorize(entry):
+        if not entry.get("babyPresent"):
+            return "out"
+        s = entry.get("state")
+        if s == "Asleep" or s == "FallingAsleep":
+            return "asleep"
+        if s == "Awake":
+            return "awake"
+        return "unknown"
+
+    # Build a fast lookup: night_date_str -> { slot_idx -> {cat -> seconds} }
+    night_keys = {d.strftime("%Y-%m-%d") for d in night_dates}
+    buckets: dict[str, dict[int, dict[str, float]]] = {
+        k: {} for k in night_keys
+    }
+
+    for i, e in enumerate(raw):
+        ts_utc = datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00"))
+        if i + 1 < len(raw):
+            next_ts = datetime.fromisoformat(raw[i + 1]["timestamp"].replace("Z", "+00:00"))
+            dur = (next_ts - ts_utc).total_seconds()
+        else:
+            dur = 60.0
+        if dur <= 0 or dur > 3600:
+            dur = 60.0  # treat gaps as a single capture
+
+        ts_et = ts_utc.astimezone(et)
+
+        # Which night does this timestamp belong to?
+        # If hour >= NIGHT_START_HOUR → night = ts.date
+        # If hour <  NIGHT_END_HOUR   → night = ts.date - 1
+        # Else (between 11am and 4pm same day) → no night.
+        h = ts_et.hour
+        if h >= NIGHT_START_HOUR:
+            night_date = ts_et.date()
+            minutes_into_night = (h - NIGHT_START_HOUR) * 60 + ts_et.minute
+        elif h < NIGHT_END_HOUR:
+            night_date = ts_et.date() - timedelta(days=1)
+            minutes_into_night = (24 - NIGHT_START_HOUR + h) * 60 + ts_et.minute
+        else:
+            continue  # midday gap (11am–4pm) — outside the chart window
+
+        slot_idx = minutes_into_night // SLOT_MIN
+        if slot_idx < 0 or slot_idx >= SLOTS_PER_NIGHT:
+            continue
+
+        key = night_date.strftime("%Y-%m-%d")
+        if key not in buckets:
+            continue  # outside the requested days range
+
+        cat = categorize(e)
+        slot = buckets[key].setdefault(slot_idx, {})
+        slot[cat] = slot.get(cat, 0.0) + dur
+
+    # Resolve each slot to the dominant cell state.
+    nights_out = []
+    for d in night_dates:
+        key = d.strftime("%Y-%m-%d")
+        cells = []
+        for slot_idx in range(SLOTS_PER_NIGHT):
+            slot = buckets[key].get(slot_idx)
+            if not slot:
+                cells.append("none")
+                continue
+            # Pick category with most accumulated seconds.
+            cat = max(slot.items(), key=lambda kv: kv[1])[0]
+            cells.append(cat)
+        nights_out.append({
+            "date": key,
+            "label": d.strftime("%a %b %-d"),
+            "cells": cells,
+        })
+
+    # Aggregate rows: per-slot dominance views at two thresholds.
+    #   "P50" — the state that holds for >=50% of the accumulated time.
+    #   "P90" — the state that holds for >=90% of the accumulated time.
+    # When no state passes the threshold, the cell is "mixed" so the eye
+    # lands on the slots that have a clear pattern.
+    AGG_THRESHOLDS = [("p50", 0.5), ("p90", 0.9)]
+    agg_cells: dict[str, list] = {name: [] for name, _ in AGG_THRESHOLDS}
+    for slot_idx in range(SLOTS_PER_NIGHT):
+        totals: dict[str, float] = {}
+        for d in night_dates:
+            slot = buckets[d.strftime("%Y-%m-%d")].get(slot_idx)
+            if not slot:
+                continue
+            for cat, sec in slot.items():
+                totals[cat] = totals.get(cat, 0.0) + sec
+        if not totals:
+            for name, _ in AGG_THRESHOLDS:
+                agg_cells[name].append({"cat": "none", "share": {}})
+            continue
+        total_sec = sum(totals.values())
+        share = {k: round(v / total_sec, 3) for k, v in totals.items()}
+        top_cat, top_sec = max(totals.items(), key=lambda kv: kv[1])
+        top_share = top_sec / total_sec
+        for name, threshold in AGG_THRESHOLDS:
+            cat = top_cat if top_share >= threshold else "mixed"
+            agg_cells[name].append({"cat": cat, "share": share})
+
+    return jsonify({
+        "slotMinutes": SLOT_MIN,
+        "slotsPerNight": SLOTS_PER_NIGHT,
+        "startHour": NIGHT_START_HOUR,
+        "endHour": NIGHT_END_HOUR,
+        "nights": nights_out,
+        "p50": {
+            "label": f"P50 ({len(night_dates)}n)",
+            "cells": agg_cells["p50"],
+        },
+        "p90": {
+            "label": f"P90 ({len(night_dates)}n)",
+            "cells": agg_cells["p90"],
+        },
+    })
+
+
 @app.route("/api/feeds")
 def api_feeds():
     days = int(request.args.get("days", 1))

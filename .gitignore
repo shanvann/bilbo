@@ -34,6 +34,9 @@ Thumbs.db
 *.png
 *.gif
 
+# PWA app icons are checked in (regenerated from icon.svg via qlmanage)
+!skills/baby-monitor/dashboard/static/icons/*.png
+
 # Skill packages
 *.skill
 

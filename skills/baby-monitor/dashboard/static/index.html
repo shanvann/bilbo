@@ -2,9 +2,19 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Baby Monitor Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>BILBO Baby Monitor</title>
   <link rel="stylesheet" href="/static/style.css?v=35">
+
+  <!-- PWA -->
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#16213e">
+
+  <!-- iOS-specific PWA hints (Safari ignores most manifest fields) -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="BILBO">
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
 </head>
 <body>
   <!-- Top Bar: Compact Status -->
@@ -545,5 +555,16 @@
   </footer>
 
   <script src="/static/app.js?v=43"></script>
+  <script>
+    // Register the PWA service worker. iOS Safari only enables Web Push +
+    // background updates once the page has been added to the home screen,
+    // but the offline shell cache still works in plain Safari too.
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js', { scope: '/' })
+          .catch((err) => console.warn('sw register failed:', err));
+      });
+    }
+  </script>
 </body>
 </html>

@@ -101,6 +101,46 @@ def index():
     return send_from_directory("static", "index.html")
 
 
+# Cloudflare Access service token, loaded once at startup from
+# /Users/shanit/.openclaw/workspace/.env.dashboard. Injected into the
+# service worker body so the installed PWA can keep hitting /api/* once
+# the user's Access SSO cookie has expired (which is the common case for
+# background fetches and cold launches on iOS).
+_ENV_DASHBOARD = Path("/Users/shanit/.openclaw/workspace/.env.dashboard")
+_CF_ACCESS = {"id": "", "secret": ""}
+if _ENV_DASHBOARD.exists():
+    for _line in _ENV_DASHBOARD.read_text().splitlines():
+        _line = _line.strip()
+        if not _line or _line.startswith("#"):
+            continue
+        _k, _, _v = _line.partition("=")
+        _v = _v.strip().strip('"').strip("'")
+        if _k.strip() == "CF_ACCESS_CLIENT_ID":
+            _CF_ACCESS["id"] = _v
+        elif _k.strip() == "CF_ACCESS_CLIENT_SECRET":
+            _CF_ACCESS["secret"] = _v
+
+
+@app.route("/sw.js")
+def service_worker():
+    # Service workers must be served from a path whose URL scope covers
+    # the pages they should control. Serving from /sw.js (not /static/sw.js)
+    # gives this worker control over the entire origin.
+    sw_path = Path(app.static_folder) / "sw.js"
+    body = sw_path.read_text()
+    body = body.replace("__CF_ACCESS_CLIENT_ID__", _CF_ACCESS["id"])
+    body = body.replace("__CF_ACCESS_CLIENT_SECRET__", _CF_ACCESS["secret"])
+    response = app.response_class(body, mimetype="application/javascript")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Service-Worker-Allowed"] = "/"
+    return response
+
+
+@app.route("/manifest.webmanifest")
+def manifest():
+    return send_from_directory("static", "manifest.webmanifest")
+
+
 @app.route("/api/status")
 def api_status():
     db = get_db()

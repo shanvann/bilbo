@@ -2362,6 +2362,7 @@ async function loadAll() {
     loadPipelineHealth(),
     loadClassificationRate(),
     loadAirQuality(),
+    loadSleepTrend(),
   ]);
   document.getElementById('footer-refresh').textContent =
     'Last refreshed: ' + new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York' });
@@ -2939,7 +2940,7 @@ function setActiveTab(name, opts) {
 }
 
 function initTabs() {
-  const validTabs = ['monitor', 'models', 'events', 'air-quality'];
+  const validTabs = ['monitor', 'models', 'events', 'air-quality', 'sleep-analysis', 'system'];
   // 'recap' was a separate tab until 2026-04-18 when it was merged into
   // Events; redirect old hash/localStorage values so bookmarks still land.
   const redirect = (name) => (name === 'recap' ? 'events' : name);
@@ -3689,6 +3690,108 @@ async function generateRecap() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Sleep Trend (Sleep Analysis tab)
+// ---------------------------------------------------------------------------
+// Heat-grid: rows = nights (most-recent first), cols = 15-min slots from
+// 4pm → 11am ET. Each cell coloured by the dominant state in that slot.
+async function loadSleepTrend() {
+  const body = document.getElementById('sleep-trend-body');
+  const days = document.getElementById('sleep-trend-days').value;
+  try {
+    const res = await fetch('/api/sleep-trend?days=' + encodeURIComponent(days));
+    if (!res.ok) throw new Error('http ' + res.status);
+    const data = await res.json();
+    _renderSleepTrend(body, data);
+  } catch (err) {
+    console.error('sleep-trend error:', err);
+    body.innerHTML = '<div class="muted" style="padding:12px">Error loading sleep trend: ' +
+      err.message + '</div>';
+  }
+}
+
+function _renderSleepTrend(body, data) {
+  const nights = data.nights || [];
+  if (!nights.length) {
+    body.innerHTML = '<div class="muted" style="padding:12px">No data.</div>';
+    return;
+  }
+
+  const slotMin = data.slotMinutes;       // 15
+  const slotsPerNight = data.slotsPerNight; // 76
+  const startHour = data.startHour;       // 16
+  const slotsPerHour = 60 / slotMin;      // 4
+
+  // Build hour-tick header. One tick label every hour; ticks span the slots
+  // from that hour to the next.
+  const hourCount = slotsPerNight / slotsPerHour;
+  const headerCells = [];
+  for (let h = 0; h < hourCount; h++) {
+    const hour24 = (startHour + h) % 24;
+    let label;
+    if (hour24 === 0) label = '12a';
+    else if (hour24 < 12) label = hour24 + 'a';
+    else if (hour24 === 12) label = '12p';
+    else label = (hour24 - 12) + 'p';
+    headerCells.push(`<div class="st-hour-cell">${label}</div>`);
+  }
+
+  const slotMinutesToTime = (idx) => {
+    const totalMin = idx * slotMin;
+    const hour24 = (startHour + Math.floor(totalMin / 60)) % 24;
+    const min = totalMin % 60;
+    const ampm = hour24 < 12 ? 'a' : 'p';
+    const h12 = hour24 % 12 || 12;
+    return `${h12}:${String(min).padStart(2, '0')}${ampm}`;
+  };
+
+  const rows = nights.map((n) => {
+    const cells = n.cells.map((cat, idx) => {
+      const tip = `${n.label} · ${slotMinutesToTime(idx)} – ${slotMinutesToTime(idx + 1)} · ${cat}`;
+      return `<div class="st-cell st-${cat}" title="${tip}"></div>`;
+    }).join('');
+    return `
+      <div class="st-row">
+        <div class="st-row-label">${n.label}</div>
+        <div class="st-row-cells" style="grid-template-columns: repeat(${slotsPerNight}, 1fr)">${cells}</div>
+      </div>`;
+  }).join('');
+
+  // Aggregate rows: "Avg" (mode) and "P90" (>=90% dominance, else mixed).
+  const fmtShare = (share) => {
+    const parts = Object.entries(share || {})
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `${k} ${Math.round(v * 100)}%`);
+    return parts.length ? parts.join(' · ') : 'no data';
+  };
+  const renderAggRow = (agg, prefix) => {
+    if (!agg || !agg.cells) return '';
+    const cells = agg.cells.map((c, idx) => {
+      const tip = `${prefix} · ${slotMinutesToTime(idx)} – ${slotMinutesToTime(idx + 1)} · ${fmtShare(c.share)}`;
+      return `<div class="st-cell st-${c.cat}" title="${tip}"></div>`;
+    }).join('');
+    return `
+      <div class="st-row st-summary">
+        <div class="st-row-label">${agg.label}</div>
+        <div class="st-row-cells" style="grid-template-columns: repeat(${slotsPerNight}, 1fr)">${cells}</div>
+      </div>`;
+  };
+  const aggBlock = (data.p50 || data.p90)
+    ? renderAggRow(data.p50, 'P50') + renderAggRow(data.p90, 'P90') +
+      '<div class="st-row-divider"></div>'
+    : '';
+
+  body.innerHTML = `
+    <div class="st-grid">
+      <div class="st-row st-header">
+        <div class="st-row-label"></div>
+        <div class="st-row-cells" style="grid-template-columns: repeat(${hourCount}, 1fr)">${headerCells.join('')}</div>
+      </div>
+      ${aggBlock}
+      ${rows}
+    </div>`;
+}
+
 initTabs();
 initTimelineNav();
 initRecap();
@@ -3702,5 +3805,6 @@ document.getElementById('pipeline-history-days').addEventListener('change', load
 document.getElementById('eye-metrics-days').addEventListener('change', loadEyeStateDailyMetrics);
 document.getElementById('air-quality-range').addEventListener('change', loadAirQuality);
 document.getElementById('cr-range').addEventListener('change', loadClassificationRate);
+document.getElementById('sleep-trend-days').addEventListener('change', loadSleepTrend);
 loadAll();
 setInterval(loadAll, REFRESH_INTERVAL_SEC * 1000);

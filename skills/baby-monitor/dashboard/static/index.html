@@ -41,6 +41,7 @@
       <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="models" id="tab-models">Models</button>
       <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="events" id="tab-events">Events</button>
       <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="air-quality" id="tab-air-quality">Air Quality</button>
+      <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="sleep-analysis" id="tab-sleep-analysis">Sleep Analysis</button>
       <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="system" id="tab-system">System</button>
     </nav>
 
@@ -464,6 +465,30 @@
 
     </div><!-- /air-quality-panel -->
 
+    <!-- =============== Sleep Analysis tab =============== -->
+    <div class="tab-panel" role="tabpanel" data-tab="sleep-analysis" aria-labelledby="tab-sleep-analysis" hidden>
+
+    <section class="card" id="sleep-trend-card">
+      <h2>Sleep Trend
+        <select id="sleep-trend-days" class="detail-select" style="margin-left:8px">
+          <option value="7">Last 7 nights</option>
+          <option value="14" selected>Last 14 nights</option>
+          <option value="30">Last 30 nights</option>
+        </select>
+        <span class="subtitle">15-min slots · 4pm → 11am ET</span>
+      </h2>
+      <div class="timeline-legend">
+        <span class="legend-item"><span class="legend-dot st-asleep"></span> Asleep</span>
+        <span class="legend-item"><span class="legend-dot st-awake"></span> Awake</span>
+        <span class="legend-item"><span class="legend-dot st-out"></span> Out of bassinet</span>
+        <span class="legend-item"><span class="legend-dot st-unknown"></span> Unknown / no data</span>
+        <span class="legend-item"><span class="legend-dot st-mixed"></span> Mixed (no clear majority)</span>
+      </div>
+      <div id="sleep-trend-body"></div>
+    </section>
+
+    </div><!-- /sleep-analysis-panel -->
+
     <!-- =============== System tab =============== -->
     <div class="tab-panel" role="tabpanel" data-tab="system" aria-labelledby="tab-system" hidden>
 
@@ -519,6 +544,6 @@
     </div>
   </footer>
 
-  <script src="/static/app.js?v=39"></script>
+  <script src="/static/app.js?v=43"></script>
 </body>
 </html>

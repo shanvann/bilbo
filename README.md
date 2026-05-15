@@ -1,5 +1,7 @@
 # BILBO — Baby Intelligent Lookout & Behavior Observer
 
+![BILBO — Baby Intelligent Lookout & Behavior Observer](docs/bilbo.png)
+
 A baby bassinet monitor that captures a frame every minute from an IP camera, classifies sleep state on-device with a 3-stage MobileNetV3 cascade (BIRDEYE), and falls back to a cloud API (GPT-4o) only when the local cascade can't see a face (~1% of non-empty frames). Includes a dashboard for frame review, label correction, model retraining, and performance tracking.
 
 ## Table of Contents

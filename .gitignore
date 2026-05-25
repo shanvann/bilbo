@@ -1,5 +1,6 @@
 # Auth & secrets
 .env*
+!.env.example
 *.key
 *.pem
 

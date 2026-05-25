@@ -18,9 +18,9 @@ from bilbo.config import (
     JSONL_FILE,
     LOG_FILE,
     MODEL_CHAIN,
+    BILBO_ROOT,
     MODELS_DIR,
     PIXEL_DIFF_THRESHOLD,
-    SKILL_DIR,
     WAKE_COOLDOWN_MIN,
     WAKE_WINDOW,
     load_env,
@@ -1228,13 +1228,12 @@ def cmd_retrain(
         print(f"  (total: {n_corrections} corrections, {n_audit} audit)")
 
     # Build the training command
-    train_script = SKILL_DIR / "scripts" / "train_classifiers.py"
     sleep_log = JSONL_FILE
     frames_dir = FRAMES_DIR
-    face_crops = SKILL_DIR / "pipeline" / "output" / "bootstrap" / "face_crops"
+    face_crops = BILBO_ROOT / "pipeline" / "output" / "bootstrap" / "face_crops"
 
     cmd = [
-        sys.executable, str(train_script),
+        sys.executable, "-m", "bilbo.train_classifiers",
         "--sleep-log", str(sleep_log),
         "--frames", str(frames_dir),
         "--output", str(MODELS_DIR),
@@ -1252,7 +1251,7 @@ def cmd_retrain(
     print()
 
     training_state.mark_started(trigger)
-    result = subprocess.run(cmd, cwd=str(SKILL_DIR))
+    result = subprocess.run(cmd)
     training_state.mark_completed(result.returncode)
 
     if result.returncode != 0:
@@ -1329,7 +1328,6 @@ def cmd_retrain(
     # but non-fatal — the retrain itself already succeeded and been persisted.
     if not skip_post_retrain:
         from datetime import timedelta as _td
-        scripts_dir = SKILL_DIR / "scripts"
         backfill_start = (
             _dt.utcnow() - _td(days=post_retrain_backfill_days)
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1338,22 +1336,17 @@ def cmd_retrain(
             (
                 "backfill_birdeye_primary",
                 [
-                    sys.executable,
-                    str(scripts_dir / "backfill_birdeye_primary.py"),
+                    sys.executable, "-m", "bilbo.scripts.backfill_birdeye_primary",
                     "--start", backfill_start,
                 ],
             ),
             (
                 "backfill_state",
-                [sys.executable, str(scripts_dir / "backfill_state.py")],
+                [sys.executable, "-m", "bilbo.scripts.backfill_state"],
             ),
             (
                 "bbox_impact",
-                [
-                    sys.executable,
-                    str(scripts_dir / "bbox_impact.py"),
-                    "--force",
-                ],
+                [sys.executable, "-m", "bilbo.scripts.bbox_impact", "--force"],
             ),
         ]
 
@@ -1362,7 +1355,7 @@ def cmd_retrain(
         for name, cmd in steps:
             print(f"  → {name}")
             try:
-                step_result = subprocess.run(cmd, cwd=str(SKILL_DIR))
+                step_result = subprocess.run(cmd)
                 if step_result.returncode != 0:
                     log.warning(
                         "post-retrain step %s exited %d — continuing "

@@ -29,7 +29,7 @@ from bilbo.config import (
     WATCHDOG_STATE_FILE,
     load_env,
 )
-from bilbo.storage.db import get_last_entry
+from bilbo.storage.db import get_db, get_last_entry
 
 
 log = logging.getLogger("watchdog")
@@ -57,9 +57,15 @@ def _save_state(state: dict) -> None:
 
 
 def run_once() -> int:
-    env = load_env(ENV_FILE) if ENV_FILE.exists() else {}
+    # load_env() falls back to os.environ when the file is missing
+    env = load_env(ENV_FILE)
     state = _load_state()
     now = datetime.now(timezone.utc)
+
+    # Force-init the schema first — on a fresh data volume the entries
+    # table doesn't exist yet, and get_last_entry() goes through the bare
+    # connection that doesn't run CREATE TABLE IF NOT EXISTS.
+    get_db()
 
     last = get_last_entry()
     if not last or not last.get("timestamp"):

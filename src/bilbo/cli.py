@@ -1509,3 +1509,37 @@ examples:
     p.add_argument("--sample", metavar="N", type=int,
                    help="(audit) number of frames to spot-check")
     return p.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Console-script entry points (wired in pyproject.toml in step 10)
+# ---------------------------------------------------------------------------
+
+def train_main() -> int:
+    """`bilbo-train` console script.
+
+    The Docker training container's command. Thin argparse wrapper around
+    cmd_retrain so the orchestrator (count corrections → train → re-infer →
+    backfill chain) runs the same code as the CLI `bilbo-monitor --retrain`
+    and the dashboard "Retrain" button.
+    """
+    import argparse
+    p = argparse.ArgumentParser(description="BILBO retrain orchestrator")
+    p.add_argument("--force", action="store_true",
+                   help="retrain even when nothing pending")
+    p.add_argument("--skip-face-detect", action="store_true",
+                   help="train presence+eye only (face detector is the slow stage)")
+    p.add_argument("--skip-post-retrain", action="store_true",
+                   help="don't run the backfill chain after training")
+    p.add_argument("--post-retrain-backfill-days", type=int, default=7,
+                   help="window for backfill_birdeye_primary in the post-retrain chain")
+    p.add_argument("--trigger", default="container",
+                   help="who initiated this run (recorded in state file)")
+    args = p.parse_args()
+    return cmd_retrain(
+        trigger=args.trigger,
+        force=args.force,
+        skip_face_detect=args.skip_face_detect,
+        skip_post_retrain=args.skip_post_retrain,
+        post_retrain_backfill_days=args.post_retrain_backfill_days,
+    )

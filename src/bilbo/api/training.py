@@ -1,27 +1,15 @@
-"""Training-run state: status query, start (subprocess), abort.
-
-Keeps the existing PID-based behavior from `bilbo.training_state`. Step 9
-will swap the subprocess hop for a Docker control-plane RPC, at which point
-the function signatures here stay the same and only the body of `retrain`
-changes.
-"""
+"""Training-run state: status query, start (Docker), abort."""
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
-import threading
-from pathlib import Path
 
-from bilbo.config import DATA_DIR, MODELS_DIR
+from bilbo.config import MODELS_DIR
 from bilbo.storage.db import get_db
 from bilbo.training_state import (
     abort as _abort,
     get_status as _get_status,
     is_running as _is_running,
-    mark_completed,
-    mark_subprocess_started,
+    start as _start,
 )
 
 
@@ -52,7 +40,7 @@ def training_status() -> dict:
     dashboard's app.js can stay untouched.
     """
     db = get_db()
-    state = _get_status()  # PID-checked, auto-cleans stale
+    state = _get_status()  # Docker- or PID-checked, auto-cleans stale
 
     logs = db.get_last_training_runs(2)
     if not logs:
@@ -69,6 +57,7 @@ def training_status() -> dict:
         "running": state.get("status") == "running",
         "runStatus": state.get("status", "idle"),
         "pid": state.get("pid"),
+        "containerId": state.get("containerId"),
         "trigger": state.get("trigger"),
         "startedAt": state.get("startedAt"),
         "finishedAt": state.get("finishedAt"),
@@ -89,47 +78,25 @@ def training_status() -> dict:
 
 
 def retrain(*, trigger: str = "dashboard", skip_face_detect: bool = False) -> dict:
-    """Spawn a retrain subprocess (the same `monitor.py --retrain` command
-    the CLI uses) and register its PID.
+    """Spawn the bilbo-training container.
 
-    Returns {ok, pid, trigger} on success, {ok: False, error, _status} on
-    failure (eg. another run is already in progress).
+    Returns the docker container ID on success or an error dict (with
+    _status) on failure. The container exits + auto-removes itself when
+    done; the new versioned model dir + the `latest` symlink flip happen on
+    the shared pipeline/models/ volume, so the capture container picks it
+    up on the next tick via maybe_reload_classifiers().
     """
     if _is_running():
         return {"ok": False, "error": "Training already in progress", "_status": 409}
 
-    retrain_stdout = open(DATA_DIR / "retrain-dashboard-stdout.log", "w")
-    retrain_stderr = open(DATA_DIR / "retrain-dashboard-stderr.log", "w")
-    env = dict(os.environ, PYTHONUNBUFFERED="1")
-    cmd = [sys.executable, "-u", "-m", "bilbo.monitor", "--retrain"]
+    args = []
     if skip_face_detect:
-        cmd.append("--skip-face-detect")
-    proc = subprocess.Popen(
-        cmd,
-        stdout=retrain_stdout,
-        stderr=retrain_stderr,
-        env=env,
-        start_new_session=True,  # survive dashboard restarts
-    )
-    mark_subprocess_started(proc.pid, trigger)
-
-    # Reap the child in the background so the state file flips to
-    # completed/failed once the run is done.
-    def _reap():
-        proc.wait()
-        retrain_stdout.close()
-        retrain_stderr.close()
-        mark_completed(proc.returncode)
-
-    threading.Thread(target=_reap, daemon=True).start()
-
-    return {"ok": True, "pid": proc.pid, "trigger": trigger}
+        args.append("--skip-face-detect")
+    return _start(args=args, trigger=trigger)
 
 
 def retrain_abort() -> dict:
-    """Send SIGTERM (then SIGKILL after a grace period) to the running
-    training subprocess. Returns {ok, status} or 404 if nothing's running.
-    """
+    """Stop the running training container. 404 if nothing's running."""
     if not _is_running():
         return {"ok": False, "error": "No training in progress", "_status": 404}
     killed = _abort()

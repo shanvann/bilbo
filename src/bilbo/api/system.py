@@ -22,7 +22,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from bilbo.config import DATA_DIR, MODELS_DIR  # noqa: E402
+from bilbo.config import BILBO_ROOT, DATA_DIR, MODELS_DIR  # noqa: E402
 
 # Cache directory-size lookups (du -sk) for this many seconds.
 # `frames/` has ~10k files; a recursive walk takes a few seconds, which
@@ -123,7 +123,7 @@ def _memory() -> dict:
 def _disk() -> list:
     """Disk usage for root + workspace volumes."""
     rows = []
-    for label, path in (("root", "/"), ("workspace", str(SKILL_DIR))):
+    for label, path in (("root", "/"), ("workspace", str(BILBO_ROOT))):
         try:
             st = shutil.disk_usage(path)
             rows.append({

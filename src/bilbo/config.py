@@ -1,25 +1,52 @@
-"""Constants, paths, model chain config, and logging setup."""
+"""Constants, paths, model chain config, and logging setup.
+
+Path layout is env-var-driven so the same code can run inside the Docker
+containers (where everything roots at /app) and on a host for development
+(where the user sets BILBO_ROOT or accepts the defaults below).
+
+  BILBO_ROOT          — repo / install root. Default: /app inside Docker,
+                        else the parent of the bilbo package (so `pip install -e .`
+                        from the repo Just Works without an env var).
+  BILBO_DATA_DIR      — SQLite, JSONL, frames, alert state, logs. Default $ROOT/data.
+  BILBO_MODELS_DIR    — model weights + the `latest` symlink. Default $ROOT/pipeline/models.
+  BILBO_ENV_FILE      — secrets file (Telegram, OpenAI, RTSP URL). Default $ROOT/.env.
+  BILBO_REFERENCES_DIR — prompt + baby profile. Default $ROOT/references.
+"""
 
 import logging
 import logging.handlers
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Paths
+# Paths (env-var driven, with sensible defaults for both Docker and host dev)
 # ---------------------------------------------------------------------------
-SKILL_DIR = Path(__file__).resolve().parent.parent.parent
-DATA_DIR = SKILL_DIR / "data"
+def _default_root() -> Path:
+    """Resolve BILBO_ROOT default.
+
+    /app is the right answer inside the Docker image. On a developer host
+    (where /app doesn't exist), fall back to the repo root — two dirs up
+    from this file (src/bilbo/config.py → repo/).
+    """
+    if Path("/app").exists():
+        return Path("/app")
+    return Path(__file__).resolve().parent.parent.parent
+
+BILBO_ROOT = Path(os.environ.get("BILBO_ROOT", _default_root())).resolve()
+DATA_DIR = Path(os.environ.get("BILBO_DATA_DIR", BILBO_ROOT / "data"))
+MODELS_DIR = Path(os.environ.get("BILBO_MODELS_DIR", BILBO_ROOT / "pipeline" / "models"))
+ENV_FILE = Path(os.environ.get("BILBO_ENV_FILE", BILBO_ROOT / ".env"))
+REFERENCES_DIR = Path(os.environ.get("BILBO_REFERENCES_DIR", BILBO_ROOT / "references"))
+
 FRAMES_DIR = DATA_DIR / "frames"
 LOG_FILE = DATA_DIR / "system.log"
 JSONL_FILE = DATA_DIR / "sleep-log.jsonl"
-PROMPT_FILE = SKILL_DIR / "references" / "prompt.md"
-ENV_FILE = Path("~/.openclaw/workspace/.env.baby-monitor")
-MODELS_DIR = SKILL_DIR / "pipeline" / "models"
+PROMPT_FILE = REFERENCES_DIR / "prompt.md"
+REFS_DIR = DATA_DIR / "references"
 
 MAX_FRAMES_KB = 10 * 1024 * 1024  # 10 GB (~17 days at 1-min intervals; was ~67 days at 4-min. Oldest-first pruning kicks in at the cap.)
-REFS_DIR = DATA_DIR / "references"
 
 # ---------------------------------------------------------------------------
 # API endpoints
@@ -252,9 +279,16 @@ LOG_FMT = "[%(asctime)s] monitor: %(message)s"
 log = logging.getLogger("monitor")
 log.setLevel(logging.DEBUG)
 
-_fh = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
-_fh.setFormatter(UTCFormatter(LOG_FMT))
-log.addHandler(_fh)
+# File handler is best-effort: in containers DATA_DIR is a bind mount that
+# always exists; on a fresh host import the directory may not exist yet, in
+# which case we log to stderr only rather than crashing at import time.
+try:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _fh = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, delay=True)
+    _fh.setFormatter(UTCFormatter(LOG_FMT))
+    log.addHandler(_fh)
+except OSError:
+    pass
 
 _sh = logging.StreamHandler(sys.stderr)
 _sh.setLevel(logging.WARNING)

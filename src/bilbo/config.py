@@ -305,16 +305,38 @@ def set_verbose():
 # Env loading
 # ---------------------------------------------------------------------------
 
+_ENV_KEYS = (
+    "RTSP_STREAM_URL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+    "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+    "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET",
+)
+
+
 def load_env(path: Path) -> dict:
-    log.debug("loading env from %s", path)
-    env = {}
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        env[key] = value.strip().strip('"').strip("'")
-        log.debug("env: %s=%s", key, "***" if "KEY" in key or "SECRET" in key or "PASSWORD" in key else env[key][:40])
-    log.info("env loaded: %d vars from %s", len(env), path.name)
+    """Load secrets from `path`; fall back to os.environ if the file is missing.
+
+    Docker compose `env_file:` injects the same vars into the container env,
+    so containers can run without a bind-mounted .env file. On a host dev
+    setup the file is the canonical source.
+    """
+    if path.exists():
+        log.debug("loading env from %s", path)
+        env = {}
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            env[key] = value.strip().strip('"').strip("'")
+            log.debug("env: %s=%s", key, "***" if "KEY" in key or "SECRET" in key or "PASSWORD" in key else env[key][:40])
+        log.info("env loaded: %d vars from %s", len(env), path.name)
+        return env
+
+    env = {k: os.environ[k] for k in _ENV_KEYS if k in os.environ}
+    if env:
+        log.info("env loaded: %d vars from os.environ (file %s not found)",
+                 len(env), path)
+    else:
+        log.warning("env empty: %s missing and no matching os.environ keys", path)
     return env

@@ -25,6 +25,7 @@ Backtesting:
 """
 
 import json
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -165,16 +166,17 @@ def main():
         )
 
     # --- Load config ---
-
-    if not ENV_FILE.exists():
-        log.error("env file not found: %s", ENV_FILE)
-        _output("error", error=f"env file not found: {ENV_FILE}")
-        return 1
-
+    # load_env() falls back to os.environ when ENV_FILE is missing, so the
+    # container path (docker-compose env_file: injects vars into the env)
+    # and the host path (.env on disk) both work without a special case.
     env = load_env(ENV_FILE)
     rtsp_url = env.get("RTSP_STREAM_URL")
     api_key = env.get("OPENAI_API_KEY")
     anthropic_key = env.get("ANTHROPIC_API_KEY")
+    if not rtsp_url:
+        log.error("RTSP_STREAM_URL not set (env file %s + os.environ both empty)", ENV_FILE)
+        _output("error", error="RTSP_STREAM_URL not set")
+        return 1
 
     # --- Capture-only mode ---
 

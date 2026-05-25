@@ -1,0 +1,40 @@
+# Smoke-test overlay: parallel topology on shifted ports so the live
+# launchd monitor on the host (dashboard :5555) can keep running.
+#
+# Usage:
+#   docker compose -p bilbo-smoke \
+#       -f deploy/docker-compose.yml \
+#       -f deploy/docker-compose.smoke.yml \
+#       up -d --build
+
+services:
+
+  capture:
+    # Keep host networking — RTSP needs it. The live launchd monitor is
+    # also using the camera; we expect ~one connection to fight. The
+    # smoke test mainly proves the image boots + monitor loop runs;
+    # capture failure here is acceptable.
+    container_name: bilbo-capture-smoke
+
+  control-api:
+    container_name: bilbo-control-api-smoke
+    ports:
+      - "5561:5556"
+    environment:
+      # Docker Desktop on macOS: capture's network_mode:host binds inside
+      # the Linux VM, NOT the macOS host. From another bridged container
+      # the VM is reachable at 192.168.65.3, while host.docker.internal
+      # resolves to a different gateway alias (192.168.65.254) that
+      # capture isn't on. Production (Linux) uses host.docker.internal
+      # with extra_hosts host-gateway and works correctly there.
+      BILBO_CAPTURE_URL: "http://192.168.65.3:5557"
+      BILBO_HOST_DATA: "${PWD}/data"
+      BILBO_HOST_MODELS: "${PWD}/pipeline/models"
+      BILBO_TRAINING_IMAGE: "bilbo:latest"
+
+  dashboard:
+    container_name: bilbo-dashboard-smoke
+    ports:
+      - "5560:5555"
+    environment:
+      BILBO_CONTROL_API: "http://control-api:5556"

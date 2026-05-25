@@ -19,17 +19,25 @@ WORKDIR /app
 # Copy the bits pip needs and install. References ship in the image so the
 # bilbo.pipeline.vision prompt loader can find prompt.md inside the
 # container without a separate bind mount.
-COPY pyproject.toml ./
+COPY pyproject.toml README.md ./
 COPY src/ ./src/
 COPY references/ ./references/
 
+# Bump pip + hatchling so the build backend supports the metadata hooks
+# pip 25+ uses; the python:3.12-slim default hatchling is too old and
+# fails with `module 'hatchling.build' has no attribute
+# 'prepare_metadata_for_build_editable'`.
+RUN pip install --no-cache-dir --upgrade pip "hatchling>=1.25"
+
 # When BILBO_EXTRAS is empty (control-api spawns training with an empty
 # extras arg, for instance) install bare bilbo. Otherwise install with the
-# requested extra.
+# requested extra. Non-editable install — the image bakes the source, no
+# dev iteration; `pip install -e` would require build-backend editable
+# hooks that the slim image doesn't carry.
 RUN if [ -z "$BILBO_EXTRAS" ]; then \
-        pip install --no-cache-dir -e .; \
+        pip install --no-cache-dir .; \
     else \
-        pip install --no-cache-dir -e ".[$BILBO_EXTRAS]"; \
+        pip install --no-cache-dir ".[$BILBO_EXTRAS]"; \
     fi
 
 ENV BILBO_ROOT=/app \

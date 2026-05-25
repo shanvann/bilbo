@@ -61,10 +61,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       # capture is on host networking — reach it through the host gateway.
-      # On Docker Desktop (mac / win) this is host.docker.internal; on
-      # Linux either add `extra_hosts: ["host.docker.internal:host-gateway"]`
-      # or point this at the host's LAN IP.
-      BILBO_CAPTURE_URL: "http://host.docker.internal:5557"
+      # On Linux production, host.docker.internal + extra_hosts: host-gateway
+      # works because capture binds the actual host. On macOS Docker Desktop,
+      # capture's host-net binds inside the Linux VM (typically 192.168.65.3)
+      # and host.docker.internal resolves to a different gateway alias
+      # (192.168.65.254) — so set BILBO_CAPTURE_URL in .env to the VM IP
+      # when running on Mac. The default below is the Linux-correct value.
+      BILBO_CAPTURE_URL: ${BILBO_CAPTURE_URL:-http://host.docker.internal:5557}
       # The training container needs HOST paths to bind-mount data + models
       # (its docker daemon is the host's, not nested inside this container).
       # ${PWD} resolves to wherever `docker compose` was invoked — usually

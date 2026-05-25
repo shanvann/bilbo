@@ -3,10 +3,8 @@
 *.key
 *.pem
 
-# Personal/private directories
-context/
+# Assistant runtime (legacy — kept out of the repo even though the agent files are gone)
 memory/
-skills/classifieds-poster/
 
 # Baby monitor data (frames, logs, CSVs)
 skills/baby-monitor/data/
@@ -21,9 +19,6 @@ __pycache__/
 *.pyc
 .venv/
 *.egg-info/
-
-# OpenClaw internal
-.openclaw/
 
 # OS
 .DS_Store
@@ -56,9 +51,6 @@ skills/baby-monitor/pipeline/.venv/
 skills/baby-monitor/yolov8n.pt
 *.pt
 *.onnx
-
-# OpenClaw runs/cron output
-runs/
 
 # Claude Code (keep settings.json for hooks, ignore local overrides)
 .claude/*

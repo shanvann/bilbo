@@ -1,0 +1,105 @@
+# BILBO 3-container stack (the 4th, `training`, is on-demand via Docker
+# socket from control-api — see bilbo.training_state.start).
+#
+# Run from repo root:
+#   cp .env.example .env && $EDITOR .env
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#
+# Volumes are bind mounts so the SQLite DB, model weights, JSONL log,
+# frame archive, and alert state survive container restarts and are
+# directly inspectable on the host.
+
+services:
+
+  # -----------------------------------------------------------------------
+  # capture — the per-minute RTSP+BIRDEYE pipeline + watchdog + warm-torch
+  # /infer endpoint for ad-hoc dashboard re-runs.
+  # network_mode: host so the camera's RTSP stream resolves cleanly. The
+  # cost is that control-api can't reach this as `capture:5557`; it has to
+  # hit host.docker.internal (Docker Desktop) or the host LAN IP. The
+  # BILBO_CAPTURE_URL env var on control-api is set accordingly.
+  # -----------------------------------------------------------------------
+  capture:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        BILBO_EXTRAS: capture
+    image: bilbo:latest
+    container_name: bilbo-capture
+    restart: unless-stopped
+    network_mode: host
+    command: ["bilbo-capture"]
+    volumes:
+      - ../data:/app/data
+      - ../pipeline/models:/app/pipeline/models
+    env_file:
+      - ../.env
+
+  # -----------------------------------------------------------------------
+  # control-api — REST surface under /api/v1/* + docker-socket access for
+  # spawning the training container.
+  # Reads SQLite + JSONL directly from the shared data volume. No torch in
+  # this image (BILBO_EXTRAS=control-api).
+  # -----------------------------------------------------------------------
+  control-api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        BILBO_EXTRAS: control-api
+    image: bilbo-control-api:latest
+    container_name: bilbo-control-api
+    depends_on: [capture]
+    restart: unless-stopped
+    command: ["gunicorn", "-w", "2", "-b", "0.0.0.0:5556", "bilbo.http.app:app"]
+    ports:
+      - "5556:5556"
+    volumes:
+      - ../data:/app/data
+      - ../pipeline/models:/app/pipeline/models:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # capture is on host networking — reach it through the host gateway.
+      # On Docker Desktop (mac / win) this is host.docker.internal; on
+      # Linux either add `extra_hosts: ["host.docker.internal:host-gateway"]`
+      # or point this at the host's LAN IP.
+      BILBO_CAPTURE_URL: "http://host.docker.internal:5557"
+      # The training container needs HOST paths to bind-mount data + models
+      # (its docker daemon is the host's, not nested inside this container).
+      # ${PWD} resolves to wherever `docker compose` was invoked — usually
+      # repo root, then this points to repo-root/data and repo-root/pipeline/models.
+      BILBO_HOST_DATA: "${PWD}/data"
+      BILBO_HOST_MODELS: "${PWD}/pipeline/models"
+      BILBO_TRAINING_IMAGE: "bilbo:latest"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - ../.env
+
+  # -----------------------------------------------------------------------
+  # dashboard — static frontend + PWA service worker + /api/* reverse proxy
+  # to control-api. Lightweight image; no bilbo install.
+  # -----------------------------------------------------------------------
+  dashboard:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.dashboard
+    image: bilbo-dashboard:latest
+    container_name: bilbo-dashboard
+    depends_on: [control-api]
+    restart: unless-stopped
+    command: ["gunicorn", "-w", "2", "-b", "0.0.0.0:5555", "dashboard.app:app"]
+    ports:
+      - "5555:5555"
+    environment:
+      BILBO_CONTROL_API: "http://control-api:5556"
+    env_file:
+      - ../.env
+
+# The training service is intentionally NOT defined here. control-api
+# spawns it on demand via the Docker socket using `bilbo:latest`, with the
+# host data and models directories bind-mounted in. It auto-removes when
+# the run completes; the new versioned model dir + the `latest` symlink
+# flip happen on the shared pipeline/models/ volume, and the capture
+# container's `maybe_reload_classifiers()` picks it up on the next tick.

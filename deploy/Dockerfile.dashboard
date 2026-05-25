@@ -1,0 +1,19 @@
+# Lightweight dashboard image — pure frontend container.
+# No bilbo install, no torch, just Flask + httpx + gunicorn so the
+# reverse proxy + static-file serving stays tiny.
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY dashboard/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY dashboard/ ./dashboard/
+
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 5555
+
+# Compose overrides this with gunicorn; the inline app.run() default is for
+# `docker run` smoke tests.
+CMD ["python", "-m", "dashboard.app"]

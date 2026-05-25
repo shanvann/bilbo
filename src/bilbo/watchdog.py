@@ -1,18 +1,23 @@
 """Capture watchdog — Telegram alert when the monitor stops capturing.
 
-Runs as its own launchd job (com.baby-monitor-watchdog) every 2 min.
-Looks at the newest timestamp in monitor.db; if it's older than
-WATCHDOG_ALERT_AFTER_MIN, treats it as an outage and notifies via
-Telegram. Tracks outage_started_at / last_alert_at in a tiny JSON
-state file so a multi-hour outage doesn't spam.
+Runs continuously (`bilbo-watchdog --loop`) inside the capture container,
+either as its own process or as a background thread when imported by
+`bilbo.capture_service`. Each tick reads the newest timestamp in
+monitor.db; if it's older than WATCHDOG_ALERT_AFTER_MIN, treats it as
+an outage and notifies via Telegram. State (outage_started_at /
+last_alert_at) lives in a tiny JSON file so a multi-hour outage
+doesn't spam.
 
-Covers: RTSP network unreachable, launchd stall, monitor.py crash.
-Does NOT cover: laptop off/unplugged/asleep — nothing runs in that
+Covers: RTSP network unreachable, capture loop stall, monitor crash.
+Does NOT cover: machine off/unplugged/asleep — nothing runs in that
 case. A push-style cloud heartbeat would be needed for that.
 """
 
+import argparse
 import json
 import logging
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -126,13 +131,43 @@ def run_once() -> int:
     return 0
 
 
+def run_loop(interval: int = 120) -> None:
+    """Run `run_once` forever, sleeping `interval` seconds between checks.
+
+    Used both as the watchdog container's main entry point (via `bilbo-watchdog
+    --loop`) and as a background thread inside the capture service. Errors are
+    logged and swallowed so a transient failure (DB lock, missing env file)
+    doesn't take the watchdog down.
+    """
+    log.info("watchdog: loop mode, interval=%ds", interval)
+    while True:
+        try:
+            run_once()
+        except KeyboardInterrupt:
+            log.info("watchdog: loop interrupted, exiting")
+            return
+        except Exception:
+            log.exception("watchdog: tick failed; continuing")
+        time.sleep(interval)
+
+
 def main():
+    p = argparse.ArgumentParser(description="BILBO capture watchdog")
+    p.add_argument("--loop", action="store_true",
+                   help="run continuously (default: one check + exit)")
+    p.add_argument("--interval", type=int, default=120,
+                   help="seconds between checks in --loop mode (default 120)")
+    args = p.parse_args()
+
     logging.basicConfig(
         level=logging.INFO,
         format="[%(asctime)sZ] %(name)s: %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
     try:
+        if args.loop:
+            run_loop(interval=args.interval)
+            sys.exit(0)
         sys.exit(run_once())
     except Exception:
         log.exception("watchdog crashed")

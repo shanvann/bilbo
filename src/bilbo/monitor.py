@@ -231,7 +231,31 @@ def main():
         _output("error", error=f"missing {', '.join(missing)}")
         return 1
 
+    if args.loop:
+        # Persistent capture loop for the Docker capture container. Sleeps to
+        # the next minute boundary, hot-reloads the classifier singletons when
+        # the `latest` model symlink flips, and never exits on per-tick errors.
+        log.info("pipeline: --loop mode (capture every 60s until killed)")
+        from bilbo.pipeline.local_pipeline import maybe_reload_classifiers
+        while True:
+            tick_start = time.monotonic()
+            try:
+                _run_pipeline_tick(args, env, rtsp_url, api_key, anthropic_key, t_start=tick_start)
+            except KeyboardInterrupt:
+                log.info("pipeline: loop interrupted, exiting")
+                return 0
+            except Exception:
+                log.exception("pipeline: tick failed; continuing loop")
+            maybe_reload_classifiers()
+            elapsed = time.monotonic() - tick_start
+            time.sleep(max(0.0, 60.0 - elapsed))
+
     log.info("pipeline: starting full capture+analyze+log cycle")
+    return _run_pipeline_tick(args, env, rtsp_url, api_key, anthropic_key, t_start=t_start)
+
+
+def _run_pipeline_tick(args, env, rtsp_url, api_key, anthropic_key, *, t_start):
+    """One capture+analyze+log cycle. Returns 0 on success, non-zero on failure."""
 
     # Capture
     try:

@@ -1,18 +1,44 @@
 """Air-quality analysis helpers for the BILBO dashboard's Air Quality tab.
 
-Pure functions — no Flask, no I/O — so the route handler stays a thin shim
-around DB access plus calls into here. Thresholds are rooted in indoor-air
-guidance (ASHRAE, EPA, WELL) tightened for a nursery context (lower CO2
-ceiling, narrower humidity band).
+The pure helpers (status_*, comfort_score, compute_alerts/insights/
+recommendations/bad_zones/health, latest_with_status) have no I/O and no
+Flask dependency. They take dict-shaped rows in the same shape returned
+by the /api/air-quality SQL projection: {t, co2, pm25, temp, rh,
+tvoc_index}.
 
-All functions accept dict-shaped rows in the same shape returned by the
-/api/air-quality SQL projection: {t, co2, pm25, temp, rh, tvoc_index}.
+`api_air_quality` is the route-level aggregator: it opens the AirGradient
+DB read-only, bucket-averages the time-series for the chart, layers in
+the analysis above, overlays bassinet state transitions, and returns the
+dict the dashboard's app.js expects.
+
+Thresholds are rooted in indoor-air guidance (ASHRAE, EPA, WELL)
+tightened for a nursery context (lower CO2 ceiling, narrower humidity
+band).
 """
 
 from __future__ import annotations
 
 import math
+import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from bilbo.config import BILBO_ROOT
+from bilbo.storage.db import get_db
+
+
+# AirGradient logger DB. The logger ships as a sibling Docker service;
+# the dashboard reads its DB read-only via URI so the writer (a launchd
+# agent on the host, a sidecar container in prod) and the dashboard
+# never contend on a journal lock. Default resolves to the sibling
+# `airgradient-logger/data/` directory.
+AIRGRADIENT_DB_PATH = os.environ.get(
+    "AIRGRADIENT_DB_PATH",
+    str(BILBO_ROOT / "airgradient-logger" / "data" / "airgradient.db"),
+)
+AIR_QUALITY_MAX_POINTS = 360
+_AQ_NUMERIC_KEYS = ("co2", "pm25", "temp", "rh", "tvoc_index")
 
 
 # Status levels.
@@ -569,4 +595,126 @@ def compute_health(rows, latest, expected_interval_seconds: int = 60):
         "expected": expected,
         "missingPct": round(missing_pct, 1) if missing_pct is not None else None,
         "verdict": verdict,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Route-level aggregator
+# ---------------------------------------------------------------------------
+
+def _bucket_air_quality(rows: list[dict], max_points: int) -> list[dict]:
+    """Down-sample raw 1-minute readings to <= max_points by averaging
+    consecutive buckets. Each bucket's timestamp is the median row's. None
+    values are skipped per-field; if a whole bucket is None for a field, the
+    output is None and the chart will show a gap."""
+    n = len(rows)
+    if n <= max_points:
+        return rows
+    bucket_size = math.ceil(n / max_points)
+    out = []
+    for i in range(0, n, bucket_size):
+        chunk = rows[i:i + bucket_size]
+        mid = chunk[len(chunk) // 2]
+        agg = {"t": mid["t"]}
+        for key in _AQ_NUMERIC_KEYS:
+            vals = [r[key] for r in chunk if r[key] is not None]
+            agg[key] = round(sum(vals) / len(vals), 2) if vals else None
+        out.append(agg)
+    return out
+
+
+def _row_to_point(r) -> dict:
+    tv = r["tvoc_index"]
+    return {
+        "t": r["recorded_at"],
+        "co2": r["co2_ppm"],
+        "pm25": r["pm25"],
+        "temp": r["temperature_c"],
+        "rh": r["humidity_pct"],
+        "tvoc_index": int(tv) if tv is not None else None,
+    }
+
+
+def api_air_quality(*, hours: int = 24) -> dict:
+    """Time-series readings from the AirGradient logger DB.
+
+    Reads AIRGRADIENT_DB_PATH read-only so the logger's writes never
+    contend with the dashboard's reads. Down-samples to
+    AIR_QUALITY_MAX_POINTS by bucket-averaging. Layers in comfort score,
+    status tiles, alerts, insights, recommendations, bad-zone shading,
+    health verdict, and bassinet state transitions in the same window.
+    """
+    hours = max(1, min(hours, 720))
+
+    if not Path(AIRGRADIENT_DB_PATH).exists():
+        return {
+            "hours": hours,
+            "points": [],
+            "latest": None,
+            "note": f"AirGradient DB not found at {AIRGRADIENT_DB_PATH}",
+        }
+
+    # SELECT projection: pulls the typed columns + tvoc_index out of the
+    # raw JSON blob. tvoc_index is the human-meaningful 0–500 sensor
+    # index; tvoc_raw (also stored) is the raw Sensirion register value.
+    # We didn't break tvoc_index out into its own column when the logger
+    # schema was set, but raw_json preserves the full payload, so
+    # json_extract recovers it without a schema migration.
+    SELECT_COLS = (
+        "SELECT recorded_at, co2_ppm, pm25, temperature_c, humidity_pct, "
+        "json_extract(raw_json, '$.tvocIndex') AS tvoc_index "
+    )
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        conn = sqlite3.connect(f"file:{AIRGRADIENT_DB_PATH}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            SELECT_COLS + "FROM readings WHERE recorded_at >= ? ORDER BY recorded_at ASC",
+            (cutoff,),
+        ).fetchall()
+        latest_row = conn.execute(
+            SELECT_COLS + "FROM readings ORDER BY recorded_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+    except sqlite3.Error as e:
+        return {
+            "hours": hours,
+            "points": [],
+            "latest": None,
+            "note": f"sqlite error: {e}",
+        }
+
+    raw_points = [_row_to_point(r) for r in rows]
+    display_points = _bucket_air_quality(list(raw_points), AIR_QUALITY_MAX_POINTS)
+
+    latest = _row_to_point(latest_row) if latest_row is not None else None
+
+    # Bassinet state transitions in the same window — overlaid as vlines
+    # on each chart so the user can correlate AQ excursions with state
+    # changes.
+    transitions = get_db().get_state_transitions(start=cutoff)
+
+    score = comfort_score(latest)
+    statuses = latest_with_status(latest)
+    alerts = compute_alerts(raw_points, latest)
+    insights = compute_insights(raw_points, latest)
+    recommendations = compute_recommendations(latest)
+    bad_zones = compute_bad_zones(raw_points)
+    health = compute_health(raw_points, latest)
+
+    note = None if raw_points else "No readings in this window."
+
+    return {
+        "hours": hours,
+        "points": display_points,
+        "latest": latest,
+        "statuses": statuses,
+        "score": score,
+        "alerts": alerts,
+        "insights": insights,
+        "recommendations": recommendations,
+        "badZones": bad_zones,
+        "health": health,
+        "transitions": transitions,
+        "note": note,
     }

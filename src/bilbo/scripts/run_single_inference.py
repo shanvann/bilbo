@@ -28,28 +28,27 @@ from bilbo.pipeline.local_pipeline import (
 )
 
 
-def main():
-    if len(sys.argv) < 2:
-        print(json.dumps({"ok": False, "error": "timestamp required"}))
-        return 1
+def run(timestamp: str) -> dict:
+    """Re-run BIRDEYE on the frame for the given entry timestamp.
 
-    ts = sys.argv[1]
+    Returns a dict the dashboard can consume directly. Used both by the
+    CLI (`python -m bilbo.scripts.run_single_inference <ts>`) and by
+    `bilbo.capture_service`'s POST /infer endpoint, so the warm-torch path
+    inside the capture container can reuse it without a subprocess hop.
+    """
     db = get_db()
-    entries = db.get_entries(start=ts, end=ts)
+    entries = db.get_entries(start=timestamp, end=timestamp)
     if not entries:
-        print(json.dumps({"ok": False, "error": "entry not found"}))
-        return 1
+        return {"ok": False, "error": "entry not found"}
 
     entry = entries[0]
     frame_path = entry.get("frame", "")
     if not frame_path or not Path(frame_path).exists():
-        print(json.dumps({"ok": False, "error": "frame file not found"}))
-        return 1
+        return {"ok": False, "error": "frame file not found"}
 
     result = run_birdeye_inference(Path(frame_path))
     if result is None:
-        print(json.dumps({"ok": True, "result": None, "reason": "hard_error"}))
-        return 0
+        return {"ok": True, "result": None, "reason": "hard_error"}
 
     shadow = birdeye_result_to_shadow_blob(result)
 
@@ -77,16 +76,24 @@ def main():
     if retrain_agreed is not None:
         updates["retrainAgreed"] = retrain_agreed
 
-    db.update_entry(ts, updates)
+    db.update_entry(timestamp, updates)
 
-    print(json.dumps({
+    return {
         "ok": True,
         "shadow": shadow,
         "faceBbox": result.get("faceBbox"),
         "faceConfidence": result.get("faceConfidence"),
         "retrainAgreed": retrain_agreed,
-    }))
-    return 0
+    }
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(json.dumps({"ok": False, "error": "timestamp required"}))
+        return 1
+    out = run(sys.argv[1])
+    print(json.dumps(out))
+    return 0 if out.get("ok") else 1
 
 
 if __name__ == "__main__":

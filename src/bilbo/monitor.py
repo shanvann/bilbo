@@ -1,0 +1,603 @@
+#!/usr/bin/env python3
+"""
+Baby monitor: capture RTSP frame, analyze via OpenAI vision, log results.
+
+Combines capture + analysis into one script so the cron agent only needs
+to run this and relay the output.
+
+Usage:
+  monitor.py                     Full pipeline (capture → analyze → log)
+  monitor.py --capture-only      Capture a frame, print path, exit
+  monitor.py --analyze FILE      Analyze an existing frame (skip capture)
+  monitor.py --dry-run           Full pipeline but don't write to JSONL log
+  monitor.py --verbose           Print detailed logs to stderr
+  monitor.py --last N            Show last N log entries from JSONL
+  monitor.py --status            Show current system status and recent gaps
+
+Output (stdout): single JSON line
+  {"status": "ok"|"alert"|"error", "frame": "...", "alerts": [...], "summary": "..."}
+
+Backtesting:
+  monitor.py --backtest                      Replay all historical frames against current logic
+  monitor.py --backtest --last 100           Backtest last 100 entries only
+  monitor.py --backtest --from 2026-03-30    Backtest from date
+  monitor.py --backtest --quick              Skip API calls, only test pixel-diff gate
+"""
+
+import json
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+from bilbo.config import (
+    ENV_FILE,
+    MODEL_CHAIN,
+    STATE_CONFIRM_WINDOW,
+    UNKNOWN_ABSORB_MAX_MINUTES,
+    load_env,
+    log,
+    set_verbose,
+)
+from bilbo.state import (
+    putdown_prefix_to_absorb,
+    smooth_state_temporal,
+    unknown_prefix_to_absorb,
+)
+from bilbo.pipeline.capture import capture_frame, enforce_disk_limit
+from bilbo.storage.db import get_db
+from bilbo.pipeline.detect import detect_empty_bassinet, make_empty_entry
+from bilbo.pipeline.vision import analyze_frame, flatten_analysis
+from bilbo.pipeline.local_pipeline import (
+    birdeye_result_to_shadow_blob,
+    run_birdeye_inference,
+)
+from bilbo.experiments import run_all as run_experiments
+from bilbo.alerts import (
+    check_alerts,
+    check_asleep_confirmation,
+    check_edge_alert,
+    check_wake_confirmation,
+    get_alert_stats,
+    log_alert_feedback,
+    record_alert_feedback,
+    reset_wake_cooldown,
+    save_alert_state,
+    send_telegram_alert,
+    should_alert_asleep,
+    should_burst,
+)
+from bilbo.storage.files import append_entry
+from bilbo.cli import (
+    cmd_audit, cmd_backfill_shadow, cmd_backtest, cmd_backtest_birdeye,
+    cmd_eval_corrections, cmd_last, cmd_list_models, cmd_retrain, cmd_rollback,
+    cmd_status, parse_args,
+)
+
+
+def _output(status: str, **kwargs):
+    print(json.dumps({"status": status, **kwargs}))
+
+
+def main():
+    args = parse_args()
+
+    if args.verbose:
+        set_verbose()
+
+    mode = "last" if args.last is not None else "status" if args.status else \
+           "backtest" if args.backtest else \
+           "capture-only" if args.capture_only else "analyze" if args.analyze else "pipeline"
+    log.info("--- run start: mode=%s dry_run=%s verbose=%s models=%s ---", mode, args.dry_run, args.verbose,
+             " → ".join(f"{m['provider']}/{m['model']}" for m in MODEL_CHAIN))
+    log.debug("python=%s, pid=%d", sys.version.split()[0], __import__("os").getpid())
+    t_start = time.monotonic()
+
+    # --- Diagnostic modes (no env/API needed) ---
+
+    if args.last is not None:
+        return cmd_last(args.last)
+
+    if args.status:
+        return cmd_status()
+
+    if args.feedback:
+        alert_id, fb = args.feedback
+        fb = fb.lower()
+        if fb not in ("yes", "no"):
+            print("Feedback must be 'yes' or 'no'", file=sys.stderr)
+            return 1
+        if record_alert_feedback(alert_id, fb):
+            print(f"Recorded feedback '{fb}' for alert {alert_id}")
+            return 0
+        else:
+            print(f"Alert {alert_id} not found or already has feedback", file=sys.stderr)
+            return 1
+
+    if args.alert_stats:
+        stats = get_alert_stats()
+        print(f"Alert Accuracy Stats:")
+        print(f"  Total alerts: {stats['total']}")
+        print(f"  Confirmed (yes): {stats['yes']}")
+        print(f"  False alarm (no): {stats['no']}")
+        print(f"  Pending feedback: {stats['pending']}")
+        print(f"  Precision: {stats['precision']}")
+        return 0
+
+    if args.backtest:
+        if args.birdeye:
+            return cmd_backtest_birdeye(
+                last_n=args.count,
+                from_date=args.from_date,
+            )
+        return cmd_backtest(
+            last_n=args.count,
+            from_date=args.from_date,
+            quick=args.quick,
+            alerts=args.alerts,
+        )
+
+    if args.audit:
+        return cmd_audit(sample_size=args.sample)
+
+    if args.retrain:
+        return cmd_retrain(
+            force=args.force,
+            skip_face_detect=args.skip_face_detect,
+            skip_post_retrain=args.skip_post_retrain,
+            post_retrain_backfill_days=args.post_retrain_backfill_days,
+        )
+
+    if args.eval_corrections:
+        return cmd_eval_corrections()
+
+    if args.list_models:
+        return cmd_list_models()
+
+    if args.rollback:
+        return cmd_rollback(args.rollback)
+
+    if args.backfill_shadow:
+        return cmd_backfill_shadow(
+            hours=args.hours,
+            only_stale=args.only_stale,
+            dry_run=args.dry_run,
+            limit=args.limit,
+        )
+
+    # --- Load config ---
+
+    if not ENV_FILE.exists():
+        log.error("env file not found: %s", ENV_FILE)
+        _output("error", error=f"env file not found: {ENV_FILE}")
+        return 1
+
+    env = load_env(ENV_FILE)
+    rtsp_url = env.get("RTSP_STREAM_URL")
+    api_key = env.get("OPENAI_API_KEY")
+    anthropic_key = env.get("ANTHROPIC_API_KEY")
+
+    # --- Capture-only mode ---
+
+    if args.capture_only:
+        if not rtsp_url:
+            log.error("capture-only: missing RTSP_STREAM_URL in env file")
+            print("ERROR: missing RTSP_STREAM_URL in env file", file=sys.stderr)
+            return 1
+        try:
+            frame_path = capture_frame(rtsp_url)
+            log.info("capture-only: done in %.1fs -> %s", time.monotonic() - t_start, frame_path)
+            print(str(frame_path))
+            return 0
+        except RuntimeError as e:
+            log.error("capture-only: failed - %s", e)
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+
+    # --- Analyze-only mode ---
+
+    if args.analyze:
+        frame_path = Path(args.analyze)
+        if not frame_path.exists():
+            log.error("analyze: file not found: %s", frame_path)
+            print(f"ERROR: file not found: {frame_path}", file=sys.stderr)
+            return 1
+        if not api_key:
+            log.error("analyze: missing OPENAI_API_KEY in env file")
+            print("ERROR: missing OPENAI_API_KEY in env file", file=sys.stderr)
+            return 1
+        log.info("analyze: analyzing existing frame %s (%dKB)",
+                 frame_path, frame_path.stat().st_size // 1024)
+        try:
+            analysis = analyze_frame(frame_path, api_key, anthropic_key)
+        except RuntimeError as e:
+            _output("error", error=str(e), frame=str(frame_path))
+            return 1
+        flat = flatten_analysis(analysis, str(frame_path))
+        alerts = check_alerts(flat)
+        flat["alerts"] = alerts
+        log.info("analyze: done in %.1fs, %d alerts", time.monotonic() - t_start, len(alerts))
+        print(json.dumps(flat, indent=2))
+        return 0
+
+    # --- Full pipeline ---
+
+    if not rtsp_url or not api_key:
+        missing = []
+        if not rtsp_url:
+            missing.append("RTSP_STREAM_URL")
+        if not api_key:
+            missing.append("OPENAI_API_KEY")
+        log.error("pipeline: missing env vars: %s", ", ".join(missing))
+        _output("error", error=f"missing {', '.join(missing)}")
+        return 1
+
+    log.info("pipeline: starting full capture+analyze+log cycle")
+
+    # Capture
+    try:
+        frame_path = capture_frame(rtsp_url)
+    except RuntimeError as e:
+        log.error("pipeline: capture failed, aborting - %s", e)
+        _output("error", error=str(e))
+        return 1
+
+    enforce_disk_limit()
+
+    # =======================================================================
+    # BIRDEYE-primary pipeline:
+    #   pixel-diff → BIRDEYE classifier → cloud API (only on BIRDEYE fallback)
+    #
+    # BIRDEYE handles ~99.4% of non-empty frames in current production data;
+    # the cloud API runs only when BIRDEYE bails (no_face_detected,
+    # low_confidence) or hard-errors (deps missing, model load failed,
+    # unreadable frame). Edge alert (`check_edge_alert`) is currently
+    # disabled by side-effect: it reads `bassinetLocation`, which only
+    # the cloud API populates, so it now only fires on BIRDEYE fallback
+    # frames. Tracked in github issue #3 — trained
+    # BassinetLocationClassifier will restore it.
+    # =======================================================================
+
+    is_empty, diff_score = detect_empty_bassinet(frame_path)
+
+    if is_empty:
+        flat = make_empty_entry(frame_path, diff_score)
+        log.info("pipeline: pixel-diff -> empty (score=%.2f), birdeye skipped", diff_score)
+        birdeye_result = None
+    else:
+        log.info("pipeline: pixel-diff -> changed (score=%.2f), running birdeye", diff_score)
+        birdeye_result = run_birdeye_inference(frame_path)
+
+        # Decide whether BIRDEYE handled this frame or we need cloud fallback.
+        # `not_present` is a confident answer, NOT a fallback. The fallback
+        # field is only set on the partial-result paths inside BIRDEYE.
+        if birdeye_result is None:
+            fallback_reason = "hard_error"
+        elif birdeye_result.get("fallback") in ("no_face_detected", "low_confidence"):
+            fallback_reason = birdeye_result["fallback"]
+        else:
+            fallback_reason = None
+
+        if fallback_reason is None:
+            # BIRDEYE handled it cleanly — its outputs ARE the entry.
+            flat = dict(birdeye_result)
+            flat["diffScore"] = round(diff_score, 2) if diff_score >= 0 else None
+            log.info("pipeline: birdeye -> %s (presence=%.3f eye=%s)",
+                     flat.get("state"),
+                     flat.get("presenceConfidence", 0),
+                     flat.get("eyeConfidence", "n/a"))
+        else:
+            # BIRDEYE bailed → cloud API fallback. The cloud API is
+            # authoritative on this frame's primary fields.
+            log.warning("pipeline: birdeye fallback=%s, calling cloud API",
+                        fallback_reason)
+            try:
+                # `analyze_frame` is supposed to wrap every transport/SDK
+                # error in RuntimeError, but the broad except below is a
+                # belt-and-suspenders so a new SDK exception class can't
+                # silently kill the tick again (see incidents 2026-04-22
+                # and 2026-04-30; project_cloud_fallback_crash_safety memory).
+                analysis = analyze_frame(frame_path, api_key, anthropic_key)
+                cloud_err = None
+            except Exception as e:  # noqa: BLE001
+                cloud_err = e
+                analysis = None
+                log.error("pipeline: cloud API fallback failed (%s) - %s",
+                          type(e).__name__, e)
+
+            if analysis is not None:
+                flat = flatten_analysis(analysis, str(frame_path))
+                flat["diffScore"] = round(diff_score, 2) if diff_score >= 0 else None
+                flat["birdeyeFallback"] = fallback_reason
+
+                # Heuristic: if state is "Unknown", baby is present, and position
+                # matches the previous frame, infer "Asleep" (baby hasn't moved,
+                # likely sleeping). Kept from the pre-flip pipeline.
+                if flat.get("state") == "Unknown" and flat.get("babyPresent"):
+                    prev = get_db().get_last_entry()
+                    if prev and prev.get("babyPresent") and prev.get("sleepPosition") == flat.get("sleepPosition"):
+                        if flat.get("sleepPosition") != "Unknown":
+                            log.info("heuristic: state Unknown -> Asleep (position unchanged: %s)",
+                                     flat.get("sleepPosition"))
+                            flat["state"] = "Asleep"
+                            flat["stateInferred"] = True
+
+                # Save head position from cloud API for the next BIRDEYE
+                # tick's adaptive crop (the trainable face detector is the
+                # primary source now, but the head crop is still a useful
+                # last-resort fallback inside BIRDEYE).
+                head_pos = flat.get("headPosition")
+                if isinstance(head_pos, dict) and head_pos.get("visible", False):
+                    from bilbo.pipeline.classifiers import save_head_state
+                    save_head_state(head_pos["x"], head_pos["y"], source="cloud-api")
+            else:
+                # Cloud API failed → degrade to BIRDEYE-as-primary. The
+                # `low_confidence` and `no_face_detected` BIRDEYE outputs
+                # already carry a complete entry shape (state="Unknown",
+                # presence/face/eye metadata, "Unknown" placeholders for
+                # the cloud-only fields). On `hard_error`, BIRDEYE returned
+                # nothing — synthesize a minimal stub so the row still
+                # lands in the DB and there's no gap.
+                log.warning("pipeline: degrading to BIRDEYE primary "
+                            "(cloud unavailable, fallback=%s)", fallback_reason)
+                if birdeye_result is not None:
+                    flat = dict(birdeye_result)
+                    # On low_confidence, BIRDEYE *did* produce an eyeState
+                    # — its confidence was just below the cloud-fallback
+                    # threshold. With cloud unavailable, that prediction is
+                    # the best signal we have, so promote it from Unknown
+                    # to Awake/Asleep. The temporal smoother will still
+                    # require STATE_CONFIRM_RUN consecutive readings before
+                    # the smoothed `state` flips, so a single bad
+                    # low-confidence frame can't move the dashboard.
+                    if flat.get("eyeState") in ("eyes_open", "eyes_closed"):
+                        flat["state"] = (
+                            "Awake" if flat["eyeState"] == "eyes_open" else "Asleep"
+                        )
+                else:
+                    flat = {
+                        "babyPresent": None,
+                        "state": "Unknown",
+                        "detectionMethod": "stub",
+                        "modelUsed": "none",
+                        "sleepPosition": "Unknown",
+                        "objectsInBassinet": "Unknown",
+                        "swaddle": "Unknown",
+                        "headCovering": "Unknown",
+                        "lighting": "Unknown",
+                        "bodyPosture": "Unknown",
+                        "pacifierEngaged": "Unknown",
+                        "bassinetCondition": "Unknown",
+                        "hazards": "Unknown",
+                        "bassinetLocation": "Unknown",
+                        "captureMode": "Unknown",
+                        "cameraTimestamp": None,
+                    }
+                flat["diffScore"] = round(diff_score, 2) if diff_score >= 0 else None
+                flat["birdeyeFallback"] = fallback_reason
+                flat["cloudUnavailable"] = True
+                # Keep the reason machine-readable: SDK class name + a
+                # truncated message. Pipeline-health surfaces both.
+                flat["cloudUnavailableReason"] = (
+                    f"{type(cloud_err).__name__}: {str(cloud_err)[:200]}"
+                )
+
+        # Always populate the audit-trail fields from BIRDEYE's output,
+        # even on fallback frames where the cloud API wrote the primary
+        # fields. The `shadow` blob and the indexed shadow_birdeye_*
+        # columns are now an immutable record of what the model said,
+        # separate from the user-facing labels which can be corrected.
+        flat["shadow"] = birdeye_result_to_shadow_blob(birdeye_result)
+        if birdeye_result is not None:
+            if birdeye_result.get("shadowModelVersion"):
+                flat["shadowModelVersion"] = birdeye_result["shadowModelVersion"]
+            if birdeye_result.get("faceBbox") and "faceBbox" not in flat:
+                flat["faceBbox"] = birdeye_result["faceBbox"]
+            if birdeye_result.get("faceConfidence") is not None and "faceConfidence" not in flat:
+                flat["faceConfidence"] = birdeye_result["faceConfidence"]
+
+    alerts = check_alerts(flat)
+
+    # Build flat log entry
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    entry = {"timestamp": now, "frame": str(frame_path), **flat, "alerts": alerts}
+
+    # --- Temporal state smoothing ---
+    # The raw per-frame state (from BIRDEYE's eye-state mapping or the cloud
+    # API) is noisy. The primary `state` field is only allowed to flip to
+    # Awake/Asleep after STATE_CONFIRM_RUN consecutive agreeing raw readings
+    # within the last STATE_CONFIRM_WINDOW baby-present frames. The raw
+    # reading is preserved under `rawState` so history can be re-smoothed
+    # offline if the thresholds change. See lib/state.py.
+    #
+    # History lookup goes through SQLite, not JSONL. lib.storage's JSONL
+    # reader uses a fixed 600-bytes-per-entry byte budget which silently
+    # undercounts when entries are larger (they are now — ~1.4 KB with the
+    # shadow dict + experiments dict + faceBbox). Asking for 5 history
+    # frames was returning only 2, so the 4-of-6 rule could never fire.
+    # db.get_recent_entries uses a proper LIMIT query and is authoritative
+    # on the dual-write invariant anyway.
+    entry["rawState"] = entry.get("state")
+    _db_for_smoothing = get_db()
+    recent_for_smoothing = _db_for_smoothing.get_recent_entries(
+        STATE_CONFIRM_WINDOW - 1
+    )
+    entry["state"] = smooth_state_temporal(entry, recent_for_smoothing)
+    if entry["state"] != entry["rawState"]:
+        log.info("state-smooth: raw=%s -> smoothed=%s",
+                 entry["rawState"], entry["state"])
+
+    # --- Unknown → Awake absorption ---
+    # When we just confirmed Awake, retroactively flip any immediately-
+    # preceding contiguous Unknown+babyPresent run whose total span is
+    # < UNKNOWN_ABSORB_MAX_MINUTES. Fetch a history window comfortably
+    # larger than the absorption budget so the helper's span check can
+    # fail-closed on runs longer than the budget. The absorption rewrites
+    # historical rows via db.update_entry; it does not touch the current
+    # entry (which is already Awake from smoothing).
+    _absorb_history_n = max(STATE_CONFIRM_WINDOW, int(UNKNOWN_ABSORB_MAX_MINUTES) + 5)
+    _absorb_history = _db_for_smoothing.get_recent_entries(_absorb_history_n)
+    _to_absorb = unknown_prefix_to_absorb(entry, _absorb_history)
+
+    # --- Putdown-pattern absorption (Unknown → FallingAsleep / Awake) ---
+    # When we just confirmed Asleep AND the preceding Unknown+babyPresent
+    # run is bookended by not_present, classify the run based on span
+    # (≤ 30 min = FallingAsleep, > 30 min = Awake). Helper needs a longer
+    # history window than unknown_prefix_to_absorb because the putdown
+    # budget is larger; use the same max() pattern for safety.
+    from bilbo.config import FALLING_ASLEEP_MAX_MINUTES
+    _putdown_history_n = max(STATE_CONFIRM_WINDOW, int(FALLING_ASLEEP_MAX_MINUTES) + 5)
+    _putdown_history = (
+        _db_for_smoothing.get_recent_entries(_putdown_history_n)
+        if _putdown_history_n > _absorb_history_n
+        else _absorb_history
+    )
+    _putdown_to_absorb, _putdown_new_state = putdown_prefix_to_absorb(
+        entry, _putdown_history
+    )
+
+    # --- Shadow experiments ---
+    # Run every registered shadow pipeline against this frame. Results are
+    # stored under entry["experiments"][<name>] alongside the primary
+    # fields. Experiments are read-only observers — they never mutate the
+    # primary state/eyeState, and any experiment that raises is logged but
+    # does not abort the tick. See scripts/lib/experiments.py for the
+    # framework and the currently-registered experiments.
+    try:
+        experiment_results = run_experiments(
+            frame_path, entry, prod_result=birdeye_result
+        )
+        if experiment_results:
+            entry["experiments"] = experiment_results
+            log.info(
+                "pipeline: experiments ran (%d): %s",
+                len(experiment_results), list(experiment_results.keys()),
+            )
+    except Exception as e:  # noqa: BLE001
+        log.warning("pipeline: experiments framework failed: %s", e)
+
+    # Log to JSONL
+    if args.dry_run:
+        log.info("pipeline: dry-run, skipping write")
+    else:
+        append_entry(entry)  # JSONL backup
+        db = get_db()
+        db.insert_entry(entry)  # SQLite primary
+        log.info("pipeline: logged entry at %s", now)
+
+        # Apply Unknown→Awake absorption to the historical rows the
+        # helper identified. We do this AFTER persisting the current
+        # entry so the DB state is always consistent even if the
+        # update_entry calls fail partway through — worst case the
+        # historical Unknowns stay Unknown, which is what they were.
+        if _to_absorb:
+            log.info("state-smooth: absorbing %d Unknown frames -> Awake "
+                     "(span ending at %s)",
+                     len(_to_absorb), entry["timestamp"])
+            for _u in _to_absorb:
+                db.update_entry(_u["timestamp"], {"state": "Awake"})
+
+        # Putdown pattern: either flips a short (≤30m) Unknown run to
+        # FallingAsleep or a longer one to Awake. No-op when the rule
+        # didn't match.
+        if _putdown_to_absorb:
+            log.info("state-smooth: putdown pattern, %d Unknown frames -> %s "
+                     "(span ending at %s)",
+                     len(_putdown_to_absorb), _putdown_new_state, entry["timestamp"])
+            for _u in _putdown_to_absorb:
+                db.update_entry(_u["timestamp"], {"state": _putdown_new_state})
+    elapsed = time.monotonic() - t_start
+
+    # --- Safety alerts ---
+    if not args.dry_run:
+        check_edge_alert(entry, env)
+
+    # --- Active wake detection (look-back confirmation, no extra captures) ---
+    if not args.dry_run:
+        if entry.get("babyPresent"):
+            if should_burst(entry):
+                wake_alert = check_wake_confirmation(entry)
+                if wake_alert:
+                    log.info("pipeline: ACTIVE WAKE confirmed (%d/%d Awake)",
+                             wake_alert["awake_count"], wake_alert["total_frames"])
+                    ts_str = wake_alert["timestamp"]
+                    try:
+                        ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        import zoneinfo
+                        et_tz = zoneinfo.ZoneInfo("America/New_York")
+                        local_time = ts_dt.astimezone(et_tz).strftime("%I:%M %p")
+                    except Exception:
+                        local_time = ts_str
+                    alert_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+                    wake_msg = (
+                        f"🍼 Baby waking up!\n"
+                        f"Confirmed: {wake_alert['awake_count']}/{wake_alert['total_frames']} "
+                        f"recent frames show Awake\n"
+                        f"First detected at {local_time}\n\n"
+                        f"Was this correct?"
+                    )
+                    send_telegram_alert(wake_msg, env, alert_id=alert_id)
+                    save_alert_state("active_wake")
+                    log_alert_feedback(alert_id, wake_alert)
+
+            if should_alert_asleep(entry):
+                asleep_alert = check_asleep_confirmation(entry)
+                if asleep_alert:
+                    log.info("pipeline: ASLEEP confirmed (%d/%d Asleep)",
+                             asleep_alert["asleep_count"], asleep_alert["total_frames"])
+                    ts_str = asleep_alert["timestamp"]
+                    try:
+                        ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        import zoneinfo
+                        et_tz = zoneinfo.ZoneInfo("America/New_York")
+                        local_time = ts_dt.astimezone(et_tz).strftime("%I:%M %p")
+                    except Exception:
+                        local_time = ts_str
+                    asleep_msg = (
+                        f"😴 Baby asleep.\n"
+                        f"Confirmed: {asleep_alert['asleep_count']}/{asleep_alert['total_frames']} "
+                        f"recent frames show Asleep\n"
+                        f"First detected at {local_time}"
+                    )
+                    send_telegram_alert(asleep_msg, env)
+                    save_alert_state("asleep")
+        else:
+            # Baby removed — reset cooldown so next wake can trigger
+            reset_wake_cooldown()
+
+    # --- Structured run summary (system.log + stdout) ---
+    detection_method = flat.get("detectionMethod", "pixel-diff")
+    state = flat.get("state", "unknown")
+    model_used = flat.get("modelUsed", "n/a")
+    birdeye_timings = flat.get("birdeyeTimings", {})
+
+    log.info("RUN_SUMMARY method=%s state=%s model=%s elapsed=%.1fs baby=%s alerts=%d",
+             detection_method, state, model_used, elapsed,
+             flat.get("babyPresent", "?"), len(alerts))
+
+    # Enriched JSON output (goes to cron-stdout.log)
+    output_extras = {
+        "detectionMethod": detection_method,
+        "state": state,
+        "modelUsed": model_used,
+        "elapsed": round(elapsed, 2),
+    }
+    if birdeye_timings:
+        output_extras["birdeyeTimings"] = birdeye_timings
+    if flat.get("presenceConfidence") is not None:
+        output_extras["presenceConfidence"] = flat["presenceConfidence"]
+    if flat.get("eyeConfidence") is not None:
+        output_extras["eyeConfidence"] = flat["eyeConfidence"]
+
+    if alerts:
+        summary = "ALERT: " + "; ".join(alerts)
+        log.warning("pipeline: %d alerts detected: %s", len(alerts), summary)
+        _output("alert", frame=str(frame_path), alerts=alerts, summary=summary, **output_extras)
+    else:
+        _output("ok", frame=str(frame_path), alerts=[], summary="No safety alerts.", **output_extras)
+
+    log.info("--- run end: %.1fs ---", elapsed)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

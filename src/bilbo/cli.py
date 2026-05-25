@@ -1503,6 +1503,9 @@ examples:
                    help="(backtest) only test entries from this date (YYYY-MM-DD)")
     p.add_argument("--count", metavar="N", type=int,
                    help="(backtest) only test last N entries")
+    p.add_argument("--loop", action="store_true",
+                   help="persistent capture every 60s (Docker mode; "
+                        "default is one tick and exit)")
     p.add_argument("--sample", metavar="N", type=int,
                    help="(audit) number of frames to spot-check")
     return p.parse_args()

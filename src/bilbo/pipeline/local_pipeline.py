@@ -55,6 +55,10 @@ _face_detector = None      # primary (trainable or YuNet)
 _face_detector_fallback = None  # YuNet fallback when trainable is primary
 _available = None  # None = not yet checked
 
+# Path the singletons were loaded against — used by maybe_reload_classifiers()
+# to detect when a retrain has flipped the `latest` symlink to a new version.
+_loaded_model_version: str | None = None
+
 BIRDEYE = "birdeye"
 
 
@@ -118,7 +122,37 @@ def _get_classifiers():
         _face_detector_fallback = None
 
     log.info("%s: classifiers loaded in %.2fs", BIRDEYE, time.monotonic() - t0)
+
+    global _loaded_model_version
+    _loaded_model_version = _read_deployed_model_version()
+
     return _presence_clf, _eye_state_clf, _face_detector, _face_detector_fallback
+
+
+def maybe_reload_classifiers() -> bool:
+    """Drop cached classifier singletons if `pipeline/models/latest` flipped.
+
+    Called once per tick by the capture loop so a retrain (which writes a new
+    versioned dir and swaps the symlink) takes effect within the next minute
+    without restarting the container. Returns True if a reload was triggered.
+    """
+    global _presence_clf, _eye_state_clf, _face_detector, _face_detector_fallback, _loaded_model_version
+    if _loaded_model_version is None:
+        # Classifiers haven't been loaded yet (lazy); nothing to reload.
+        return False
+    current = _read_deployed_model_version()
+    if current == _loaded_model_version:
+        return False
+    log.info(
+        "%s: model symlink flipped (%s -> %s); dropping classifier singletons",
+        BIRDEYE, _loaded_model_version, current,
+    )
+    _presence_clf = None
+    _eye_state_clf = None
+    _face_detector = None
+    _face_detector_fallback = None
+    _loaded_model_version = None
+    return True
 
 
 # ---------------------------------------------------------------------------

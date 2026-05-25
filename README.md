@@ -37,7 +37,7 @@ A baby bassinet monitor that captures a frame every minute from an IP camera, cl
 
 - **Tracks sleep state** — Asleep, Awake, FallingAsleep, Unknown — via on-device **BIRDEYE** (a 3-stage MobileNetV3-Small cascade: presence → face detection → eye-state) running as production. A cloud API (GPT-4o) is called only when BIRDEYE can't find a face or has low confidence — ~1–2% of non-empty frames post-flip (2026-04-12). The `shadow` sub-dict and `shadow_birdeye_*` columns are now an immutable audit trail of what the model said per frame, separate from the user-correctable primary fields.
 - **Detects wake-ups and sleep-onset** — confirms by checking last 3 entries (2/3 agreeing), then sends a Telegram alert. Wake alerts include feedback buttons; asleep alerts fire only on awake→asleep transitions (skipped on placed-already-asleep).
-- **Capture watchdog** — independent launchd job (every 2 min) that pings Telegram if no new frame has been written in `WATCHDOG_ALERT_AFTER_MIN` minutes. Catches RTSP outages, monitor crashes, launchd stalls; doesn't catch laptop-off (nothing runs at all).
+- **Capture watchdog** — runs as a background thread inside the capture container (every 2 min) and pings Telegram if no new frame has been written in `WATCHDOG_ALERT_AFTER_MIN` minutes. Catches RTSP outages, monitor crashes, container restarts; doesn't catch host-off (nothing runs at all).
 - **Safety alerts** — immediate notification if baby is pressed against the bassinet side
 - **Dashboard** — live camera feed, timeline, frame-by-frame review with eye state correction, block-level labeling, model performance metrics, training stats, retrain button
 - **Continuous improvement** — corrections from dashboard feed back into retraining. Model versions are tracked with metrics, rollback support, and post-retrain re-inference
@@ -50,7 +50,7 @@ A baby bassinet monitor that captures a frame every minute from an IP camera, cl
 BIRDEYE-primary since 2026-04-12 (commit `7250067`). Before that, the cloud API was production and BIRDEYE ran as a shadow for validation; see [Shadow vs Production (historical)](#shadow-vs-production-historical) for the rationale behind the flip.
 
 ```
-launchd (every 1 min) → capture frame (ffmpeg)
+capture container (--loop, 60s) → capture frame (ffmpeg)
   → Pixel-diff: empty bassinet? → store state=not_present, skip BIRDEYE
   → BIRDEYE (3-stage cascade on CPU, ~130 ms):
        presence → face detector → eye-state
@@ -72,7 +72,7 @@ launchd (every 1 min) → capture frame (ffmpeg)
        state + 30-min cooldown → Telegram alert.
   → If cloud API ran: save head position for BIRDEYE's next crop.
 
-launchd (every 2 min) → watchdog.py
+watchdog thread (every 2 min, in capture container)
   → newest DB timestamp older than WATCHDOG_ALERT_AFTER_MIN? → Telegram alert
   → recovered after outage? → Telegram "captures resumed" ping
 ```
@@ -103,73 +103,86 @@ Continuous improvement loop:
 
 ### Prerequisites
 
-- Python 3.12+ (PyTorch requires <=3.13)
-- ffmpeg (`brew install ffmpeg`)
-- OpenClaw installed and configured with Telegram
+- Docker + Docker Compose
+- An IP camera reachable over RTSP from the host
+- (Optional, for host-dev) Python 3.12+ (PyTorch requires <=3.13) and ffmpeg
 
-### API Keys
+### Secrets
 
-Create `.env.baby-monitor` in the workspace root:
+Copy `.env.example` to `.env` at the repo root and fill in:
 
 ```bash
-RTSP_STREAM_URL="rtsp://username:password@192.168.x.x/stream1"
+RTSP_URL="rtsp://username:password@192.168.x.x/stream1"
 OPENAI_API_KEY="sk-..."
 TELEGRAM_BOT_TOKEN="123456:ABC..."
 TELEGRAM_CHAT_ID="123456789"
 ```
 
-### Start Monitoring
+### Start the stack
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.baby-monitor.plist           # monitor (every 1 min)
-launchctl load ~/Library/LaunchAgents/com.baby-monitor-dashboard.plist  # dashboard (persistent)
-launchctl load ~/Library/LaunchAgents/com.baby-monitor-retrain.plist    # daily retrain (12am ET)
-launchctl load ~/Library/LaunchAgents/com.baby-monitor-watchdog.plist   # capture watchdog (every 2 min)
+docker compose -f deploy/docker-compose.yml up -d --build
 ```
+
+This brings up three always-on containers (`capture`, `control-api`, `dashboard`) and exposes the dashboard on `http://localhost:5555`. The training container is on-demand: control-api spawns it via the mounted Docker socket when the dashboard's "Retrain" button is clicked, and it auto-removes when done.
+
+Operational commands:
+
+```bash
+docker compose -f deploy/docker-compose.yml ps
+docker compose -f deploy/docker-compose.yml logs -f capture
+docker compose -f deploy/docker-compose.yml exec capture bilbo-monitor --status
+docker compose -f deploy/docker-compose.yml down
+```
+
+For host-dev (running without Docker), `pip install -e ".[ml,control-api,capture]"` and run the console scripts directly — see CLAUDE.md for the full list.
 
 ## Skills
 
-### Baby Monitor (`skills/baby-monitor/`)
+### Baby Monitor (`src/bilbo/`)
 
 **Key files:**
 | File | Purpose |
 |---|---|
-| `scripts/monitor.py` | Main pipeline — capture → pixel-diff → BIRDEYE → cloud fallback → smooth → alert → dual-write |
-| `scripts/lib/db.py` | SQLite database — all read/write operations |
-| `scripts/lib/classifiers.py` | BIRDEYE — presence + eye state classifiers |
-| `scripts/lib/local_pipeline.py` | BIRDEYE orchestration |
-| `scripts/lib/training_state.py` | PID-based training state (cross-process) |
-| `scripts/train_classifiers.py` | Train classifiers with corrections/audit data. `--eye-crop-size` and `--experiment-tag` let you train eye-state variants at different input resolutions without clobbering the prod model. |
-| `scripts/bbox_impact.py` | Measure eye-state accuracy on predicted vs corrected bboxes (manual-run, caches into the `state` table for the dashboard) |
-| `scripts/lib/experiments.py` | Shadow pipeline framework — `Experiment` base class, `EyeStateShadowExperiment` generic class, manifest-driven registry. New shadows are added by editing `experiments.json`, not Python source. |
-| `scripts/lib/experiments.json` | Data-driven shadow experiment manifest. Edited atomically by `promote_experiment.py` during a flip. |
-| `scripts/experiments_backfill.py` | Run registered shadow experiments against historical frames so the dashboard has immediate comparison data after a new experiment lands. |
-| `scripts/backfill_birdeye_primary.py` | Re-run BIRDEYE with the currently deployed weights over a time window and **write into the primary `eyeState` / `faceBbox` / `presenceConfidence` / `eyeConfidence` fields** (plus refresh the `shadow` audit dict). Skips `eye_state_edited=1` rows by default. Pair with `backfill_state.py` after. |
-| `scripts/backfill_state.py` | Re-smooth `state` + `rawState` over the primary `eyeState` signal for the whole DB. Cheap, re-runnable. Run after `backfill_birdeye_primary.py` or when smoothing thresholds change. |
-| `scripts/promote_experiment.py` | **One-command shadow → prod promotion.** Bundles the 12-step flip (snapshot, copy, meta update, metrics patch, stale-key cleanup, manifest edit, backfill, reinfer, launchd reload). Rollback is the same command pointed at the legacy snapshot tag. See `docs/shadow-to-prod-playbook.md`. |
-| `scripts/watchdog.py` | Independent capture-staleness watchdog (own launchd job, every 2 min). Reads newest `entries.timestamp` via SQLite; if older than `WATCHDOG_ALERT_AFTER_MIN` minutes, sends a Telegram alert and tracks state in `data/watchdog-state.json`. Sends a recovery ping when captures resume. Reuses `lib.alerts.send_telegram_alert` so the urllib + ssl path is the same as wake/asleep alerts. |
-| `dashboard/app.py` | Flask dashboard with training APIs |
+| `src/bilbo/monitor.py` | Main pipeline — capture → pixel-diff → BIRDEYE → cloud fallback → smooth → alert → dual-write. `--loop` runs forever (capture container); default runs one tick. |
+| `src/bilbo/storage/db.py` | SQLite database — all read/write operations |
+| `src/bilbo/pipeline/classifiers.py` | BIRDEYE — presence + eye state classifiers |
+| `src/bilbo/pipeline/local_pipeline.py` | BIRDEYE orchestration + `maybe_reload_classifiers()` for symlink-flip hot reload |
+| `src/bilbo/training_state.py` | Docker-SDK control plane for the training container (PID fallback for host-dev) |
+| `src/bilbo/train_classifiers.py` | Train classifiers with corrections/audit data. `--eye-crop-size` and `--experiment-tag` let you train eye-state variants at different input resolutions without clobbering the prod model. |
+| `src/bilbo/scripts/bbox_impact.py` | Measure eye-state accuracy on predicted vs corrected bboxes (manual-run, caches into the `state` table for the dashboard) |
+| `src/bilbo/experiments.py` | Shadow pipeline framework — `Experiment` base class, `EyeStateShadowExperiment` generic class, manifest-driven registry. New shadows are added by editing `experiments.json`, not Python source. |
+| `src/bilbo/experiments.json` | Data-driven shadow experiment manifest. Edited atomically by `promote_experiment.py` during a flip. |
+| `src/bilbo/scripts/experiments_backfill.py` | Run registered shadow experiments against historical frames so the dashboard has immediate comparison data after a new experiment lands. |
+| `src/bilbo/scripts/backfill_birdeye_primary.py` | Re-run BIRDEYE with the currently deployed weights over a time window and **write into the primary `eyeState` / `faceBbox` / `presenceConfidence` / `eyeConfidence` fields** (plus refresh the `shadow` audit dict). Skips `eye_state_edited=1` rows by default. Pair with `backfill_state.py` after. |
+| `src/bilbo/scripts/backfill_state.py` | Re-smooth `state` + `rawState` over the primary `eyeState` signal for the whole DB. Cheap, re-runnable. Run after `backfill_birdeye_primary.py` or when smoothing thresholds change. |
+| `src/bilbo/scripts/promote_experiment.py` | **One-command shadow → prod promotion.** Bundles the flip (snapshot, copy, meta update, metrics patch, stale-key cleanup, manifest edit, backfill, reinfer). Rollback is the same command pointed at the legacy snapshot tag. See `docs/shadow-to-prod-playbook.md`. |
+| `src/bilbo/watchdog.py` | Capture-staleness watchdog. Runs as a background thread inside the capture container (every 2 min). Reads newest `entries.timestamp` via SQLite; if older than `WATCHDOG_ALERT_AFTER_MIN`, sends a Telegram alert and tracks state in `data/watchdog-state.json`. Sends a recovery ping when captures resume. |
+| `src/bilbo/capture_service.py` | Capture container entry point — Flask :5557 with POST /infer + healthz, plus the monitor and watchdog as daemon threads so warm torch is reused for ad-hoc dashboard re-runs. |
+| `src/bilbo/http/app.py` | control-api Flask app on :5556 — mounts the bilbo.api.* contract under /api/v1/*. |
+| `src/bilbo/api/` | Internal Python contract (`entries`, `training`, `corrections`, `frames`, `stats`, `inference`, `system`, `air_quality`, `recap`, `models`) used by control-api and capture. New callers must go through here rather than `bilbo.storage.*` / `bilbo.pipeline.*` directly. |
+| `dashboard/app.py` | ~120 lines: static + PWA + /api/* reverse proxy to control-api. No bilbo imports. |
 | `references/prompt.md` | Cloud API prompt (includes head position) |
 | `docs/shadow-to-prod-playbook.md` | Full lifecycle walkthrough: train → register → backfill → observe → promote → rollback. **Read this before shipping a new eye-state model.** |
 
 **CLI modes:**
 ```bash
-monitor.py                                          # full pipeline (launchd runs this every 1 min)
-monitor.py --dry-run                                # test without writing
-monitor.py --capture-only                           # grab one frame and exit
-monitor.py --analyze FRAME                          # re-run cloud API on an existing frame
-monitor.py --retrain                                # retrain with pending corrections (auto-runs post-retrain chain)
-monitor.py --retrain --force                        # retrain even if no new corrections
-monitor.py --retrain --skip-post-retrain            # retrain only (skip auto backfill + bbox_impact refresh)
-monitor.py --retrain --post-retrain-backfill-days 14 # widen auto primary-backfill window (default: 7 days)
-monitor.py --eval-corrections                       # re-eval the deployed model on corrections (no retrain)
-monitor.py --audit --sample 50                      # spot-check BIRDEYE vs cloud API disagreements
-monitor.py --list-models                            # show model versions + metrics
-monitor.py --rollback VERSION                       # revert to a previous model
-monitor.py --backtest --birdeye                     # BIRDEYE accuracy vs cloud API ground truth
-monitor.py --status                                 # system health (gaps, disk, recent stats)
-monitor.py --last 10                                # recent log entries
-monitor.py --backfill-shadow --hours 168 --only-stale  # re-run BIRDEYE on historical frames → SHADOW audit dict only
+bilbo-monitor                                       # one tick (default); the capture container runs `bilbo-monitor --loop`
+bilbo-monitor --dry-run                                # test without writing
+bilbo-monitor --capture-only                           # grab one frame and exit
+bilbo-monitor --analyze FRAME                          # re-run cloud API on an existing frame
+bilbo-monitor --retrain                                # retrain with pending corrections (auto-runs post-retrain chain)
+bilbo-monitor --retrain --force                        # retrain even if no new corrections
+bilbo-monitor --retrain --skip-post-retrain            # retrain only (skip auto backfill + bbox_impact refresh)
+bilbo-monitor --retrain --post-retrain-backfill-days 14 # widen auto primary-backfill window (default: 7 days)
+bilbo-monitor --eval-corrections                       # re-eval the deployed model on corrections (no retrain)
+bilbo-monitor --audit --sample 50                      # spot-check BIRDEYE vs cloud API disagreements
+bilbo-monitor --list-models                            # show model versions + metrics
+bilbo-monitor --rollback VERSION                       # revert to a previous model
+bilbo-monitor --backtest --birdeye                     # BIRDEYE accuracy vs cloud API ground truth
+bilbo-monitor --status                                 # system health (gaps, disk, recent stats)
+bilbo-monitor --last 10                                # recent log entries
+bilbo-monitor --backfill-shadow --hours 168 --only-stale  # re-run BIRDEYE on historical frames → SHADOW audit dict only
 
 bbox_impact.py                       # A/B eye-state on predicted vs corrected bbox, caches into `state`
 bbox_impact.py --limit 20 --verbose  # iterate during development
@@ -210,7 +223,7 @@ python scripts/train_classifiers.py \
   --audit data/audit-log.jsonl
 ```
 
-### Baby Report (`skills/baby-report/`)
+### Baby Report (`report/`)
 
 ```bash
 report.py --range 24h                    # full report
@@ -220,17 +233,17 @@ report.py --format json                  # structured output
 
 Sections: `sleep`, `feeding`, `pumping`, `diapers`, `weight`, `monitor`
 
-### AirGradient Logger (`skills/airgradient-logger/`)
+### AirGradient Logger (`airgradient-logger/`)
 
-Standalone polling daemon for an AirGradient indoor air-quality monitor on the LAN. Runs as its own launchd job (`com.airgradient-logger`, every `POLL_SECONDS` = 60s) and writes one row per reading into a SQLite database at `data/airgradient.db`. The dashboard's Air Quality tab reads this DB read-only and pairs it with bassinet state transitions from the monitor DB to overlay state-change vlines on the time-series charts.
+Standalone polling daemon for an AirGradient indoor air-quality monitor on the LAN. Runs as its own systemd unit / docker container (`POLL_SECONDS` = 60s) and writes one row per reading into a SQLite database at `data/airgradient.db`. The dashboard's Air Quality tab reads this DB read-only and pairs it with bassinet state transitions from the monitor DB to overlay state-change vlines on the time-series charts.
 
 ```bash
-cd skills/airgradient-logger
+cd airgradient-logger
 AIRGRADIENT_URL=http://192.168.x.x/measures/current \
 DB_PATH=data/airgradient.db \
 venv/bin/python airgradient_logger.py     # run manually (foreground)
 
-launchctl list | grep airgradient-logger  # status when running as launchd
+systemctl --user status airgradient-logger    # or docker ps for the airgradient-logger container
 tail -f logs/stderr.log                   # live log
 ```
 
@@ -238,7 +251,7 @@ Field mapping reads both camelCase (current firmware: `pm003Count`, `tvocRaw`, `
 
 ## Dashboard
 
-Live at `http://localhost:5555`. Runs as a persistent launchd service.
+Live at `http://localhost:5555`. The `dashboard` container is part of the compose stack.
 
 **Sections (top to bottom):**
 
@@ -275,7 +288,7 @@ Live at `http://localhost:5555`. Runs as a persistent launchd service.
 | `/api/eye-state-daily-metrics` | GET | `?days=N` (clamped 1–90). Per-ET-day BIRDEYE eye-state precision/recall/F1 for `eyes_open` and `eyes_closed` vs corrected/reviewed ground truth. Powers the Eye-State Daily Metrics charts. |
 | `/api/recap/generate` | POST | `{date, fps}`. Stitches a day's frames into MP4 via ffmpeg, caches under `data/videos/`. Returns `{status, cached, video_url, frame_count, duration_sec, size_bytes}`. |
 | `/api/recap/video` | GET | `?name=recap_<date>_fps<N>.mp4`. Range-capable MP4 delivery for the recap `<video>` element. |
-| `/api/air-quality` | GET | `?hours=N` (clamped 1–720). Reads the AirGradient logger DB (path via `AIRGRADIENT_DB_PATH`, defaults to `skills/airgradient-logger/data/airgradient.db`) read-only via SQLite URI mode. Returns bucketed time-series points + latest snapshot + computed analysis (comfort score, statuses, alerts, insights, recommendations, bad-zone spans, sensor health) + bassinet state transitions. Powers the Air Quality tab. |
+| `/api/air-quality` | GET | `?hours=N` (clamped 1–720). Reads the AirGradient logger DB (path via `AIRGRADIENT_DB_PATH`, defaults to `airgradient-logger/data/airgradient.db`) read-only via SQLite URI mode. Returns bucketed time-series points + latest snapshot + computed analysis (comfort score, statuses, alerts, insights, recommendations, bad-zone spans, sensor health) + bassinet state transitions. Powers the Air Quality tab. |
 
 ## Continuous Improvement Loop
 
@@ -287,7 +300,7 @@ Live at `http://localhost:5555`. Runs as a persistent launchd service.
 3. Correct    — edit eye state per-frame or per-block in dashboard; also
                 draw corrected face bboxes for IoU + bbox-impact analyses
 4. Retrain    — manual only (daily cron is disabled); click dashboard
-                button or run `monitor.py --retrain`
+                button or run `bilbo-monitor --retrain`
 5. Refresh    — after a successful retrain, the post-retrain chain runs
                 automatically: backfill_birdeye_primary (7 days by default)
                 → backfill_state → bbox_impact --force, so the dashboard
@@ -306,7 +319,7 @@ Live at `http://localhost:5555`. Runs as a persistent launchd service.
 
 **Training state:** PID-based, works across CLI/dashboard/cron. Auto-detects zombie processes.
 
-**Retraining is manual-only.** The daily `com.baby-monitor-retrain.plist` cron exists but should stay disabled — cloud-API labels aren't trusted training signal without manual review first. Retrain when a batch of user corrections is ready.
+**Retraining is manual-only.** There is no scheduled retrain — cloud-API labels aren't trusted training signal without manual review first. Retrain when a batch of user corrections is ready (dashboard button, `bilbo-monitor --retrain`, or `docker compose run --rm` against `bilbo:latest` with `bilbo-train`).
 
 ## Design Decisions
 
@@ -333,7 +346,7 @@ The physics matched the hypothesis: `eyes_open` recognition needs enough pixels 
 python scripts/promote_experiment.py --tag eye_state_224_legacy
 ```
 
-No retraining, no data migration, no source-file edits. The promotion script handles every step of the flip (12 steps: snapshot, copy, meta update, SQL patch, manifest edit, backfill, reinfer, launchd reload) and always preserves the current prod as a new rollback snapshot before overwriting, which means rollback-of-rollback is also a single command. See `docs/shadow-to-prod-playbook.md` for the full lifecycle.
+No retraining, no data migration, no source-file edits. The promotion script handles every step of the flip (snapshot, copy, meta update, SQL patch, manifest edit, backfill, reinfer) and always preserves the current prod as a new rollback snapshot before overwriting, which means rollback-of-rollback is also a single command. See `docs/shadow-to-prod-playbook.md` for the full lifecycle.
 
 **Under the hood** the pipeline's input resolution is read from `pipeline/models/latest/meta.json`, a sidecar written alongside the weights. `config.EYE_STATE_INPUT_SIZE` reads that file on import — a fallback default of 224 kicks in if the sidecar is missing. This means: (a) flipping is a file-write, not a source edit, (b) rollback via the `latest` symlink automatically reverts the crop size because the meta.json in the old version dir is self-contained, (c) `train_classifiers.py` must write meta.json into every version dir it creates — otherwise flipping the symlink would silently revert the runtime to 224. That last invariant is enforced in the training script now (was added 2026-04-14 after a retrain briefly regressed prod by stripping the sidecar).
 
@@ -408,11 +421,11 @@ Yesterday's monitoring outage (2026-04-16: 16h44m gap) was invisible until the n
 
 | Approach | Detects | Doesn't detect | Cost |
 |----------|---------|----------------|------|
-| In-monitor self-check | Single capture failures | Monitor crashed entirely; launchd not firing | Free (already in pipeline) |
-| **Independent launchd job (chosen)** | RTSP outage, monitor crash, launchd stall | Laptop off/unplugged | Tiny (one SQL `MAX(timestamp)` query every 2 min) |
+| In-monitor self-check | Single capture failures | Monitor crashed entirely; container restart loop hides it | Free (already in pipeline) |
+| **Capture-container background thread (chosen)** | RTSP outage, monitor crash, capture loop stall | Host off / Docker daemon down | Tiny (one SQL `MAX(timestamp)` query every 2 min) |
 | Push-style cloud heartbeat | All of the above + laptop off | Cloud down | Higher (need a cloud endpoint) |
 
-**Decision:** Independent launchd job (`com.baby-monitor-watchdog`) running every 2 min. It reads the newest `entries.timestamp` from SQLite, and if it's older than `WATCHDOG_ALERT_AFTER_MIN` (default 5 min), it sends a Telegram alert. State machine in `data/watchdog-state.json` tracks `outage_started_at` / `last_alert_at` so a multi-hour outage gets one initial ping, one reminder per `WATCHDOG_REMINDER_AFTER_MIN` (default 60 min), and one "captures resumed" ping on recovery — no spam, but no silent multi-hour gaps either.
+**Decision:** Watchdog thread (`bilbo.watchdog.run_loop`) inside the capture container, running every 2 min. It reads the newest `entries.timestamp` from SQLite, and if it's older than `WATCHDOG_ALERT_AFTER_MIN` (default 5 min), it sends a Telegram alert. State machine in `data/watchdog-state.json` tracks `outage_started_at` / `last_alert_at` so a multi-hour outage gets one initial ping, one reminder per `WATCHDOG_REMINDER_AFTER_MIN` (default 60 min), and one "captures resumed" ping on recovery — no spam, but no silent multi-hour gaps either.
 
 The "laptop off" failure mode is left uncovered. The right fix for that is a push-style heartbeat to a cloud endpoint that alerts when it stops hearing from the monitor; out of scope for the current iteration. Mitigated separately by `pmset -a sleep 0 disksleep 0 autopoweroff 0 standby 0` so the laptop won't enter idle sleep while plugged in.
 
@@ -434,7 +447,7 @@ The primary `state` field was originally derived per-frame from the eye-state cl
 
 **One-time backfill.** `scripts/backfill_state.py` walks the DB in timestamp order and rewrites `state` + `rawState` on every entry using the same smoothing function. Non-destructive to `eyeState`, `eye_state_edited`, and all user corrections. Run once after deploying the smoothing change, or any time the window/run thresholds are adjusted.
 
-**Upstream companion: primary-field inference backfill.** The state smoother reads `eyeState` from history. Pre-BIRDEYE-flip cloud-primary frames don't have an `eyeState` because the cloud API never emitted one, so smoothing those frames just carries forward Unknown. `scripts/backfill_birdeye_primary.py --start <ISO-ts>` re-runs BIRDEYE with the currently deployed weights over a time window and writes the new predictions into the **primary** `eyeState` / `faceBbox` / `presenceConfidence` / `eyeConfidence` fields (and also refreshes the `shadow` audit dict so it stays consistent). Corrected rows (`eye_state_edited = 1`) are skipped by default so user ground-truth labels are preserved. After running this, re-run `backfill_state.py` so the smoother re-fires over the refreshed eye-state signal. This is different from `monitor.py --backfill-shadow` which writes into the shadow audit dict *only* and leaves the primary fields (and therefore the smoother's input) untouched.
+**Upstream companion: primary-field inference backfill.** The state smoother reads `eyeState` from history. Pre-BIRDEYE-flip cloud-primary frames don't have an `eyeState` because the cloud API never emitted one, so smoothing those frames just carries forward Unknown. `scripts/backfill_birdeye_primary.py --start <ISO-ts>` re-runs BIRDEYE with the currently deployed weights over a time window and writes the new predictions into the **primary** `eyeState` / `faceBbox` / `presenceConfidence` / `eyeConfidence` fields (and also refreshes the `shadow` audit dict so it stays consistent). Corrected rows (`eye_state_edited = 1`) are skipped by default so user ground-truth labels are preserved. After running this, re-run `backfill_state.py` so the smoother re-fires over the refreshed eye-state signal. This is different from `bilbo-monitor --backfill-shadow` which writes into the shadow audit dict *only* and leaves the primary fields (and therefore the smoother's input) untouched.
 
 **Interaction with the wake alert.** The 2-of-3 wake confirmation in `alerts.check_wake_confirmation` is now strictly weaker than the smoothing rule — a smoothed `Awake` already implies at least 4 consecutive `eyes_open` in the look-back window. The wake check is kept because it still enforces the prior-Asleep gate and the cooldown, but the quorum itself is trivially satisfied on any Asleep→Awake transition. Not a bug, just a note for anyone reading the alert path and wondering why it looks redundant.
 
@@ -568,7 +581,7 @@ One row per training run — model provenance and metrics.
 | label_sources | JSON | {"cloud-api": 530, "correction": 35, "audit": 10} |
 | split | JSON | {"train": 435, "val": 99, "test": 41} |
 | config | JSON | Hyperparameters (epochs, lr, batch_size, etc.) |
-| metrics | JSON | Per-classifier sub-dict. Val-set fields (`val_accuracy`, `best_macro_f1`, `best_val_loss`, `per_class`, `train_total`, `val_total`) are optimistically biased because val is used for best-epoch selection. Held-out test fields (`test_total`, `test_accuracy`, `test_macro_f1`, `test_per_class`) describe the saved best checkpoint on an unseen split and are the honest generalization numbers. Face detector carries `test_mean_iou` + `test_conf_accuracy` instead of `test_accuracy`. Train/val/test splits are deterministic via `time_block_split` with SEED=42 and 30-min blocks. See `skills/baby-monitor/SKILL.md` for the full schema. |
+| metrics | JSON | Per-classifier sub-dict. Val-set fields (`val_accuracy`, `best_macro_f1`, `best_val_loss`, `per_class`, `train_total`, `val_total`) are optimistically biased because val is used for best-epoch selection. Held-out test fields (`test_total`, `test_accuracy`, `test_macro_f1`, `test_per_class`) describe the saved best checkpoint on an unseen split and are the honest generalization numbers. Face detector carries `test_mean_iou` + `test_conf_accuracy` instead of `test_accuracy`. Train/val/test splits are deterministic via `time_block_split` with SEED=42 and 30-min blocks. See `CLAUDE.md` for the full schema. |
 | models_trained | TEXT | "all", "presence", "eye-state" |
 | duration_seconds | REAL | Wall-clock training duration (NULL for runs before 2026-04-09) |
 | started_at | TEXT | When training began (ISO 8601 UTC) |
@@ -611,6 +624,6 @@ All data files are gitignored:
 - `venv/` — Python 3.12 virtualenv
 - `pipeline/models/` — versioned model checkpoints (last 20 kept)
 - `pipeline/output/` — training data, validated face crops
-- `skills/airgradient-logger/data/airgradient.db` — AirGradient time-series readings (one row per minute)
-- `skills/airgradient-logger/logs/` — logger stdout/stderr from the launchd job
-- `skills/airgradient-logger/venv/` — Python virtualenv for the logger
+- `airgradient-logger/data/airgradient.db` — AirGradient time-series readings (one row per minute)
+- `airgradient-logger/logs/` — logger stdout/stderr
+- `airgradient-logger/venv/` — Python virtualenv for the logger

@@ -1,1 +1,0 @@
-# Baby monitor library package

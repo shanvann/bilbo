@@ -5,55 +5,50 @@
 
 # Assistant runtime (legacy — kept out of the repo even though the agent files are gone)
 memory/
+MEMORY.md
 
-# Baby monitor data (frames, logs, CSVs)
-skills/baby-monitor/data/
+# Runtime data (SQLite DB, JSONL backup, frames, logs, alert state, recap videos)
+data/
 
-# AirGradient logger runtime artifacts (DB + logs + venv)
-skills/airgradient-logger/data/
-skills/airgradient-logger/logs/
-skills/airgradient-logger/venv/
+# AirGradient logger runtime artifacts
+airgradient-logger/data/
+airgradient-logger/logs/
+airgradient-logger/venv/
+
+# baby-report (sibling package) venv
+report/venv/
+
+# Model weights / training output
+pipeline/models/
+pipeline/output/
+yolov8n.pt
+*.pt
+*.onnx
 
 # Python
 __pycache__/
 *.pyc
 .venv/
+venv/
 *.egg-info/
+build/
+dist/
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Temp files from media/screenshots
+# Temp files from media/screenshots (PWA icons + README hero are explicit exceptions below)
 *.jpg
 *.png
 *.gif
 
 # PWA app icons are checked in (regenerated from icon.svg via qlmanage)
-!skills/baby-monitor/dashboard/static/icons/*.png
+!dashboard/static/icons/*.png
 
 # README hero image
 !docs/*.png
 
-# Skill packages
-*.skill
-
-# Dashboard venv
-skills/baby-monitor/dashboard/.venv/
-
-# Baby monitor venvs and model weights
-skills/baby-monitor/venv/
-skills/baby-monitor/scripts/venv/
-skills/baby-report/venv/
-skills/baby-monitor/pipeline/models/
-skills/baby-monitor/pipeline/output/
-skills/baby-monitor/pipeline/.venv/
-skills/baby-monitor/yolov8n.pt
-*.pt
-*.onnx
-
 # Claude Code (keep settings.json for hooks, ignore local overrides)
 .claude/*
 !.claude/settings.json
-
-MEMORY.md

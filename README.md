@@ -138,6 +138,7 @@ for the full CLI cheatsheet.
 - [`docs/code-tour.md`](docs/code-tour.md) — per-file map of `src/bilbo/`, full CLI cheatsheet, sibling `report/` and `airgradient-logger/` notes.
 - [`docs/shadow-to-prod-playbook.md`](docs/shadow-to-prod-playbook.md) — how to ship a new eye-state model. **Required reading before shipping a classifier change.**
 - [`docs/refactor-worklog.md`](docs/refactor-worklog.md) — the 2026-05 OpenClaw-skill → Docker-package refactor.
+- [`docs/cutover-playbook.md`](docs/cutover-playbook.md) — step-by-step launchd → Docker cutover, with risks, validation, and rollback paths.
 - [`CLAUDE.md`](CLAUDE.md) — orientation for Claude Code working with this repo.
 
 ## Dashboard

@@ -96,6 +96,459 @@ beyond what's tabulated here, the source is the truth.
 | POST   | `/api/v1/recap/generate`   | `{date?, fps?, force?}` | Stitches a day's frames into an MP4 via `ffmpeg`. Idempotent unless `force=true`. Returns metadata + on-disk name. |
 | GET    | `/api/v1/recap/video`      | `name=<filename>`       | Streams the recap MP4. `send_file` with `conditional=True` so the `<video>` element's Range requests work. |
 
+## Response schemas
+
+Field type syntax: `string`, `int`, `float`, `bool`, `array<X>`, `object`. A
+trailing `?` marks an optional or nullable field. Nested objects are shown
+indented. Where a route has a non-200 error branch, that branch is shown
+below the 200 shape.
+
+### `GET /healthz`
+```
+ok: bool
+```
+
+### `GET /api/v1/status`
+```
+display:              string             # human label, e.g. "Asleep"
+icon:                 string             # absent | asleep | awake | unknown
+duration:             string             # "Nh MMm" or "MMm"
+durationSeconds:      int
+timestamp:            string             # ISO 8601 UTC of last entry
+frame:                string             # frame path
+position:             string?
+alerts:               array<object>
+captureMode:          string?
+secondsSinceCapture:  int?
+```
+404 when the DB is empty: `{ error: string }`.
+
+### `GET /api/v1/timeline`
+```
+entries: array<{
+  timestamp:                string
+  babyPresent:              bool
+  state:                    string           # smoothed: Asleep | Awake | FallingAsleep | Unknown | not_present
+  eyeState:                 string?          # eyes_open | eyes_closed | not_scoreable | not_present
+  eyeStateEdited:           bool             # true if user-corrected
+  eyeStateCorrectedAt:      string?
+  detectionMethod:          string           # birdeye | pixel-diff | vision-api | openai-vision
+  shadowModelVersion:       string?
+  shadowBirdeyeState:       string?
+  shadowEyeState:           string?
+  shadowPresenceConfidence: float?
+  shadowEyeConfidence:      float?
+  shadowFallback:           string?          # reason BIRDEYE deferred to cloud
+  headPosition:             { x: float, y: float }?
+  faceBbox:                 { x: float, y: float, w: float, h: float }?
+  faceConfidence:           float?
+  faceBboxCorrected:        bool
+  retrainAgreed:            bool?
+  reviewed:                 bool
+  frame:                    string
+  alerts:                   array<object>
+  experiments:              object?
+}>
+feeds: array<{ timestamp, type, condition, location, notes }>
+```
+
+### `GET /api/v1/sleep-stats`
+```
+days: array<{
+  date:                  string             # YYYY-MM-DD (ET)
+  totalHours:            float
+  longestSleepHours:     float
+  longestBassinetHours:  float
+  stretches:             array<{ start, end, hours }>
+}>
+```
+
+### `GET /api/v1/bassinet-daily`
+```
+days: array<{
+  date:                 string
+  asleepHours:          float
+  awakeHours:           float
+  fallingAsleepHours:   float
+  unknownInHours:       float
+  inHours:              float
+  outHours:             float
+  inPct:                float
+}>
+```
+
+### `GET /api/v1/sleep-trend`
+```
+slotMinutes:   int                          # 15
+slotsPerNight: int                          # 76
+startHour:     int                          # 16 (4 PM)
+endHour:       int                          # 11 (11 AM next day)
+nights: array<{
+  date:  string
+  label: string
+  cells: array<string>                      # asleep | awake | out | unknown | none
+}>
+p50: {                                      # 50th percentile night
+  label: string
+  cells: array<{
+    cat:   string
+    share: { asleep: float, awake: float, out: float, unknown: float }
+  }>
+}
+p90: { ... }                                # same shape as p50
+```
+
+### `GET /api/v1/feeds`
+```
+feeds: array<{ start, end, duration, condition, location, endCondition, notes }>
+count: int
+```
+
+### `GET /api/v1/diapers`
+```
+diapers: array<{ start, color, consistency, contents }>
+count: int
+```
+
+### `GET /api/v1/events`
+```
+events: array<{
+  timestamp: string
+  type:      string                         # wake | asleep | feed | diaper | ...
+  duration?: string
+}>
+```
+
+### `POST /api/v1/update-entry`
+```
+ok: bool
+```
+On failure: `{ ok: false, error: string }` with status 400 (bad input) or 404 (timestamp not found).
+
+### `POST /api/v1/mark-reviewed`
+```
+ok:      bool
+updated: int
+```
+On failure: `{ error: string }` with status 400.
+
+### `POST /api/v1/run-inference`
+Success (200, body passed through from capture's `/infer`):
+```
+ok:                  bool
+shadow: {
+  birdeyeState:        string
+  eyeState:            string?
+  presenceConfidence:  float
+  eyeConfidence:       float?
+  fallback:            string?
+  birdeyeTimings:      { load, presence, total, ... }
+}
+faceBbox:            object?
+faceConfidence:      float?
+retrainAgreed:       bool?
+```
+Errors: 400 (missing timestamp), 502 (capture unreachable), 504 (timeout). All return `{ ok: false, error: string }`.
+
+### `GET /api/v1/training-status`
+```
+running:                  bool
+runStatus:                string             # running | idle | success | failed | aborted
+pid:                      int?
+containerId:              string?
+trigger:                  string?
+startedAt:                string?
+finishedAt:               string?
+exitCode:                 int?
+lastTrained:              string?
+version:                  string?            # deployed model version
+lastMetrics:              object?            # per-classifier metric snapshot
+lastLabelSources:         object?
+lastEntriesTotal:         int?
+lastDurationSeconds:      int?
+prevVersion:              string?
+prevMetrics:              object?
+pendingCorrections:       int
+totalCorrections:         int
+trainingDurationStats:    { count, avg_seconds, p99_seconds }?
+lastTrainedPerClassifier: object?
+```
+
+### `POST /api/v1/retrain`
+```
+ok:          bool
+containerId: string                         # short Docker ID
+```
+On failure: `{ ok: false, error: string }` with status 409 (already running).
+
+### `POST /api/v1/retrain/abort`
+```
+ok:     bool
+status: string                              # killed | finishing | ...
+```
+On failure: `{ error: string }` with status 404 (nothing running).
+
+### `GET /api/v1/pending-corrections`
+```
+corrections: array<{
+  id:                  int?
+  correctedAt:         string
+  originalTimestamp:   string
+  frame:               string?
+  originalState:       string?
+  correctedState:      string?
+  originalEyeState:    string?
+  correctedEyeState:   string?
+  originalPosition:    string?
+  correctedPosition:   string?
+  detectionMethod:     string?
+  source:              string                # ui | bbox-tool | ...
+}>
+count:            int
+lastTrained:      string?
+eyeStateChanges:  object                    # { "eyes_open → eyes_closed": int, ... }
+```
+
+### `POST /api/v1/correction/resolve`
+```
+ok:        bool
+id:        int
+eyeState:  string
+```
+On failure: `{ ok: false, error: string }` with status 400 / 404.
+
+### `POST /api/v1/correction/discard`
+```
+ok: bool
+id: int
+```
+On failure: `{ ok: false, error: string }` with status 400 / 404.
+
+### `GET /api/v1/system-usage`
+```
+asOf: string
+load: {
+  oneMin:      float
+  fiveMin:     float
+  fifteenMin:  float
+  cores:       int
+  ratio:       float                        # oneMin / cores
+  trend:       float                        # oneMin - fiveMin
+}
+memory: {
+  totalBytes:       int
+  freeBytes:        int
+  availableBytes:   int?
+  usedPct:          float?
+  cachedPct:        float?
+  freePct:          float?
+  cachedBytes:      int?                    # Linux only
+  activeBytes:      int?                    # macOS only
+  inactiveBytes:    int?                    # macOS only
+  wiredBytes:       int?                    # macOS only
+  compressedBytes:  int?                    # macOS only
+}
+disk: array<{ label, path, totalBytes, freeBytes, usedPct }>
+babyMonitor: {
+  sizes: { dataDirBytes, framesDirBytes, modelsDirBytes, monitorDbBytes }
+  processes: array<ProcessRow>
+}
+topProcesses: array<ProcessRow>             # top 8 by CPU
+topByMemory:  array<ProcessRow>             # top 8 by RSS
+
+ProcessRow = {
+  pid:      string                          # container short id post-cutover
+  cpuPct:   float
+  memPct:   float
+  rssKb:    int
+  etime:    string                          # ps-style, e.g. "01:23" or "1-04:05:06"
+  command:  string                          # container image
+  script:   string                          # container name
+}
+```
+
+### `GET /api/v1/pipeline-health`
+```
+asOf: string
+lastEntry: {
+  timestamp:   string
+  ageSeconds:  int
+  freshness:   string                       # fresh | stale | down
+}?
+captures24h: {
+  actual:       int
+  nominal:      int
+  intervalSec:  int
+}
+gaps24h: {
+  thresholdMin:    int
+  count:           int
+  totalMissedMin:  float
+  items:           array<{ start, end, minutes }>   # up to 20, newest first
+  ongoing:         { start, minutes }?
+}
+detectionMethods24h: array<{ method, count, pct }>
+cloudCalls24h: {
+  attempted:        int
+  succeeded:        int
+  failed:           int
+  quotaExhausted:   int
+  lastFailure:      { timestamp, reason }?
+}
+watchdog: {
+  outageStartedAt:  string?
+  outageActive:     bool
+  lastAlertAt:      string?
+  lastAlertKind:    string?
+}?
+```
+
+### `GET /api/v1/classification-rate`
+```
+asOf:               string
+hours:              int
+bucketMin:          int
+nominalPerBucket:   int
+buckets: array<{
+  start:           string
+  endExclusive:    string
+  birdeye:         int
+  "pixel-diff":    int
+  "cloud-success": int
+  "cloud-failed":  int
+  other:           int
+  total:           int
+}>
+```
+
+### `GET /api/v1/safety-stats`
+```
+hours:                  float
+shadowTotal:            int
+deployedVersion:        string?
+latestTrainedVersion:   string?
+rolledBack:             bool
+groundTruth: { total, reviewed, corrected }
+presence:  { birdeyeVsGT: Panel?, cloudVsGT: Panel? }
+eyeState:  { birdeyeVsGT: Panel?, cloudVsGT: Panel? }
+faceDetection: object
+experiments:   object                       # keyed by experiment name
+
+Panel = {
+  confusion: object                         # { trueClass: { predClass: count } }
+  perClass:  object                         # { class: { precision, recall, f1, support } }
+  macroF1:   float
+  accuracy:  float
+  total:     int
+}
+```
+
+### `GET /api/v1/monitor-stats`
+```
+hours:        float
+total:        int
+methods: { birdeye: int, cloud_api: int, pixel_diff: int }
+birdeyeRate:  float
+confidence: {
+  presence: { avg, min, max, p50, p99 }?
+  eye:      { avg, min, max, p50, p99 }?
+}
+timing:        { avg, min, max, p50, p99 }?
+cloudModels:   object                       # { modelName: count }
+cost:          { apiCalls, apiAvoided, estCost, estSaved }
+gaps:          int                          # gaps > 10 min in window
+birdeyeVersions: object                     # { version: count }
+shadow: {
+  total:          int
+  agreed:         int
+  disagreed:      int
+  agreementRate:  float?
+}
+```
+
+### `GET /api/v1/eye-state-daily-metrics`
+```
+days: int
+rows: array<{
+  date:        string                       # YYYY-MM-DD (ET)
+  total:       int
+  eyes_open:   { precision, recall, f1, support } | { precision: null, recall: null, f1: null, support: 0 }
+  eyes_closed: { precision, recall, f1, support } | { precision: null, recall: null, f1: null, support: 0 }
+}>
+```
+
+### `GET /api/v1/pipeline-history`
+```
+days: int
+rows: array<{
+  date:       string                        # YYYY-MM-DD (ET)
+  pixelDiff:  { count, pct }
+  birdeye:    { count, pct }
+  cloudApi:   { count, pct }
+  captures:   int
+  cost:       float                         # estimated USD
+  versions:   array<{ version, count, pct }>  # BIRDEYE versions, desc by count
+}>
+```
+
+### `GET /api/v1/air-quality`
+```
+hours:    int
+points:   array<{ t, co2, pm25, temp, rh, tvoc_index }>   # ≤ 360 buckets
+latest:   { t, co2?, pm25?, temp?, rh?, tvoc_index? }?
+statuses: {
+  co2:      { value, level, headline, detail, unit }?
+  pm25:     ...?
+  temp:     ...?
+  humidity: ...?
+  tvoc:     ...?
+}?
+score: {
+  score:    float                           # 0-100
+  label:    string
+  drivers:  array<{ metric, label, sub, weight }>
+}?
+alerts:           array<{ severity, metric, value, unit, t, action }>
+insights:         array<{ id, title, body }>
+recommendations:  array<{ id, icon, title, body }>
+badZones: {
+  co2:        array<{ tStart, tEnd }>
+  pm25:       array<{ tStart, tEnd }>
+  temp:       array<{ tStart, tEnd }>
+  rh:         array<{ tStart, tEnd }>
+  tvoc_index: array<{ tStart, tEnd }>
+}
+health: {
+  lastReading:       string?
+  secondsSinceLast:  int?
+  samples:           int
+  expected:          int?
+  missingPct:        float?
+  verdict:           string                 # ok | no_data | stale | gappy
+}
+transitions: array<object>?
+note:        string?                        # set when DB is missing or window empty
+```
+
+### `GET /api/v1/frame`
+JPEG binary. `400` on empty `path`, `404` on missing file (after `FRAMES_DIR/basename` fallback), `403` reserved (currently unreachable post-fallback fix).
+
+### `POST /api/v1/recap/generate`
+```
+status:        string                       # "ready" | "empty"
+cached:        bool?
+date:          string
+fps:           int
+frame_count:   int
+duration_sec:  float?
+size_bytes:    int?
+video_url:     string?
+```
+On failure: `{ error: string }` with status 400 (bad fps/date), 404 (no frames), 500/504 (ffmpeg).
+
+### `GET /api/v1/recap/video`
+MP4 binary. `send_file(..., conditional=True)` so HTTP Range requests work for `<video>` seeking. `404` if `name` doesn't resolve to a generated recap.
+
 ## Auth
 
 The control-api itself trusts whatever reaches it on `:5556`. In

@@ -2572,7 +2572,7 @@ function _sysProcessTable(rows, opts) {
 // Pipeline Health (System tab)
 // ---------------------------------------------------------------------------
 // Backed by /api/pipeline-health. Surfaces capture freshness, gap timeline,
-// detection-method mix, launchd job state, and the watchdog's outage view.
+// detection-method mix, and the watchdog's outage view.
 // Polled every 10s on the same cadence as System Load.
 async function loadPipelineHealth() {
   try {
@@ -2615,7 +2615,6 @@ function _renderPipelineHealth(data) {
   const gaps = data.gaps24h || {};
   const methods = data.detectionMethods24h || [];
   const cloud = data.cloudCalls24h || {};
-  const jobs = data.launchdJobs || [];
   const wd = data.watchdog;
 
   let html = '';
@@ -2645,7 +2644,7 @@ function _renderPipelineHealth(data) {
   html += '<div class="sys-tile-value ' + covClass + '">'
     + (caps.actual != null ? caps.actual : '—')
     + ' <span class="sys-tile-sub">/ ' + (caps.nominal || '—') + '</span></div>';
-  html += '<div class="sys-tile-note" title="Actual rows in the entries table over the last 24 hours vs. the nominal count given the launchd interval.">'
+  html += '<div class="sys-tile-note" title="Actual rows in the entries table over the last 24 hours vs. the nominal count given the capture interval.">'
     + (cov != null ? cov.toFixed(0) + '% of nominal' : '—')
     + ' · 1 frame / ' + (caps.intervalSec || 60) + 's'
     + '</div>';
@@ -2709,44 +2708,6 @@ function _renderPipelineHealth(data) {
   html += '</div>';
 
   html += '</div>'; // /sys-headline-row
-
-  // --- launchd jobs ---
-  html += '<div class="sys-section-label">launchd jobs</div>';
-  if (jobs.length === 0) {
-    html += '<div class="safety-empty" style="padding:4px 0">'
-      + 'launchctl unavailable — can\'t verify scheduled job state.'
-      + '</div>';
-  } else {
-    html += '<table class="sys-proc-table"><thead><tr>';
-    html += '<th>Label</th><th>Kind</th><th>State</th><th>PID</th><th>Last exit</th>';
-    html += '</tr></thead><tbody>';
-    for (const j of jobs) {
-      // Persistent jobs are healthy when PID > 0. Scheduled jobs are
-      // healthy when lastExit == 0 — they're *expected* to have no PID
-      // most of the time because launchd re-launches them per interval.
-      let state, stateCls;
-      if (j.kind === 'persistent') {
-        state = j.pid ? 'running' : 'down';
-        stateCls = j.pid ? 'sys-proc-warm' : 'sys-proc-hot';
-      } else {
-        if (j.lastExit === 0) {
-          state = j.pid ? 'running' : 'idle (ok)';
-          stateCls = '';
-        } else {
-          state = 'last exit ' + (j.lastExit != null ? j.lastExit : '?');
-          stateCls = 'sys-proc-hot';
-        }
-      }
-      html += '<tr class="' + stateCls + '">';
-      html += '<td><code>' + j.label + '</code></td>';
-      html += '<td>' + j.kind + '</td>';
-      html += '<td>' + state + '</td>';
-      html += '<td class="num">' + (j.pid != null ? j.pid : '—') + '</td>';
-      html += '<td class="num">' + (j.lastExit != null ? j.lastExit : '—') + '</td>';
-      html += '</tr>';
-    }
-    html += '</tbody></table>';
-  }
 
   // --- Watchdog state ---
   html += '<div class="sys-section-label">Watchdog</div>';

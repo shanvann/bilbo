@@ -136,6 +136,7 @@ for the full CLI cheatsheet.
 - [`docs/database-schema.md`](docs/database-schema.md) — full column reference for `entries`, `corrections`, `training_runs`, `state`.
 - [`docs/training.md`](docs/training.md) — corrections → retrain → re-inference loop, model versioning, post-retrain chain.
 - [`docs/code-tour.md`](docs/code-tour.md) — per-file map of `src/bilbo/`, full CLI cheatsheet, sibling `report/` and `airgradient-logger/` notes.
+- [`docs/api.md`](docs/api.md) — HTTP API reference: every `/api/v1/*` route, its query/body, and which `bilbo.api.*` function backs it.
 - [`docs/shadow-to-prod-playbook.md`](docs/shadow-to-prod-playbook.md) — how to ship a new eye-state model. **Required reading before shipping a classifier change.**
 - [`docs/refactor-worklog.md`](docs/refactor-worklog.md) — the 2026-05 OpenClaw-skill → Docker-package refactor.
 - [`docs/cutover-playbook.md`](docs/cutover-playbook.md) — step-by-step launchd → Docker cutover, with risks, validation, and rollback paths.
@@ -159,7 +160,7 @@ Tab and panel breakdown:
 10. **Recent Events** (Events) — state transitions
 11. **Air Quality** — Hero snapshot cards, Baby Comfort Score (0–100 weighted composite), alerts, insights, recommendations, trend charts with bassinet state-change vlines
 
-REST API: the dashboard reverse-proxies `/api/*` to `control-api:5556/api/v1/*`. Every route is documented as a `bilbo.api.*` Python function — see [docs/code-tour.md](docs/code-tour.md) for the module list.
+REST API: the dashboard reverse-proxies `/api/*` to `control-api:5556/api/v1/*`. See [docs/api.md](docs/api.md) for the route reference; the underlying `bilbo.api.*` modules are listed in [docs/code-tour.md](docs/code-tour.md).
 
 ## Data (not in repo)
 

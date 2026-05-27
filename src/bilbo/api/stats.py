@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import csv
 import json
-import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -596,64 +595,11 @@ def pipeline_history(*, days: int = 14) -> dict:
 # Pipeline health + classification-rate (the System tab)
 # ---------------------------------------------------------------------------
 
-def _parse_launchctl_list_baby_monitor() -> list[dict]:
-    """Parse `launchctl list` rows for baby-monitor jobs.
-
-    Each row is `<pid>\\t<lastExit>\\t<label>`. Returns an empty list if
-    launchctl isn't on PATH or returned an error.
-    """
-    try:
-        proc = subprocess.run(
-            ["launchctl", "list"], capture_output=True, text=True, timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return []
-    if proc.returncode != 0:
-        return []
-
-    kinds = {
-        "com.baby-monitor": "scheduled",
-        "com.baby-monitor-watchdog": "scheduled",
-        "com.baby-monitor-dashboard": "persistent",
-        "com.baby-monitor-retrain": "scheduled",
-    }
-
-    jobs: list[dict] = []
-    for line in proc.stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 3:
-            continue
-        pid_str, exit_str, label = parts[0], parts[1], parts[2]
-        if label not in kinds:
-            continue
-        try:
-            last_exit = int(exit_str)
-        except ValueError:
-            last_exit = None
-        pid = None
-        if pid_str.isdigit():
-            pid = int(pid_str)
-        jobs.append({
-            "label": label,
-            "kind": kinds[label],
-            "pid": pid,
-            "lastExit": last_exit,
-        })
-    order = [
-        "com.baby-monitor",
-        "com.baby-monitor-watchdog",
-        "com.baby-monitor-dashboard",
-        "com.baby-monitor-retrain",
-    ]
-    jobs.sort(key=lambda j: order.index(j["label"]) if j["label"] in order else 99)
-    return jobs
-
-
 def pipeline_health() -> dict:
     """Operational health of the baby-monitor capture pipeline.
 
     Surfaces capture freshness, gap timeline, detection-method mix,
-    launchd job state, and the watchdog's view of the current outage.
+    cloud-call volume, and the watchdog's view of the current outage.
     """
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=24)
@@ -780,8 +726,6 @@ def pipeline_health() -> dict:
         "lastFailure": last_failure,
     }
 
-    launchd_jobs = _parse_launchctl_list_baby_monitor()
-
     watchdog: dict | None = None
     if WATCHDOG_STATE_FILE.is_file():
         try:
@@ -812,7 +756,6 @@ def pipeline_health() -> dict:
         },
         "detectionMethods24h": detection_methods,
         "cloudCalls24h": cloud_calls,
-        "launchdJobs": launchd_jobs,
         "watchdog": watchdog,
     }
 

@@ -22,7 +22,7 @@ from typing import Any, Iterable, Mapping, Optional
 import requests
 
 
-DEFAULT_URL = "http://192.168.x.x/measures/current"
+DEFAULT_URL = "http://airgradient.local/measures/current"
 DEFAULT_DB_PATH = "./airgradient.db"
 DEFAULT_POLL_SECONDS = 60
 HTTP_TIMEOUT_SECONDS = 10

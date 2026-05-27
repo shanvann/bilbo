@@ -119,7 +119,7 @@ charts.
 
 ```bash
 cd airgradient-logger
-AIRGRADIENT_URL=http://192.168.x.x/measures/current \
+AIRGRADIENT_URL=http://airgradient.local/measures/current \
   DB_PATH=data/airgradient.db \
   venv/bin/python airgradient_logger.py     # foreground
 

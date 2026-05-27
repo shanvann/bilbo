@@ -19,7 +19,7 @@ Before running the logger, confirm the AirGradient is reachable and returning
 JSON:
 
 ```bash
-curl -s http://192.168.x.x/measures/current | python -m json.tool
+curl -s http://airgradient.local/measures/current | python -m json.tool
 ```
 
 If that prints a JSON object with fields like `rco2`, `atmp`, `rhum`, `pm02`,
@@ -42,7 +42,7 @@ Configuration via environment variables:
 
 | Variable          | Default                                | Notes                       |
 | ----------------- | -------------------------------------- | --------------------------- |
-| `AIRGRADIENT_URL` | `http://192.168.x.x/measures/current` | Full URL including path     |
+| `AIRGRADIENT_URL` | `http://airgradient.local/measures/current` | Full URL including path |
 | `DB_PATH`         | `./airgradient.db`                     | SQLite file path            |
 | `POLL_SECONDS`    | `60`                                   | Seconds between polls       |
 | `LOG_LEVEL`       | `INFO`                                 | Set `DEBUG` for verbose     |
@@ -61,8 +61,8 @@ python airgradient_logger.py
 Two reliable ways to address the device on your LAN:
 
 1. **DHCP reservation (preferred for headless setups).** Reserve the
-   AirGradient's MAC to a fixed IP in your router (e.g. `192.168.x.x`). Robust
-   to mDNS quirks on Windows / VLAN-segmented networks.
+   AirGradient's MAC to a fixed IP in your router. Robust to mDNS quirks
+   on Windows / VLAN-segmented networks.
 2. **mDNS hostname.** Most AirGradient firmware advertises something like
    `airgradient_<id>.local`. With Bonjour (macOS) or `avahi-daemon` (Linux), and
    a network that doesn't block multicast, you can use

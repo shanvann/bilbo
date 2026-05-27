@@ -8,7 +8,7 @@ Type=simple
 User=airgradient
 Group=airgradient
 WorkingDirectory=/opt/airgradient-logger
-Environment=AIRGRADIENT_URL=http://192.168.x.x/measures/current
+Environment=AIRGRADIENT_URL=http://airgradient.local/measures/current
 Environment=DB_PATH=/var/lib/airgradient/airgradient.db
 Environment=POLL_SECONDS=60
 ExecStart=/opt/airgradient-logger/venv/bin/python /opt/airgradient-logger/airgradient_logger.py

@@ -15,7 +15,6 @@ stack.
 - **Tracks sleep state** — Asleep, Awake, FallingAsleep, Unknown — via on-device **BIRDEYE** (3-stage MobileNetV3-Small cascade: presence → face detection → eye-state). A cloud API (GPT-4o) is called only when BIRDEYE can't find a face or has low confidence (~1–2% of non-empty frames). The `shadow` sub-dict and `shadow_birdeye_*` columns are an immutable audit trail of what the model said per frame, separate from the user-correctable primary fields.
 - **Detects wake-ups and sleep-onset** — confirms by checking the last 3 entries (2-of-3 agreeing), then sends a Telegram alert. Wake alerts include feedback buttons; asleep alerts fire only on awake→asleep transitions (skipped on placed-already-asleep).
 - **Capture watchdog** — runs as a background thread inside the capture container (every 2 min) and pings Telegram if no new frame has been written in `WATCHDOG_ALERT_AFTER_MIN` minutes. Catches RTSP outages, monitor crashes, container restarts.
-- **Safety alerts** — immediate notification if baby is pressed against the bassinet side.
 - **Dashboard** — live camera feed, timeline, frame-by-frame review with eye state correction, block-level labeling, model performance metrics, training stats, retrain button.
 - **Continuous improvement** — corrections from the dashboard feed retraining. Model versions are tracked with metrics, rollback support, and post-retrain re-inference. See [docs/training.md](docs/training.md).
 - **SQLite storage** — indexed queries; JSONL kept as append-only backup. See [docs/database-schema.md](docs/database-schema.md).

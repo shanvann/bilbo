@@ -2534,8 +2534,7 @@ function _renderSystemUsage(data) {
   html += '<div class="sys-section-label">Baby-monitor processes</div>';
   if (bmProcs.length === 0) {
     html += '<div class="safety-empty" style="padding:4px 0">'
-      + 'None of the known baby-monitor scripts are running right now. '
-      + '(Expected: dashboard/app.py is always up; monitor.py is ephemeral per 1-min tick.)'
+      + 'No bilbo containers visible. Check that the Docker socket is reachable from control-api.'
       + '</div>';
   } else {
     html += _sysProcessTable(bmProcs, { showScript: true });

@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """Machine-usage snapshot for the dashboard's System Load panel.
 
-Gathers load average, CPU cores, memory pressure, disk usage (root +
-workspace), baby-monitor data-dir sizes, and the top CPU-consuming
-processes — with baby-monitor-related processes split out so the UI can
-highlight them (retrain, monitor tick, backfill, bbox_impact, watchdog).
-
-Pure stdlib — no psutil dependency — so it runs in the minimal dashboard
-venv without adding to requirements.
+Gathers load average, CPU cores, memory pressure, disk usage, and a
+per-container view of the bilbo stack (CPU%, RSS, uptime) via the
+Docker SDK. Pre-Docker layout used host `ps` + `vm_stat` (macOS); both
+paths are kept for host-dev fallback when the Docker socket isn't
+reachable.
 
 Run as a CLI for an on-terminal snapshot:
-    python dashboard/system_usage.py           # human-readable
-    python dashboard/system_usage.py --json    # raw JSON (for debugging)
+    python -m bilbo.api.system            # human-readable
+    python -m bilbo.api.system --json     # raw JSON (for debugging)
 """
 import json
 import os
@@ -30,18 +28,6 @@ from bilbo.config import BILBO_ROOT, DATA_DIR, MODELS_DIR  # noqa: E402
 _DU_CACHE_TTL_SEC = 60
 _du_cache: dict[str, tuple[float, int | None]] = {}
 
-BABY_MONITOR_KEYWORDS = (
-    "train_classifiers",
-    "monitor.py",
-    "dashboard/app.py",
-    "backfill_birdeye_primary",
-    "backfill_state",
-    "bbox_impact",
-    "experiments_backfill",
-    "watchdog.py",
-    "run_single_inference",
-)
-
 
 def _load() -> dict:
     """Load average + cores. Trend = 1-min minus 5-min."""
@@ -58,19 +44,43 @@ def _load() -> dict:
 
 
 def _memory() -> dict:
-    """Memory snapshot via `vm_stat` (macOS) — page counts → bytes.
+    """Memory snapshot. Reads /proc/meminfo on Linux, falls back to vm_stat on macOS.
 
-    `usedPct` is the *memory pressure* metric — `(active + wired +
-    compressed) / total`. macOS aggressively pins file-cache pages in the
-    "inactive" pool, which the kernel reclaims the moment any allocator
-    needs them; treating those as "used" makes a healthy 8 GB box look
-    99 % full and obscures real pressure. `cachedPct` and `freePct` are
-    surfaced alongside so the breakdown adds up to 100 %.
-
-    Reconciliation note: a process's RSS (which `ps` reports) excludes
-    file cache entirely, so summing `memPct` across processes will only
-    approach `usedPct` — never `(usedPct + cachedPct)` — by design.
+    `usedPct` is a pressure metric — `(MemTotal - MemAvailable) / MemTotal`
+    on Linux, or `(active + wired + compressed) / total` on macOS. Both
+    intentionally treat reclaimable file cache as available so a healthy
+    box doesn't peg near 100 % from cache pinning. `cachedPct` and
+    `freePct` are surfaced alongside.
     """
+    if Path("/proc/meminfo").exists():
+        try:
+            meminfo: dict[str, int] = {}
+            for line in Path("/proc/meminfo").read_text().splitlines():
+                key, _, rest = line.partition(":")
+                parts = rest.strip().split()
+                if not parts:
+                    continue
+                # values are in kB
+                meminfo[key] = int(parts[0]) * 1024
+        except OSError:
+            return {}
+        total = meminfo.get("MemTotal", 0)
+        if not total:
+            return {}
+        free = meminfo.get("MemFree", 0)
+        available = meminfo.get("MemAvailable", free)
+        cached = meminfo.get("Cached", 0) + meminfo.get("Buffers", 0) + meminfo.get("SReclaimable", 0)
+        used = total - available
+        return {
+            "totalBytes": total,
+            "freeBytes": free,
+            "availableBytes": available,
+            "cachedBytes": cached,
+            "usedPct": round(used / total * 100, 1),
+            "cachedPct": round(cached / total * 100, 1),
+            "freePct": round(free / total * 100, 1),
+        }
+    # macOS host-dev fallback.
     try:
         out = subprocess.run(
             ["vm_stat"], capture_output=True, text=True, timeout=5, check=False
@@ -110,12 +120,9 @@ def _memory() -> dict:
         "inactiveBytes": inactive_bytes,
         "wiredBytes": wired * page_size,
         "compressedBytes": compressed * page_size,
-        # Pressure metric — ignores reclaimable cache.
         "usedPct": round(used_bytes / total * 100, 1) if total else None,
-        # File cache + speculative pages — reclaimable on demand.
         "cachedPct": round(inactive_bytes / total * 100, 1) if total else None,
         "freePct": round(free_bytes / total * 100, 1) if total else None,
-        # Convenience: what an allocator effectively has access to.
         "availableBytes": free_bytes + inactive_bytes,
     }
 
@@ -176,76 +183,109 @@ def _baby_monitor_sizes() -> dict:
     }
 
 
-def _ps_full() -> list[dict]:
-    """Every process with pid/cpu/mem/rss/etime/full-command.
+_BILBO_CONTAINER_PREFIXES = ("bilbo-", "airgradient-")
 
-    Single ps invocation feeds both the top-N list and the baby-monitor
-    process classifier — running ps twice would double-count since the
-    numbers drift between calls.
+
+def _fmt_etime(seconds: float) -> str:
+    """ps-style elapsed time: D-HH:MM:SS / HH:MM:SS / MM:SS."""
+    s = int(seconds)
+    days, s = divmod(s, 86400)
+    hours, s = divmod(s, 3600)
+    mins, secs = divmod(s, 60)
+    if days:
+        return f"{days}-{hours:02d}:{mins:02d}:{secs:02d}"
+    if hours:
+        return f"{hours:02d}:{mins:02d}:{secs:02d}"
+    return f"{mins:02d}:{secs:02d}"
+
+
+def _container_stat(client, container, total_mem_bytes: int) -> dict:
+    """Snapshot a single container as a process-table row.
+
+    cpuPct / memPct math:
+      cpuPct  — Docker stats give per-container CPU usage in nanoseconds
+                and total system usage over the sampling window. Ratio
+                × online_cpus × 100 = `docker stats` CPU%.
+      memPct  — RSS / host total. Normalizing against host memory (not the
+                container limit) keeps the per-row % comparable to the
+                headline pressure metric.
     """
     try:
-        out = subprocess.run(
-            ["ps", "-axo", "pid,pcpu,pmem,rss,etime,command"],
-            capture_output=True, text=True, timeout=10, check=False,
-        ).stdout
+        s = client.api.stats(container.id, stream=False)
+    except Exception:
+        return {}
+    cpu = s.get("cpu_stats", {}) or {}
+    precpu = s.get("precpu_stats", {}) or {}
+    cpu_delta = cpu.get("cpu_usage", {}).get("total_usage", 0) - precpu.get("cpu_usage", {}).get("total_usage", 0)
+    system_delta = cpu.get("system_cpu_usage", 0) - precpu.get("system_cpu_usage", 0)
+    online_cpus = cpu.get("online_cpus") or len(cpu.get("cpu_usage", {}).get("percpu_usage") or []) or 1
+    cpu_pct = (cpu_delta / system_delta) * online_cpus * 100 if system_delta > 0 and cpu_delta > 0 else 0.0
+    mem = s.get("memory_stats", {}) or {}
+    mem_usage = mem.get("usage", 0)
+    cache = (mem.get("stats", {}) or {}).get("cache", 0) or (mem.get("stats", {}) or {}).get("inactive_file", 0)
+    rss_bytes = max(mem_usage - cache, 0)
+    mem_pct = (rss_bytes / total_mem_bytes * 100) if total_mem_bytes else 0.0
+    started = container.attrs.get("State", {}).get("StartedAt", "")
+    etime = "—"
+    if started:
+        try:
+            # StartedAt is RFC3339Nano; strip sub-second precision past 6 digits
+            # because fromisoformat in 3.12 still chokes on 9-digit nanos.
+            iso = started.rstrip("Z")
+            if "." in iso:
+                head, frac = iso.split(".")
+                iso = head + "." + frac[:6]
+            started_dt = datetime.fromisoformat(iso).replace(tzinfo=timezone.utc)
+            etime = _fmt_etime((datetime.now(timezone.utc) - started_dt).total_seconds())
+        except ValueError:
+            pass
+    name = container.name
+    image = (container.image.tags or [container.image.short_id])[0]
+    return {
+        "pid": container.short_id,
+        "cpuPct": round(cpu_pct, 1),
+        "memPct": round(mem_pct, 1),
+        "rssKb": rss_bytes // 1024,
+        "etime": etime,
+        "command": image,
+        "script": name,
+    }
+
+
+def _bilbo_containers() -> list[dict]:
+    """Bilbo + sibling containers as process-table rows.
+
+    Each container's stats() call is a 1-second sample on the Docker
+    daemon side, so we parallelize across containers via a small thread
+    pool to keep the endpoint snappy.
+    """
+    try:
+        import docker  # imported lazily — host-dev without docker still works
+        from concurrent.futures import ThreadPoolExecutor
+    except ImportError:
+        return []
+    try:
+        client = docker.from_env()
     except Exception:
         return []
-    rows = []
-    for line in out.splitlines()[1:]:  # skip header
-        parts = line.split(None, 5)
-        if len(parts) < 6:
-            continue
-        try:
-            rows.append({
-                "pid": int(parts[0]),
-                "cpuPct": float(parts[1]),
-                "memPct": float(parts[2]),
-                "rssKb": int(parts[3]),
-                "etime": parts[4],
-                "command": parts[5],
-            })
-        except ValueError:
-            continue
-    return rows
-
-
-def _short_command(cmd: str) -> str:
-    """Trim a full argv string to something readable in a table cell."""
-    # Keep the script basename if it's a python-runs-script invocation.
-    for token in cmd.split():
-        if token.endswith(".py"):
-            return Path(token).name
-    # Otherwise take the executable basename.
-    head = cmd.split(None, 1)[0] if cmd else ""
-    return Path(head).name or cmd[:40]
-
-
-def _classify(procs: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
-    """Return (top_by_cpu, top_by_memory, baby_monitor_processes).
-
-    Baby-monitor procs are extracted by keyword match on the full command;
-    they may also appear in the top-by-* lists if they're truly busy.
-
-    Top-by-memory is sorted by RSS (resident set size) — the actual memory
-    pages held in physical RAM. memPct from `ps` reflects the same value
-    relative to total system memory but RSS is what's user-meaningful when
-    looking at a single process.
-    """
-    bm = []
-    for p in procs:
-        script = next((k for k in BABY_MONITOR_KEYWORDS if k in p["command"]), None)
-        if script:
-            bm.append({**p, "script": script, "command": _short_command(p["command"])})
-    top_cpu = sorted(procs, key=lambda r: r["cpuPct"], reverse=True)[:8]
-    top_cpu = [{**p, "command": _short_command(p["command"])} for p in top_cpu]
-    top_mem = sorted(procs, key=lambda r: (r.get("rssKb") or 0), reverse=True)[:8]
-    top_mem = [{**p, "command": _short_command(p["command"])} for p in top_mem]
-    return top_cpu, top_mem, bm
+    try:
+        all_containers = client.containers.list()
+    except Exception:
+        return []
+    containers = [c for c in all_containers if any(c.name.startswith(p) for p in _BILBO_CONTAINER_PREFIXES)]
+    if not containers:
+        return []
+    mem = _memory()
+    total_mem = mem.get("totalBytes", 0)
+    with ThreadPoolExecutor(max_workers=min(len(containers), 6)) as pool:
+        rows = list(pool.map(lambda c: _container_stat(client, c, total_mem), containers))
+    return [r for r in rows if r]
 
 
 def gather() -> dict:
-    procs = _ps_full()
-    top_cpu, top_mem, bm_procs = _classify(procs)
+    containers = _bilbo_containers()
+    top_cpu = sorted(containers, key=lambda r: r["cpuPct"], reverse=True)[:8]
+    top_mem = sorted(containers, key=lambda r: r.get("rssKb") or 0, reverse=True)[:8]
     return {
         "asOf": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "load": _load(),
@@ -253,7 +293,7 @@ def gather() -> dict:
         "disk": _disk(),
         "babyMonitor": {
             "sizes": _baby_monitor_sizes(),
-            "processes": bm_procs,
+            "processes": containers,
         },
         "topProcesses": top_cpu,
         "topByMemory": top_mem,

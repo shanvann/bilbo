@@ -106,6 +106,20 @@ TELEGRAM_BOT_TOKEN="123456:ABC..."
 TELEGRAM_CHAT_ID="123456789"
 ```
 
+### Pretrained model weights
+
+The BIRDEYE cascade needs pretrained weights. The bootstrap script
+fetches the latest from [Shanit/BIRDEYE on Hugging Face](https://huggingface.co/Shanit/BIRDEYE)
+and points `pipeline/models/latest` at them:
+
+```bash
+./scripts/bootstrap-models.sh
+```
+
+These weights are trained on the maintainer's specific bassinet —
+they'll run on yours, but accuracy will improve as you retrain via
+the dashboard's correction loop (see [docs/training.md](docs/training.md)).
+
 ### Start the stack
 
 ```bash
@@ -173,7 +187,7 @@ All data files are gitignored:
 - `data/head-state.json` — last known head position
 - `data/watchdog-state.json` — capture-watchdog outage/recovery state machine
 - `data/system.log`, `data/cron-*.log` — system logs (rotating, 5 MB × 3)
-- `pipeline/models/` — versioned model checkpoints (last 20 kept) and the `latest` symlink
+- `pipeline/models/` — versioned model checkpoints (last 20 kept) and the `latest` symlink. Initial weights at [Shanit/BIRDEYE](https://huggingface.co/Shanit/BIRDEYE) on Hugging Face.
 - `pipeline/output/` — training data, validated face crops
 - `airgradient-logger/data/airgradient.db` — AirGradient time-series readings
 - `airgradient-logger/logs/` — logger stdout/stderr

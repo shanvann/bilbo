@@ -173,13 +173,28 @@ def _du_cached(path: Path) -> int | None:
     return size
 
 
+def _postgres_db_bytes() -> int | None:
+    """On-disk size of the Postgres database in bytes (None if unavailable).
+
+    Replaces the old `data/monitor.db` file-size stat — the DB is no longer a
+    single file on the shared volume.
+    """
+    try:
+        from bilbo.storage.db import get_connection  # noqa: PLC0415
+        row = get_connection().execute(
+            "SELECT pg_database_size(current_database()) AS n"
+        ).fetchone()
+        return row["n"] if row else None
+    except Exception:
+        return None
+
+
 def _baby_monitor_sizes() -> dict:
-    db_path = DATA_DIR / "monitor.db"
     return {
         "dataDirBytes": _du_cached(DATA_DIR),
         "framesDirBytes": _du_cached(DATA_DIR / "frames"),
         "modelsDirBytes": _du_cached(MODELS_DIR),
-        "monitorDbBytes": db_path.stat().st_size if db_path.exists() else None,
+        "monitorDbBytes": _postgres_db_bytes(),
     }
 
 

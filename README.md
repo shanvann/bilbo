@@ -17,7 +17,7 @@ stack.
 - **Capture watchdog** — runs as a background thread inside the capture container (every 2 min) and pings Telegram if no new frame has been written in `WATCHDOG_ALERT_AFTER_MIN` minutes. Catches RTSP outages, monitor crashes, container restarts.
 - **Dashboard** — live camera feed, timeline, frame-by-frame review with eye state correction, block-level labeling, model performance metrics, training stats, retrain button.
 - **Continuous improvement** — corrections from the dashboard feed retraining. Model versions are tracked with metrics, rollback support, and post-retrain re-inference. See [docs/training.md](docs/training.md).
-- **SQLite storage** — indexed queries; JSONL kept as append-only backup. See [docs/database-schema.md](docs/database-schema.md).
+- **Postgres storage** — indexed queries; the single source of truth, reached via `DATABASE_URL`. JSONL kept as append-only backup. (Migrated from SQLite, which corrupted under concurrent multi-container access over a macOS bind mount.) See [docs/database-schema.md](docs/database-schema.md).
 
 > **Note:** The camera only monitors the bassinet. Sleep elsewhere (stroller, arms, car seat) is not captured.
 
@@ -37,7 +37,7 @@ capture container (--loop, 60s) → capture frame (ffmpeg)
        `cloudUnavailable=true`, promote a `low_confidence` `eyeState`
        to a real `Awake`/`Asleep` rawState — the 4-of-6 temporal smoother
        still gates the smoothed `state`.
-  → Dual-write: SQLite (primary) + JSONL (append-only backup)
+  → Dual-write: Postgres (primary) + JSONL (append-only backup)
   → Temporal smoothing: 4-of-6 consecutive eyes_open/closed → Awake/Asleep
   → Unknown → Awake absorption (<15 min run before a confirmed Awake)
   → FallingAsleep putdown-pattern absorption
@@ -178,7 +178,7 @@ REST API: the dashboard reverse-proxies `/api/*` to `control-api:5556/api/v1/*`.
 All data files are gitignored:
 
 - `.env` — RTSP URL, API keys, credentials (whitelist `.env.example` is checked in)
-- `data/monitor.db` — SQLite database (primary storage)
+- Postgres database — primary storage, in the `pgdata` Docker named volume (not under `data/`; reached via `DATABASE_URL`)
 - `data/sleep-log.jsonl` — JSONL backup of all entries
 - `data/corrections.jsonl` — JSONL backup of corrections
 - `data/frames/` — captured camera frames (10 GB cap, ~17 days at 1-min intervals)

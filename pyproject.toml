@@ -17,6 +17,10 @@ dependencies = [
     "requests>=2.31",
     "python-dotenv>=1.0",
     "certifi",
+    # Postgres is the single source of truth (replaced the SQLite-over-bind-mount
+    # setup that corrupted under concurrent multi-container access). psycopg3
+    # binary build avoids needing libpq-dev in the slim images.
+    "psycopg[binary]>=3.1",
 ]
 
 [project.optional-dependencies]
@@ -73,6 +77,7 @@ bilbo-backfill-primary     = "bilbo.scripts.backfill_birdeye_primary:main"
 bilbo-bbox-impact          = "bilbo.scripts.bbox_impact:main"
 bilbo-promote-experiment   = "bilbo.scripts.promote_experiment:main"
 bilbo-experiments-backfill = "bilbo.scripts.experiments_backfill:main"
+bilbo-migrate-sqlite-to-pg = "bilbo.scripts.migrate_sqlite_to_postgres:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bilbo"]

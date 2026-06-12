@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Backfill the smoothed `state` field across existing entries.
 
-Walks `data/monitor.db` in timestamp order, applies `smooth_state_temporal`
+Walks the Postgres `entries` table in timestamp order, applies `smooth_state_temporal`
 against a rolling window of prior entries, and updates:
 
   - `entries.state` indexed column
@@ -22,11 +22,9 @@ STATE_CONFIRM_WINDOW / STATE_CONFIRM_RUN are adjusted.
 
 import argparse
 import json
-import sqlite3
-from pathlib import Path
+import sys
 
 from bilbo.config import (
-    DATA_DIR,
     FALLING_ASLEEP_MAX_MINUTES,
     STATE_CONFIRM_WINDOW,
     UNKNOWN_ABSORB_MAX_MINUTES,
@@ -36,21 +34,21 @@ from bilbo.state import _parse_ts, smooth_state_temporal
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--db", default=str(DATA_DIR / "monitor.db"),
-                    help="Path to monitor.db (defaults to data/monitor.db)")
     ap.add_argument("--dry-run", action="store_true",
                     help="Compute changes without writing")
     ap.add_argument("--verbose", action="store_true",
                     help="Print every changed entry (not just the summary)")
     args = ap.parse_args()
 
-    conn = sqlite3.connect(args.db)
-    conn.row_factory = sqlite3.Row
+    # Connection comes from DATABASE_URL (Postgres) via the shared helper.
+    from bilbo.storage.db import get_connection, get_db
+    get_db()  # ensure tables exist
+    conn = get_connection()
 
     rows = conn.execute(
         "SELECT timestamp, state, data FROM entries ORDER BY timestamp ASC"
     ).fetchall()
-    print(f"scanned {len(rows)} entries from {args.db}")
+    print(f"scanned {len(rows)} entries from Postgres")
 
     # --- Pass 1: smooth every entry ---
     # Rolling window of already-smoothed entries. We feed smoothed `state`
@@ -185,11 +183,12 @@ def main():
         return 0
 
     print(f"\nwriting {len(updates)} updates ...")
-    conn.executemany(
-        "UPDATE entries SET state = ?, data = ? WHERE timestamp = ?",
-        [(state, data, ts) for (ts, state, data) in updates],
-    )
-    conn.commit()
+    # One explicit transaction (autocommit conn) for atomicity + speed.
+    with conn.transaction(), conn.cursor() as cur:
+        cur.executemany(
+            "UPDATE entries SET state = %s, data = %s WHERE timestamp = %s",
+            [(state, data, ts) for (ts, state, data) in updates],
+        )
     print("done")
     return 0
 

@@ -182,16 +182,19 @@ Captured frames are needed for retraining classifiers, backtesting detection cha
 
 **Training-aware exception (issue #5).** `enforce_disk_limit()` skips pruning while a training run is active (`bilbo.training_state.is_running()`). Long trainings iterate `self.samples` populated at `__init__`; if retention deletes frames mid-run, `__getitem__` hits `None` images and recurse-resamples, which gets very slow once many adjacent samples go missing. Disk overshoot during a training run is bounded — at 1 frame/min × ~600 KB, a 6-hour run adds ~210 MB, well under the 10 GB cap.
 
-## Storage: SQLite vs JSONL
+## Storage: Postgres vs SQLite vs JSONL
 
 How to store and query monitoring data efficiently.
 
 | Approach | Read speed (24h query) | Write safety | Query flexibility |
 |----------|----------------------|-------------|-------------------|
-| JSONL only (old) | ~50ms (scan 2800 lines) | Append-only, no corruption | grep/jq only |
-| **SQLite + JSONL backup (chosen)** | **~6ms (indexed query)** | **Atomic writes, WAL mode** | **SQL aggregation** |
+| JSONL only (oldest) | ~50ms (scan 2800 lines) | Append-only, no corruption | grep/jq only |
+| SQLite + JSONL backup (superseded) | ~6ms (indexed query) | Atomic writes, WAL mode — **but corrupted under concurrent multi-container access** | SQL aggregation |
+| **Postgres + JSONL backup (chosen)** | **~6ms (indexed query)** | **Client/server — safe for concurrent writers** | **SQL aggregation** |
 
-**Decision:** SQLite as primary read/write, JSONL as append-only backup. Dashboard APIs went from ~50ms to ~6ms. Corrections count went from ~30ms (full scan) to ~0.1ms (indexed).
+**Decision:** Postgres as primary read/write, JSONL as append-only backup.
+
+**Why we left SQLite (migrated 2026-06-12).** The Docker stack runs ≥3 processes against the one DB — `capture` writing every minute, `control-api` serving the dashboard's reads continuously, and the on-demand `training` container — all opening the *same* SQLite file on a **macOS bind mount**. macOS bind mounts (VirtioFS / gRPC-FUSE) don't reliably honor the POSIX advisory locks and `-wal`/`-shm` shared-memory coordination SQLite's WAL mode depends on across processes. The result was on-disk corruption (`database disk image is malformed`) — the `entries` b-tree itself, twice (2026-05-26 and 2026-06-12). Capture kept inserting fine because new pages didn't touch the damaged region, but every analytics query that scanned them threw a 500. SQLite is excellent for a single process; it is the wrong tool for several containers sharing one file over a network/virtual filesystem. Postgres is a client/server DB built for exactly that concurrency, and its data lives in a named volume on the VM's own ext4 (not a bind mount), removing the failure mode entirely. The earlier SQLite move still stands on its merits (the ~50ms→~6ms dashboard win); Postgres keeps the indexed-query speed while fixing durability. Code impact was bounded because all DB access already funneled through `bilbo.storage.db` — see [docs/postgres-migration.md](postgres-migration.md) for the dialect deltas and the recovery/cutover runbook. Relocating Postgres off this host later is just a `DATABASE_URL` change.
 
 - **JSONL only** — simple, grep-friendly, but O(n) for every query. At 1440 frames/day, the file grows fast.
 - **SQLite + JSONL (chosen)** — indexed queries, atomic writes, SQL aggregation for dashboard stats. JSONL backup preserved for raw access and disaster recovery.

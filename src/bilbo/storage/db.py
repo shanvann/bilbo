@@ -1,8 +1,14 @@
-"""SQLite database for baby monitor — replaces JSONL/JSON file I/O.
+"""Postgres database for baby monitor — the single source of truth.
 
-Single file: data/monitor.db
 All read/write operations go through this module.
 JSONL remains as append-only backup (dual-write).
+
+Connection: psycopg3, one autocommit connection per thread (thread-local),
+``row_factory=dict_row`` so rows behave like the old ``sqlite3.Row`` mapping
+(``row["col"]``). The libpq connection string comes from
+``bilbo.config.DATABASE_URL``. Autocommit means every statement is its own
+transaction — matching the previous per-statement SQLite behaviour and the
+module's single-writer assumption (capture is the only steady writer).
 
 Usage:
     from bilbo.storage.db import get_db
@@ -16,34 +22,55 @@ Usage:
 
 import json
 import os
-import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from bilbo.config import DATA_DIR
+import psycopg
+from psycopg.rows import dict_row
 
-DB_PATH = DATA_DIR / "monitor.db"
+from bilbo.config import DATA_DIR, DATABASE_URL
+
+# SQL expression producing the UTC ISO-8601 'now' string the old code stored
+# via SQLite's strftime('%Y-%m-%dT%H:%M:%SZ','now'). Used as a column DEFAULT
+# and inline in set_state's upsert.
+_NOW_ISO_SQL = "to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')"
+
+
+def _et_date(col: str) -> str:
+    """SQL fragment bucketing an ISO-8601 timestamp *text* column into an ET
+    calendar-date string ('YYYY-MM-DD'). Postgres replacement for SQLite's
+    date(col, '-4 hours'); keeps the same static -4h ET assumption. Casts back
+    to text so the result is a plain string like the old code expected (not a
+    datetime.date that would break JSON serialization / dict keys).
+    """
+    return f"to_char(({col})::timestamptz - interval '4 hours', 'YYYY-MM-DD')"
+
 
 _local = threading.local()
 
 
-def get_connection() -> sqlite3.Connection:
-    """Get a thread-local database connection."""
-    if not hasattr(_local, "conn") or _local.conn is None:
-        _local.conn = sqlite3.connect(str(DB_PATH), timeout=10)
-        _local.conn.row_factory = sqlite3.Row
-        _local.conn.execute("PRAGMA journal_mode=WAL")
-        _local.conn.execute("PRAGMA synchronous=NORMAL")
-    return _local.conn
+def get_connection() -> psycopg.Connection:
+    """Get a thread-local autocommit Postgres connection (dict rows).
+
+    Reconnects transparently if the cached connection was closed or broken.
+    """
+    conn = getattr(_local, "conn", None)
+    if conn is None or conn.closed:
+        conn = psycopg.connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
+        _local.conn = conn
+    return conn
 
 
 def init_db():
-    """Create tables if they don't exist."""
+    """Create tables + indexes if they don't exist (idempotent)."""
     conn = get_connection()
-    conn.executescript("""
+    ddl = [
+        # psycopg3 runs one statement per execute() (extended protocol), so the
+        # old single executescript() is split into a list.
+        """
         CREATE TABLE IF NOT EXISTS entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             timestamp TEXT NOT NULL,
             frame TEXT,
             baby_present INTEGER,
@@ -61,16 +88,16 @@ def init_db():
             shadow_birdeye_eye TEXT,
             shadow_agreed INTEGER,
             shadow_timings_total REAL,
-            data JSON,
-            created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_entries_timestamp ON entries(timestamp);
-        CREATE INDEX IF NOT EXISTS idx_entries_detection ON entries(detection_method);
-        CREATE INDEX IF NOT EXISTS idx_entries_edited ON entries(eye_state_edited);
-
+            data TEXT,
+            created_at TEXT DEFAULT """ + _NOW_ISO_SQL + """
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_entries_timestamp ON entries(timestamp)",
+        "CREATE INDEX IF NOT EXISTS idx_entries_detection ON entries(detection_method)",
+        "CREATE INDEX IF NOT EXISTS idx_entries_edited ON entries(eye_state_edited)",
+        """
         CREATE TABLE IF NOT EXISTS corrections (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             corrected_at TEXT NOT NULL,
             original_timestamp TEXT NOT NULL,
             frame TEXT,
@@ -81,36 +108,40 @@ def init_db():
             detection_method TEXT,
             source TEXT DEFAULT 'dashboard',
             used_in_training TEXT
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_corrections_corrected_at ON corrections(corrected_at);
-        CREATE INDEX IF NOT EXISTS idx_corrections_trained ON corrections(used_in_training);
-
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_corrections_corrected_at ON corrections(corrected_at)",
+        "CREATE INDEX IF NOT EXISTS idx_corrections_trained ON corrections(used_in_training)",
+        """
         CREATE TABLE IF NOT EXISTS training_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             version TEXT NOT NULL,
             timestamp TEXT NOT NULL,
             entries_total INTEGER,
-            label_sources JSON,
-            split JSON,
-            config JSON,
-            metrics JSON,
+            label_sources TEXT,
+            split TEXT,
+            config TEXT,
+            metrics TEXT,
             models_trained TEXT,
             duration_seconds REAL,
             started_at TEXT,
             finished_at TEXT
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_training_version ON training_runs(version);
-
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_training_version ON training_runs(version)",
+        """
         CREATE TABLE IF NOT EXISTS state (
             key TEXT PRIMARY KEY,
-            value JSON,
-            updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        );
-    """)
+            value TEXT,
+            updated_at TEXT DEFAULT """ + _NOW_ISO_SQL + """
+        )
+        """,
+    ]
+    for stmt in ddl:
+        conn.execute(stmt)
 
-    # Idempotent migrations for existing DBs
+    # Idempotent migrations for existing DBs. Postgres supports ADD COLUMN
+    # IF NOT EXISTS natively, so no try/except dance is needed.
     for table, col, decl in (
         ("training_runs", "duration_seconds", "REAL"),
         ("training_runs", "started_at", "TEXT"),
@@ -123,12 +154,7 @@ def init_db():
         ("entries", "shadow_birdeye_present", "INTEGER"),
         ("entries", "shadow_birdeye_eye", "TEXT"),
     ):
-        try:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
-        except sqlite3.OperationalError:
-            pass  # column already exists
-
-    conn.commit()
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {decl}")
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +256,7 @@ def insert_entry(entry: dict):
             presence_confidence, eye_confidence, diff_score,
             shadow_birdeye_present, shadow_birdeye_eye, shadow_agreed,
             shadow_timings_total, data
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
         entry.get("timestamp"),
         entry.get("frame"),
@@ -251,7 +277,6 @@ def insert_entry(entry: dict):
         shadow.get("birdeyeTimings", {}).get("total") if isinstance(shadow.get("birdeyeTimings"), dict) else None,
         json.dumps(entry),
     ))
-    conn.commit()
 
 
 def get_entries(hours: float = None, start: str = None, end: str = None,
@@ -263,13 +288,13 @@ def get_entries(hours: float = None, start: str = None, end: str = None,
 
     if hours is not None:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        conditions.append("timestamp >= ?")
+        conditions.append("timestamp >= %s")
         params.append(cutoff)
     if start:
-        conditions.append("timestamp >= ?")
+        conditions.append("timestamp >= %s")
         params.append(start)
     if end:
-        conditions.append("timestamp <= ?")
+        conditions.append("timestamp <= %s")
         params.append(end)
 
     where = " WHERE " + " AND ".join(conditions) if conditions else ""
@@ -290,7 +315,7 @@ def get_last_entry() -> dict | None:
 def get_recent_entries(n: int) -> list[dict]:
     """Get the last N entries."""
     conn = get_connection()
-    rows = conn.execute("SELECT data FROM entries ORDER BY timestamp DESC LIMIT ?", (n,)).fetchall()
+    rows = conn.execute("SELECT data FROM entries ORDER BY timestamp DESC LIMIT %s", (n,)).fetchall()
     return [json.loads(row["data"]) for row in reversed(rows)]
 
 
@@ -305,15 +330,15 @@ def get_state_transitions(start: str, end: str | None = None) -> list[dict]:
     pre-window state)."""
     conn = get_connection()
     seed = conn.execute(
-        "SELECT state FROM entries WHERE timestamp < ? ORDER BY timestamp DESC LIMIT 1",
+        "SELECT state FROM entries WHERE timestamp < %s ORDER BY timestamp DESC LIMIT 1",
         (start,),
     ).fetchone()
     prev = seed["state"] if seed else None
 
-    where = "WHERE timestamp >= ?"
+    where = "WHERE timestamp >= %s"
     params: list = [start]
     if end:
-        where += " AND timestamp <= ?"
+        where += " AND timestamp <= %s"
         params.append(end)
     rows = conn.execute(
         f"SELECT timestamp, state FROM entries {where} ORDER BY timestamp ASC",
@@ -339,7 +364,7 @@ def find_current_run_start(baby_present: bool, state: str | None) -> str | None:
     # Most recent entry that breaks the run.
     row = conn.execute(
         "SELECT timestamp FROM entries "
-        "WHERE baby_present IS NOT ? OR state IS NOT ? "
+        "WHERE baby_present IS DISTINCT FROM %s OR state IS DISTINCT FROM %s "
         "ORDER BY timestamp DESC LIMIT 1",
         (bp, state),
     ).fetchone()
@@ -349,7 +374,7 @@ def find_current_run_start(baby_present: bool, state: str | None) -> str | None:
         ).fetchone()
         return first["timestamp"] if first else None
     next_row = conn.execute(
-        "SELECT timestamp FROM entries WHERE timestamp > ? "
+        "SELECT timestamp FROM entries WHERE timestamp > %s "
         "ORDER BY timestamp ASC LIMIT 1",
         (row["timestamp"],),
     ).fetchone()
@@ -359,7 +384,7 @@ def find_current_run_start(baby_present: bool, state: str | None) -> str | None:
 def update_entry(timestamp: str, updates: dict) -> bool:
     """Update fields on an entry by timestamp. Returns True if found."""
     conn = get_connection()
-    row = conn.execute("SELECT data FROM entries WHERE timestamp = ?", (timestamp,)).fetchone()
+    row = conn.execute("SELECT data FROM entries WHERE timestamp = %s", (timestamp,)).fetchone()
     if not row:
         return False
 
@@ -379,13 +404,13 @@ def update_entry(timestamp: str, updates: dict) -> bool:
     # filter on the typed column, not the JSON blob).
     conn.execute("""
         UPDATE entries SET
-            baby_present = ?,
-            state = ?, eye_state = ?, eye_state_edited = ?,
-            eye_state_corrected_at = ?, shadow_model_version = ?,
-            shadow_birdeye_present = ?, shadow_birdeye_eye = ?,
-            shadow_agreed = ?, shadow_timings_total = ?,
-            data = ?
-        WHERE timestamp = ?
+            baby_present = %s,
+            state = %s, eye_state = %s, eye_state_edited = %s,
+            eye_state_corrected_at = %s, shadow_model_version = %s,
+            shadow_birdeye_present = %s, shadow_birdeye_eye = %s,
+            shadow_agreed = %s, shadow_timings_total = %s,
+            data = %s
+        WHERE timestamp = %s
     """, (
         1 if entry.get("babyPresent") else 0,
         entry.get("state"),
@@ -400,7 +425,6 @@ def update_entry(timestamp: str, updates: dict) -> bool:
         json.dumps(entry),
         timestamp,
     ))
-    conn.commit()
     return True
 
 
@@ -409,7 +433,7 @@ def get_entry_count(hours: float = None) -> int:
     conn = get_connection()
     if hours is not None:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        row = conn.execute("SELECT COUNT(*) as cnt FROM entries WHERE timestamp >= ?", (cutoff,)).fetchone()
+        row = conn.execute("SELECT COUNT(*) as cnt FROM entries WHERE timestamp >= %s", (cutoff,)).fetchone()
     else:
         row = conn.execute("SELECT COUNT(*) as cnt FROM entries").fetchone()
     return row["cnt"]
@@ -433,7 +457,7 @@ def get_timeline(hours: float = None, date: str = None) -> list[dict]:
 
     rows = conn.execute("""
         SELECT data FROM entries
-        WHERE timestamp >= ? AND timestamp < ?
+        WHERE timestamp >= %s AND timestamp < %s
         ORDER BY timestamp ASC
     """, (start, end)).fetchall()
     return [json.loads(row["data"]) for row in rows]
@@ -452,7 +476,7 @@ def get_monitor_stats(hours: float = 24) -> dict:
     methods = {}
     for row in conn.execute("""
         SELECT detection_method, COUNT(*) as cnt
-        FROM entries WHERE timestamp >= ?
+        FROM entries WHERE timestamp >= %s
         GROUP BY detection_method
     """, (cutoff,)):
         methods[row["detection_method"] or "unknown"] = row["cnt"]
@@ -466,14 +490,14 @@ def get_monitor_stats(hours: float = 24) -> dict:
             SUM(CASE WHEN shadow_agreed = 1 THEN 1 ELSE 0 END) as agreed,
             SUM(CASE WHEN shadow_agreed = 0 THEN 1 ELSE 0 END) as disagreed
         FROM entries
-        WHERE timestamp >= ? AND shadow_agreed IS NOT NULL
+        WHERE timestamp >= %s AND shadow_agreed IS NOT NULL
     """, (cutoff,)).fetchone()
 
     # Confidence and timing stats from shadow data
     conf_rows = conn.execute("""
         SELECT presence_confidence, eye_confidence, shadow_timings_total
         FROM entries
-        WHERE timestamp >= ?
+        WHERE timestamp >= %s
           AND (presence_confidence IS NOT NULL OR shadow_timings_total IS NOT NULL)
     """, (cutoff,)).fetchall()
 
@@ -497,7 +521,7 @@ def get_monitor_stats(hours: float = 24) -> dict:
     # Gaps > 10 min
     gap_count = 0
     ts_rows = conn.execute("""
-        SELECT timestamp FROM entries WHERE timestamp >= ? ORDER BY timestamp
+        SELECT timestamp FROM entries WHERE timestamp >= %s ORDER BY timestamp
     """, (cutoff,)).fetchall()
     for i in range(1, len(ts_rows)):
         try:
@@ -512,7 +536,7 @@ def get_monitor_stats(hours: float = 24) -> dict:
     cloud_models = {}
     for row in conn.execute("""
         SELECT model_used, COUNT(*) as cnt FROM entries
-        WHERE timestamp >= ? AND detection_method IN ('vision-api', 'openai-vision')
+        WHERE timestamp >= %s AND detection_method IN ('vision-api', 'openai-vision')
         GROUP BY model_used
     """, (cutoff,)):
         cloud_models[row["model_used"] or "unknown"] = row["cnt"]
@@ -525,7 +549,7 @@ def get_monitor_stats(hours: float = 24) -> dict:
     birdeye_versions: dict[str, int] = {}
     for row in conn.execute("""
         SELECT shadow_model_version, COUNT(*) as cnt FROM entries
-        WHERE timestamp >= ? AND detection_method = 'birdeye'
+        WHERE timestamp >= %s AND detection_method = 'birdeye'
         GROUP BY shadow_model_version
         ORDER BY cnt DESC
     """, (cutoff,)):
@@ -576,10 +600,9 @@ def get_monitor_stats(hours: float = 24) -> dict:
 # Per-call cost assumption — matches get_monitor_stats above.
 _CLOUD_API_COST_PER_CALL = 0.01
 
-# ET offset in SQLite's `date(ts, '-N hours')` grouping. We use the same
-# static -4h assumption as dashboard/app.py's ET constant. Good enough for
-# daily bucketing; DST drift only shifts midnight boundaries by an hour.
-_ET_SHIFT = "-4 hours"
+# ET-day bucketing uses the module-level `_et_date()` helper (static -4h ET
+# assumption, matching dashboard/app.py's ET constant). Good enough for daily
+# bucketing; DST drift only shifts midnight boundaries by an hour.
 
 
 def get_pipeline_history(days: int = 14) -> dict:
@@ -602,18 +625,18 @@ def get_pipeline_history(days: int = 14) -> dict:
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     method_rows = conn.execute(f"""
-        SELECT date(timestamp, '{_ET_SHIFT}') AS et_date,
+        SELECT {_et_date('timestamp')} AS et_date,
                detection_method, COUNT(*) AS n
         FROM entries
-        WHERE timestamp >= ?
+        WHERE timestamp >= %s
         GROUP BY et_date, detection_method
     """, (cutoff,)).fetchall()
 
     version_rows = conn.execute(f"""
-        SELECT date(timestamp, '{_ET_SHIFT}') AS et_date,
+        SELECT {_et_date('timestamp')} AS et_date,
                shadow_model_version, COUNT(*) AS n
         FROM entries
-        WHERE timestamp >= ? AND shadow_model_version IS NOT NULL
+        WHERE timestamp >= %s AND shadow_model_version IS NOT NULL
         GROUP BY et_date, shadow_model_version
         ORDER BY et_date ASC, n DESC
     """, (cutoff,)).fetchall()
@@ -687,7 +710,7 @@ def insert_correction(correction: dict):
             original_state, corrected_state,
             original_eye_state, corrected_eye_state,
             detection_method, source
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
         correction.get("correctedAt"),
         correction.get("originalTimestamp"),
@@ -699,7 +722,6 @@ def insert_correction(correction: dict):
         correction.get("detectionMethod"),
         correction.get("source", "dashboard"),
     ))
-    conn.commit()
 
 
 def mark_reviewed(timestamps: list[str]) -> int:
@@ -713,18 +735,17 @@ def mark_reviewed(timestamps: list[str]) -> int:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     updated = 0
     for ts in timestamps:
-        row = conn.execute("SELECT data FROM entries WHERE timestamp = ?", (ts,)).fetchone()
+        row = conn.execute("SELECT data FROM entries WHERE timestamp = %s", (ts,)).fetchone()
         if not row:
             continue
         entry = json.loads(row["data"])
         entry["reviewed"] = True
         entry["reviewedAt"] = now
         conn.execute("""
-            UPDATE entries SET reviewed = 1, reviewed_at = ?, data = ?
-            WHERE timestamp = ?
+            UPDATE entries SET reviewed = 1, reviewed_at = %s, data = %s
+            WHERE timestamp = %s
         """, (now, json.dumps(entry), ts))
         updated += 1
-    conn.commit()
     return updated
 
 
@@ -754,7 +775,7 @@ def get_pending_corrections_count(last_trained: str = None) -> tuple[int, int]:
     if not last_trained:
         return total, total
     pending = conn.execute(
-        "SELECT COUNT(*) as cnt FROM corrections WHERE corrected_at > ?",
+        "SELECT COUNT(*) as cnt FROM corrections WHERE corrected_at > %s",
         (last_trained,)
     ).fetchone()["cnt"]
     return total, pending
@@ -777,7 +798,7 @@ def get_pending_corrections(last_trained: str = None) -> list[dict]:
                    e.presence_confidence, e.eye_confidence
             FROM corrections c
             LEFT JOIN entries e ON e.timestamp = c.original_timestamp
-            WHERE c.corrected_at > ?
+            WHERE c.corrected_at > %s
             ORDER BY c.corrected_at DESC
         """, (last_trained,)).fetchall()
     else:
@@ -827,16 +848,15 @@ def resolve_correction(correction_id: int, new_eye_state: str, now: str) -> dict
     """
     conn = get_connection()
     row = conn.execute(
-        "SELECT original_timestamp FROM corrections WHERE id = ?",
+        "SELECT original_timestamp FROM corrections WHERE id = %s",
         (correction_id,),
     ).fetchone()
     if row is None:
         return None
     conn.execute(
-        "UPDATE corrections SET corrected_eye_state = ?, corrected_at = ? WHERE id = ?",
+        "UPDATE corrections SET corrected_eye_state = %s, corrected_at = %s WHERE id = %s",
         (new_eye_state, now, correction_id),
     )
-    conn.commit()
     return {
         "id": correction_id,
         "originalTimestamp": row["original_timestamp"],
@@ -852,8 +872,7 @@ def delete_correction(correction_id: int) -> bool:
     user does not want to label. Returns True if a row was removed.
     """
     conn = get_connection()
-    cur = conn.execute("DELETE FROM corrections WHERE id = ?", (correction_id,))
-    conn.commit()
+    cur = conn.execute("DELETE FROM corrections WHERE id = %s", (correction_id,))
     return cur.rowcount > 0
 
 
@@ -869,7 +888,7 @@ def insert_training_run(run: dict):
             version, timestamp, entries_total, label_sources,
             split, config, metrics, models_trained,
             duration_seconds, started_at, finished_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
         run.get("version"),
         run.get("timestamp"),
@@ -883,7 +902,6 @@ def insert_training_run(run: dict):
         run.get("started_at"),
         run.get("finished_at"),
     ))
-    conn.commit()
 
 
 def get_last_training_runs(n: int = 2) -> list[dict]:
@@ -893,7 +911,7 @@ def get_last_training_runs(n: int = 2) -> list[dict]:
         SELECT version, timestamp, entries_total, label_sources,
                split, config, metrics, models_trained,
                duration_seconds, started_at, finished_at
-        FROM training_runs ORDER BY timestamp DESC LIMIT ?
+        FROM training_runs ORDER BY timestamp DESC LIMIT %s
     """, (n,)).fetchall()
     result = []
     for row in rows:
@@ -933,7 +951,7 @@ def get_last_trained_per_classifier() -> dict:
     }
     result: dict = {}
     for key, accepted in mapping.items():
-        placeholders = ",".join("?" * len(accepted))
+        placeholders = ",".join(["%s"] * len(accepted))
         row = conn.execute(
             f"SELECT timestamp, version FROM training_runs "
             f"WHERE models_trained IN ({placeholders}) "
@@ -956,7 +974,7 @@ def update_training_run_metrics(version: str, updates: dict) -> bool:
     """
     conn = get_connection()
     row = conn.execute(
-        "SELECT metrics FROM training_runs WHERE version = ? LIMIT 1",
+        "SELECT metrics FROM training_runs WHERE version = %s LIMIT 1",
         (version,),
     ).fetchone()
     if row is None:
@@ -967,10 +985,9 @@ def update_training_run_metrics(version: str, updates: dict) -> bool:
         existing = {}
     existing.update(updates)
     conn.execute(
-        "UPDATE training_runs SET metrics = ? WHERE version = ?",
+        "UPDATE training_runs SET metrics = %s WHERE version = %s",
         (json.dumps(existing), version),
     )
-    conn.commit()
     return True
 
 
@@ -1149,7 +1166,7 @@ def get_safety_stats(hours: float = 168) -> dict:
         SELECT COUNT(*) as total,
                SUM(CASE WHEN shadow_birdeye_present IS NOT NULL THEN 1 ELSE 0 END) as with_shadow
         FROM entries
-        WHERE timestamp >= ? AND baby_present = 1
+        WHERE timestamp >= %s AND baby_present = 1
     """, (cutoff,)).fetchone()
 
     # ----- Deployed model version -----
@@ -1167,7 +1184,7 @@ def get_safety_stats(hours: float = 168) -> dict:
     # ----- Face detection stats (windowed) -----
     face_rows = conn.execute("""
         SELECT data FROM entries
-        WHERE timestamp >= ?
+        WHERE timestamp >= %s
           AND baby_present = 1
           AND shadow_birdeye_present IS NOT NULL
     """, (cutoff,)).fetchall()
@@ -1314,7 +1331,7 @@ def get_eye_state_daily_metrics(days: int = 14) -> dict:
     eye_classes = ("eyes_open", "eyes_closed")
 
     rows = conn.execute(f"""
-        SELECT date(e.timestamp, '{_ET_SHIFT}') AS et_date,
+        SELECT {_et_date('e.timestamp')} AS et_date,
                e.timestamp,
                e.state AS cloud_state,
                e.eye_state AS cloud_eye_state,
@@ -1326,7 +1343,7 @@ def get_eye_state_daily_metrics(days: int = 14) -> dict:
                c.corrected_state
         FROM entries e
         LEFT JOIN corrections c ON c.original_timestamp = e.timestamp
-        WHERE e.timestamp >= ?
+        WHERE e.timestamp >= %s
           AND (e.reviewed = 1 OR e.eye_state_edited = 1)
         ORDER BY e.timestamp ASC
     """, (cutoff,)).fetchall()
@@ -1430,9 +1447,9 @@ def get_experiment_stats(name: str, hours: float = 168) -> dict:
         SELECT timestamp, eye_state, eye_state_edited, reviewed, baby_present,
                shadow_birdeye_eye, data
         FROM entries
-        WHERE timestamp >= ?
+        WHERE timestamp >= %s
           AND baby_present = 1
-          AND data LIKE '%experiments%'
+          AND data LIKE '%%experiments%%'
         """,
         (cutoff,),
     ).fetchall()
@@ -1583,7 +1600,7 @@ def get_training_duration_stats() -> dict:
 def get_state(key: str) -> dict | None:
     """Get a state value by key."""
     conn = get_connection()
-    row = conn.execute("SELECT value FROM state WHERE key = ?", (key,)).fetchone()
+    row = conn.execute("SELECT value FROM state WHERE key = %s", (key,)).fetchone()
     return json.loads(row["value"]) if row else None
 
 
@@ -1592,12 +1609,11 @@ def set_state(key: str, value: dict):
     conn = get_connection()
     conn.execute("""
         INSERT INTO state (key, value, updated_at)
-        VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        VALUES (%s, %s, """ + _NOW_ISO_SQL + """)
         ON CONFLICT(key) DO UPDATE SET
             value = excluded.value,
             updated_at = excluded.updated_at
     """, (key, json.dumps(value)))
-    conn.commit()
 
 
 # ---------------------------------------------------------------------------

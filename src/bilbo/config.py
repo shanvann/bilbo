@@ -46,6 +46,17 @@ JSONL_FILE = DATA_DIR / "sleep-log.jsonl"
 PROMPT_FILE = REFERENCES_DIR / "prompt.md"
 REFS_DIR = DATA_DIR / "references"
 
+# ---------------------------------------------------------------------------
+# Database (Postgres — the single source of truth; JSONL stays as backup)
+# ---------------------------------------------------------------------------
+#   DATABASE_URL — libpq connection string. In Docker it's injected per
+#   container (capture is on host networking so it points at 127.0.0.1:5432;
+#   control-api/training use the compose DNS name `postgres:5432`). The host-dev
+#   default below assumes a local Postgres reachable on localhost.
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgresql://bilbo:bilbo@localhost:5432/bilbo"
+)
+
 MAX_FRAMES_KB = 10 * 1024 * 1024  # 10 GB (~17 days at 1-min intervals; was ~67 days at 4-min. Oldest-first pruning kicks in at the cap.)
 
 # ---------------------------------------------------------------------------

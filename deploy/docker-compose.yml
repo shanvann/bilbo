@@ -1,15 +1,45 @@
-# BILBO 3-container stack (the 4th, `training`, is on-demand via Docker
-# socket from control-api — see bilbo.training_state.start).
+# BILBO 4-container stack: postgres + capture + control-api + dashboard.
+# (A 5th, `training`, is on-demand via the Docker socket from control-api —
+# see bilbo.training_state.start.)
 #
 # Run from repo root:
 #   cp .env.example .env && $EDITOR .env
 #   docker compose -f deploy/docker-compose.yml up -d --build
 #
-# Volumes are bind mounts so the SQLite DB, model weights, JSONL log,
-# frame archive, and alert state survive container restarts and are
-# directly inspectable on the host.
+# The data/ bind mount holds model weights, the JSONL log, frame archive, and
+# alert state (survives restarts, directly inspectable on the host). The
+# database itself now lives in the `pgdata` named volume, NOT a bind mount —
+# the macOS bind mount is precisely what corrupted SQLite under concurrent
+# multi-container access.
 
 services:
+
+  # -----------------------------------------------------------------------
+  # postgres — the single source of truth (replaced the SQLite-over-bind-mount
+  # setup that corrupted under concurrent multi-container access). Data lives
+  # in a named volume (real ext4 in the Docker VM, NOT a macOS bind mount,
+  # which is what broke SQLite's locking). Published on host loopback so the
+  # host-networked `capture` service can reach it at 127.0.0.1:5432; the
+  # bridge services use the `postgres` DNS name on the shared network.
+  # Override the password by exporting POSTGRES_PASSWORD (shell or deploy/.env).
+  # -----------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: bilbo-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bilbo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bilbo}
+      POSTGRES_DB: bilbo
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bilbo -d bilbo"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   # -----------------------------------------------------------------------
   # capture — the per-minute RTSP+BIRDEYE pipeline + watchdog + warm-torch
@@ -30,9 +60,17 @@ services:
     restart: unless-stopped
     network_mode: host
     command: ["bilbo-capture"]
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - ../data:/app/data
       - ../pipeline/models:/app/pipeline/models
+    environment:
+      # Host-networked, so it reaches Postgres via the host-published loopback
+      # port, not the `postgres` compose DNS name. (`environment` overrides
+      # anything of the same name in env_file.)
+      DATABASE_URL: "postgresql://bilbo:${POSTGRES_PASSWORD:-bilbo}@127.0.0.1:5432/bilbo"
     env_file:
       - ../.env
 
@@ -50,7 +88,11 @@ services:
         BILBO_EXTRAS: control-api
     image: bilbo-control-api:latest
     container_name: bilbo-control-api
-    depends_on: [capture]
+    depends_on:
+      capture:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     command: ["gunicorn", "-w", "2", "-b", "0.0.0.0:5556", "bilbo.http.app:app"]
     ports:
@@ -77,6 +119,11 @@ services:
       BILBO_HOST_DATA: "${PWD}/data"
       BILBO_HOST_MODELS: "${PWD}/pipeline/models"
       BILBO_TRAINING_IMAGE: "bilbo:latest"
+      # Bridge service — reaches Postgres via the compose DNS name.
+      DATABASE_URL: "postgresql://bilbo:${POSTGRES_PASSWORD:-bilbo}@postgres:5432/bilbo"
+      # The on-demand training container is spawned on this Docker network so
+      # it too can resolve the `postgres` hostname (see bilbo.training_state).
+      BILBO_TRAINING_NETWORK: "bilbo-net"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
@@ -104,7 +151,20 @@ services:
 
 # The training service is intentionally NOT defined here. control-api
 # spawns it on demand via the Docker socket using `bilbo:latest`, with the
-# host data and models directories bind-mounted in. It auto-removes when
-# the run completes; the new versioned model dir + the `latest` symlink
-# flip happen on the shared pipeline/models/ volume, and the capture
-# container's `maybe_reload_classifiers()` picks it up on the next tick.
+# host data and models directories bind-mounted in. It joins the `bilbo-net`
+# network (BILBO_TRAINING_NETWORK) so it can reach `postgres`, and gets
+# control-api's DATABASE_URL passed through. It auto-removes when the run
+# completes; the new versioned model dir + the `latest` symlink flip happen
+# on the shared pipeline/models/ volume, and the capture container's
+# `maybe_reload_classifiers()` picks it up on the next tick.
+
+volumes:
+  # Postgres data — a named volume on the Docker VM's own filesystem, the key
+  # fix vs the old SQLite file on a macOS bind mount.
+  pgdata:
+
+networks:
+  # Rename the compose default network so its name is stable and the on-demand
+  # training container (spawned outside compose) can attach to it by name.
+  default:
+    name: bilbo-net

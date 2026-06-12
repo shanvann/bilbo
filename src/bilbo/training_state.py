@@ -188,18 +188,29 @@ def start(args: list[str] | None = None, *, trigger: str = "dashboard") -> dict:
     env = {k: v for k, v in os.environ.items() if k.startswith(("OPENAI_", "BILBO_", "TELEGRAM_", "RTSP_"))}
     # The training container picks up the host env file from its bind-mounted
     # data/ — but the secrets are also fine to pass via env directly.
+    # DATABASE_URL doesn't match the prefixes above, but the training run
+    # writes its training_runs row to Postgres, so pass it through explicitly.
+    db_url = os.environ.get("DATABASE_URL")
+    if db_url:
+        env["DATABASE_URL"] = db_url
 
     command = ["bilbo-train", *(args or [])]
+    # Join the same Docker network as control-api so the `postgres` hostname in
+    # DATABASE_URL resolves (the container is spawned outside compose, on the
+    # default bridge, unless we attach it explicitly).
+    run_kwargs = dict(
+        command=command,
+        name=CONTAINER_NAME,
+        volumes=volumes,
+        environment=env,
+        detach=True,
+        auto_remove=True,
+    )
+    network = os.environ.get("BILBO_TRAINING_NETWORK")
+    if network:
+        run_kwargs["network"] = network
     try:
-        container = client.containers.run(
-            IMAGE,
-            command=command,
-            name=CONTAINER_NAME,
-            volumes=volumes,
-            environment=env,
-            detach=True,
-            auto_remove=True,
-        )
+        container = client.containers.run(IMAGE, **run_kwargs)
     except Exception as e:  # noqa: BLE001 — docker.errors plus transport
         return {
             "ok": False,

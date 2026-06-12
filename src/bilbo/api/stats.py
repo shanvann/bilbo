@@ -631,12 +631,12 @@ def pipeline_health() -> dict:
         }
 
     actual_24h = conn.execute(
-        "SELECT COUNT(*) FROM entries WHERE timestamp > ?", (cutoff_str,),
-    ).fetchone()[0]
+        "SELECT COUNT(*) AS c FROM entries WHERE timestamp > %s", (cutoff_str,),
+    ).fetchone()["c"]
     nominal_per_24h = (24 * 3600) // PIPELINE_NOMINAL_INTERVAL_SEC
 
     rows = conn.execute(
-        "SELECT timestamp FROM entries WHERE timestamp > ? ORDER BY timestamp ASC",
+        "SELECT timestamp FROM entries WHERE timestamp > %s ORDER BY timestamp ASC",
         (cutoff_str,),
     ).fetchall()
     gap_items = []
@@ -672,7 +672,7 @@ def pipeline_health() -> dict:
 
     method_rows = conn.execute(
         "SELECT detection_method, COUNT(*) c FROM entries "
-        "WHERE timestamp > ? GROUP BY detection_method ORDER BY c DESC",
+        "WHERE timestamp > %s GROUP BY detection_method ORDER BY c DESC",
         (cutoff_str,),
     ).fetchall()
     total_methods = sum(r["c"] for r in method_rows) or 1
@@ -685,31 +685,34 @@ def pipeline_health() -> dict:
         for r in method_rows
     ]
 
+    # data is a TEXT column holding the entry JSON; cast to jsonb and use ->>
+    # to read keys (Postgres has no SQLite json_extract). cloudUnavailable is
+    # stored as JSON `true`, so ->> yields the text 'true'.
     cloud_attempted = conn.execute(
-        "SELECT COUNT(*) FROM entries WHERE timestamp > ? "
-        "AND json_extract(data, '$.birdeyeFallback') IS NOT NULL",
+        "SELECT COUNT(*) AS c FROM entries WHERE timestamp > %s "
+        "AND (data::jsonb ->> 'birdeyeFallback') IS NOT NULL",
         (cutoff_str,),
-    ).fetchone()[0]
+    ).fetchone()["c"]
     cloud_succeeded = conn.execute(
-        "SELECT COUNT(*) FROM entries WHERE timestamp > ? "
+        "SELECT COUNT(*) AS c FROM entries WHERE timestamp > %s "
         "AND detection_method = 'vision-api'",
         (cutoff_str,),
-    ).fetchone()[0]
+    ).fetchone()["c"]
     cloud_failed = conn.execute(
-        "SELECT COUNT(*) FROM entries WHERE timestamp > ? "
-        "AND json_extract(data, '$.cloudUnavailable') = 1",
+        "SELECT COUNT(*) AS c FROM entries WHERE timestamp > %s "
+        "AND (data::jsonb ->> 'cloudUnavailable') IN ('1', 'true')",
         (cutoff_str,),
-    ).fetchone()[0]
+    ).fetchone()["c"]
     quota_exhausted = conn.execute(
-        "SELECT COUNT(*) FROM entries WHERE timestamp > ? "
-        "AND json_extract(data, '$.cloudUnavailable') = 1 "
-        "AND json_extract(data, '$.cloudUnavailableReason') "
-        "    LIKE '%exceeded your current quota%'",
+        "SELECT COUNT(*) AS c FROM entries WHERE timestamp > %s "
+        "AND (data::jsonb ->> 'cloudUnavailable') IN ('1', 'true') "
+        "AND (data::jsonb ->> 'cloudUnavailableReason') "
+        "    LIKE '%%exceeded your current quota%%'",
         (cutoff_str,),
-    ).fetchone()[0]
+    ).fetchone()["c"]
     last_failure_row = conn.execute(
-        "SELECT timestamp, json_extract(data, '$.cloudUnavailableReason') AS reason "
-        "FROM entries WHERE json_extract(data, '$.cloudUnavailable') = 1 "
+        "SELECT timestamp, (data::jsonb ->> 'cloudUnavailableReason') AS reason "
+        "FROM entries WHERE (data::jsonb ->> 'cloudUnavailable') IN ('1', 'true') "
         "ORDER BY timestamp DESC LIMIT 1"
     ).fetchone()
     last_failure = None
@@ -787,14 +790,15 @@ def classification_rate(*, hours: int = 24, bucket_min: int = 60) -> dict:
 
     rows = conn.execute(
         "SELECT timestamp, detection_method, "
-        "       json_extract(data, '$.birdeyeFallback')   AS birdeye_fallback, "
-        "       json_extract(data, '$.cloudUnavailable')  AS cloud_unavailable "
-        "FROM entries WHERE timestamp > ?",
+        "       (data::jsonb ->> 'birdeyeFallback')  AS birdeye_fallback, "
+        "       (data::jsonb ->> 'cloudUnavailable') AS cloud_unavailable "
+        "FROM entries WHERE timestamp > %s",
         (cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),),
     ).fetchall()
 
     def classify(r) -> str:
-        if r["cloud_unavailable"] in (1, "1", True):
+        # cloud_unavailable comes back as jsonb-text now ('true'), not int 1.
+        if r["cloud_unavailable"] in (1, "1", True, "true"):
             return "cloud-failed"
         m = r["detection_method"]
         if m == "vision-api":

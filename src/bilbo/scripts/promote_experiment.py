@@ -385,7 +385,7 @@ def patch_training_runs_metrics(ctx: dict, dry_run: bool):
     # pipeline/models/experiments/<tag>/training-log.jsonl.
     conn = get_connection()
     exp_row = conn.execute(
-        "SELECT metrics FROM training_runs WHERE version = ?",
+        "SELECT metrics FROM training_runs WHERE version = %s",
         (ctx["exp_version"],),
     ).fetchone()
     if exp_row:
@@ -420,7 +420,7 @@ def patch_training_runs_metrics(ctx: dict, dry_run: bool):
     )
 
     prod_row = conn.execute(
-        "SELECT metrics FROM training_runs WHERE version = ?",
+        "SELECT metrics FROM training_runs WHERE version = %s",
         (deployed,),
     ).fetchone()
     if not prod_row:
@@ -436,10 +436,9 @@ def patch_training_runs_metrics(ctx: dict, dry_run: bool):
         )
         return
     conn.execute(
-        "UPDATE training_runs SET metrics = ? WHERE version = ?",
+        "UPDATE training_runs SET metrics = %s WHERE version = %s",
         (json.dumps(prod_metrics), deployed),
     )
-    conn.commit()
     print(f"  → patched training_runs row {deployed} eye_state metrics")
 
 
@@ -450,7 +449,7 @@ def cleanup_stale_experiment_keys(ctx: dict, dry_run: bool):
     prod), and leaving them would confuse the Shadow Experiments card
     on the dashboard if the experiment later got re-registered.
     """
-    import sqlite3  # noqa: PLC0415
+    from bilbo.storage.db import get_connection  # noqa: PLC0415
 
     # The experiment name we're stripping is whatever manifest entry
     # pointed at this tag. Match by experiment_tag.
@@ -463,13 +462,14 @@ def cleanup_stale_experiment_keys(ctx: dict, dry_run: bool):
         print(f"  no manifest entry for tag {ctx['tag']!r} — nothing to strip")
         return
 
-    conn = sqlite3.connect(str(DATA_DIR / "monitor.db"))
-    conn.row_factory = sqlite3.Row
+    conn = get_connection()
     updated = 0
     for promoted_name in promoted_names:
+        # `%` lives in the bound parameter, not the query text, so psycopg
+        # passes it through literally — no %%-escaping needed here.
         like_pat = f"%{promoted_name}%"
         rows = conn.execute(
-            "SELECT timestamp, data FROM entries WHERE data LIKE ?",
+            "SELECT timestamp, data FROM entries WHERE data LIKE %s",
             (like_pat,),
         ).fetchall()
         for r in rows:
@@ -486,12 +486,10 @@ def cleanup_stale_experiment_keys(ctx: dict, dry_run: bool):
                     d.pop("experiments", None)
                 if not dry_run:
                     conn.execute(
-                        "UPDATE entries SET data = ? WHERE timestamp = ?",
+                        "UPDATE entries SET data = %s WHERE timestamp = %s",
                         (json.dumps(d), r["timestamp"]),
                     )
                 updated += 1
-    if not dry_run:
-        conn.commit()
     suffix = " (dry-run)" if dry_run else ""
     print(f"  → stripped {updated} stale {promoted_names} keys{suffix}")
 

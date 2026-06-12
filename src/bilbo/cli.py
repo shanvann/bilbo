@@ -997,7 +997,7 @@ def _reinfer_corrections_against_current_model(
             # entry wins for anything in JSONL (so the retrain's shadow
             # / eyeState updates still take effect).
             existing_row = conn.execute(
-                "SELECT data FROM entries WHERE timestamp = ?", (ts,)
+                "SELECT data FROM entries WHERE timestamp = %s", (ts,)
             ).fetchone()
             merged = dict(entry)
             if existing_row and existing_row["data"]:
@@ -1011,15 +1011,15 @@ def _reinfer_corrections_against_current_model(
 
             conn.execute("""
                 UPDATE entries SET
-                    data = ?,
-                    shadow_birdeye_present = ?,
-                    shadow_birdeye_eye = ?,
-                    shadow_agreed = ?,
-                    presence_confidence = ?,
-                    eye_confidence = ?,
-                    shadow_timings_total = ?,
-                    shadow_model_version = ?
-                WHERE timestamp = ?
+                    data = %s,
+                    shadow_birdeye_present = %s,
+                    shadow_birdeye_eye = %s,
+                    shadow_agreed = %s,
+                    presence_confidence = %s,
+                    eye_confidence = %s,
+                    shadow_timings_total = %s,
+                    shadow_model_version = %s
+                WHERE timestamp = %s
             """, (
                 json.dumps(merged),
                 bird_present,
@@ -1031,7 +1031,6 @@ def _reinfer_corrections_against_current_model(
                 entry.get("shadowModelVersion"),
                 ts,
             ))
-        conn.commit()
         log.info("reinfer: updated %d entries in SQLite", updated)
 
     return total_reinfer, agreed_after, correction_class_counts, presence_class_counts, eye_confusion_pairs, pres_confusion_pairs

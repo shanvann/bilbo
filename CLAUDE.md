@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-BILBO — a baby bassinet monitor. A Python pipeline captures RTSP frames every minute, runs BIRDEYE (MobileNetV3 cascade) on-device as the primary decider, falls back to GPT-4o as a cloud backstop on ~1% of frames, dual-writes to SQLite + JSONL, and serves a Flask dashboard for review/correction/retraining.
+BILBO — a baby bassinet monitor. A Python pipeline captures RTSP frames every minute, runs BIRDEYE (MobileNetV3 cascade) on-device as the primary decider, falls back to GPT-4o as a cloud backstop on ~1% of frames, dual-writes to Postgres + JSONL, and serves a Flask dashboard for review/correction/retraining.
 
-`README.md` is the reference for the SQLite schema and the design-decision tradeoffs. Read it before touching the DB or revisiting a past tradeoff. This file is the fastest summary.
+`README.md` is the reference for the DB schema and the design-decision tradeoffs. Read it before touching the DB or revisiting a past tradeoff. This file is the fastest summary.
 
 The repo is packaged as `pip install -e .` (see `pyproject.toml`) and runs as a 4-container Docker stack (see `deploy/`). The previous launchd setup is gone.
 
@@ -25,7 +25,7 @@ bilbo/
 │   ├── training_state.py           # Docker-SDK control plane for the training container
 │   ├── state.py, alerts.py, experiments.py, cli.py
 │   ├── pipeline/                   # capture, classifiers, local_pipeline, vision, detect
-│   ├── storage/                    # db.py (SQLite, single source of truth), files.py (JSONL)
+│   ├── storage/                    # db.py (Postgres, single source of truth), files.py (JSONL)
 │   ├── api/                        # the bilbo.api.* Python contract
 │   │   ├── entries, training, corrections, frames, stats, recap,
 │   │   ├── inference (POSTs to capture:5557/infer)
@@ -39,12 +39,12 @@ bilbo/
 ├── deploy/
 │   ├── Dockerfile                  # bilbo image (BILBO_EXTRAS build arg)
 │   ├── Dockerfile.dashboard        # lightweight dashboard image
-│   └── docker-compose.yml          # 3 always-on services
+│   └── docker-compose.yml          # 4 always-on services (postgres + capture + control-api + dashboard)
 ├── report/                         # sibling skill, untouched by the refactor
 ├── airgradient-logger/             # sibling skill, untouched (has own Dockerfile)
 ├── references/                     # prompt.md + baby-profile.md (ships in the image)
 ├── docs/                           # bilbo.png hero + shadow-to-prod-playbook.md
-├── data/                           # gitignored: SQLite, JSONL, frames, alert state, logs
+├── data/                           # gitignored: JSONL, frames, alert state, logs (DB now lives in the postgres named volume)
 └── pipeline/                       # gitignored: models/v_*/* + the `latest` symlink
 ```
 
@@ -62,7 +62,7 @@ docker compose -f deploy/docker-compose.yml exec capture bilbo-monitor --status
 docker compose -f deploy/docker-compose.yml down             # stop everything
 ```
 
-Stack: `capture` (RTSP + BIRDEYE + watchdog + POST /infer), `control-api` (Flask :5556), `dashboard` (Flask :5555 → reverse proxy). The `training` container is on-demand: control-api spawns it via the mounted Docker socket when the dashboard's Retrain button is clicked.
+Stack: `postgres` (the single-source-of-truth DB, named volume `pgdata`), `capture` (RTSP + BIRDEYE + watchdog + POST /infer), `control-api` (Flask :5556), `dashboard` (Flask :5555 → reverse proxy). The `training` container is on-demand: control-api spawns it via the mounted Docker socket when the dashboard's Retrain button is clicked — it joins the `bilbo-net` network and inherits `DATABASE_URL` so it can reach `postgres`.
 
 ### Local (host) development
 
@@ -107,11 +107,11 @@ python scripts/report.py --range 1h --section monitor  # quick post-deploy check
 ## Architecture pointers (read README for the full story)
 
 - **BIRDEYE-primary pipeline** — `frame → pixel-diff → BIRDEYE → cloud API only on BIRDEYE fallback`. BIRDEYE handles ~99% of non-empty frames; the cloud API runs only on `no_face_detected`, `low_confidence`, or hard error. Cost is ~$0.01/day vs ~$1.17/day pre-flip. The legacy `shadow_birdeye_*` columns and the entry's `shadow` sub-dict are an immutable audit trail of what BIRDEYE said, kept separate from the user-facing primary fields which can be corrected via the dashboard.
-- **BIRDEYE is 3-stage** — (1) presence classifier (MobileNetV3-Small, bassinet crop), (2) face detector (trainable MobileNetV3 primary, YuNet ONNX fallback), (3) eye-state classifier (MobileNetV3-Small, face crop from bbox). If both detectors fail, falls back to a head-position crop from the cloud API's last known coordinates.
+- **BIRDEYE is 3-stage (+ a 2.5 retry)** — (1) presence classifier (MobileNetV3-Small, bassinet crop), (2) face detector (trainable MobileNetV3 primary, YuNet ONNX fallback), (3) eye-state classifier (MobileNetV3-Small, face crop from bbox). **Stage 2.5:** if both detectors miss on the full bassinet crop, retry them on a tighter `HEAD_CROP_SIZE` crop centered on the last-known head position (`crop_head_region_in_bassinet`), then translate the bbox back to bassinet-crop coords (`_translate_to_bassinet_coords`); only if that also misses does it fall through to `no_face_detected` → cloud. The head-position prior in `data/head-state.json` is now kept warm by BIRDEYE itself — every successful Stage-3 detection writes it back with `source="birdeye"` (the cloud API still writes it with `source="cloud-api"` on its ~1% of frames). Coord transforms: `full_frame_to_bassinet_coords` / `bassinet_to_full_frame_coords` in `pipeline/classifiers.py`.
 - **Single inference entry point** — `bilbo.pipeline.local_pipeline.run_birdeye_inference(frame_path)` is the **only** function callers should use. Both `bilbo.monitor` (live capture) and `bilbo.scripts.run_single_inference` (dashboard re-run) go through it. `birdeye_result_to_shadow_blob()` is the matching helper for the audit-trail dict shape. Don't call `try_local_analysis` directly.
 - **Hot reload** — `bilbo.pipeline.local_pipeline.maybe_reload_classifiers()` is called once per tick by `bilbo-monitor --loop`; it compares the cached `_loaded_model_version` (from `pipeline/models/latest`) against the current readlink and drops the singletons when the symlink flips. A retrain takes effect within the next minute without restarting the capture container.
 - **Edge alert (`check_edge_alert`) is currently disabled** — it reads `entry["bassinetLocation"]` which only the cloud API populates. Post-flip the cloud API runs on ~1% of frames so the alert effectively dies. Tracked in github issue #3 — a trained `BassinetLocationClassifier` will restore it.
-- **Storage** — `data/monitor.db` (SQLite, WAL mode) is primary; `data/sleep-log.jsonl` is an append-only backup. Read paths must use SQLite via `bilbo.storage.db`. Writes are dual-write.
+- **Storage** — **Postgres** (named via `DATABASE_URL`, the `postgres` compose service) is primary; `data/sleep-log.jsonl` is an append-only backup. Read paths must go through `bilbo.storage.db` (psycopg3, one autocommit thread-local connection with `dict_row`; placeholders are `%s`). Writes are dual-write. The previous SQLite-over-bind-mount DB corrupted twice under concurrent multi-container access — Postgres eliminates that failure mode. One-time SQLite→Postgres loader: `bilbo-migrate-sqlite-to-pg --sqlite <recovered.db>`. **Exception:** `bilbo.api.air_quality` still reads the *AirGradient logger's* separate SQLite DB read-only (`AIRGRADIENT_DB_PATH`) — that one is single-writer and stays SQLite.
 - **Wake / asleep alerts** — the authoritative transition signal is the smoothed `state` column; the legacy 2-of-3-last-entries check in `alerts.py` is strictly weaker than the smoother and is kept only as a prior-Asleep gate + cooldown guard before firing. Wake alerts fire on Asleep→Awake (with feedback buttons); asleep alerts fire only on Awake→Asleep — placed-already-asleep (Unknown/not_present → Asleep) is intentionally skipped so putdowns don't ping.
 - **Temporal state smoothing** — the primary `state` field is smoothed at write time in `monitor.py`. Within the last 6 baby-present frames, a run of 4 consecutive `eyes_open` → `Awake`, 4 consecutive `eyes_closed` → `Asleep`, otherwise carry forward (or `Unknown`). Thresholds in `bilbo.config.STATE_CONFIRM_WINDOW` / `STATE_CONFIRM_RUN`. The unsmoothed per-frame value is preserved in `rawState`. **Unknown → Awake absorption** (helper `bilbo.state.unknown_prefix_to_absorb`) and **putdown-pattern absorption → FallingAsleep** (helper `bilbo.state.putdown_prefix_to_absorb`) run in the live path and as pass-3 of `bilbo-backfill-state`.
 - **Model versioning** — `pipeline/models/v_YYYYMMDD_HHMMSS/` with a `latest` symlink, last 20 kept. Each training run writes a `training_runs` row with full metrics; rollback flips the symlink. `run_birdeye_inference` reads the symlink target and tags every result with `shadowModelVersion`.
